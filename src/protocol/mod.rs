@@ -6,6 +6,9 @@
 //! with the client rather than a local optimisation.
 
 pub mod chunk;
+
+#[cfg(test)]
+mod chunk_reference;
 pub mod configuration;
 pub mod frame;
 pub mod handshake;

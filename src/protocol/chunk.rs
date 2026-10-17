@@ -49,33 +49,52 @@ pub const RADIUS: i32 = 4;
 /// the table to be indexed by name at run time for no gain.
 pub const AIR_STATE_ID: i32 = 0;
 
-/// The biome id used for an empty world.
+/// The biome id for the world this server generates.
 ///
-/// Zero is `minecraft:badlands` in the 26.3 registry, which is the first entry
-/// the server sends. Any valid id works here since no terrain is generated to
-/// disagree with it.
-pub const DEFAULT_BIOME_ID: i32 = 0;
+/// Forty-one, which is what a real 26.3 server sent in the capture. It is the
+/// flat world's own biome, and since this generator makes grass hills that is
+/// the right one to pick.
+///
+/// Not zero. Zero is `minecraft:badlands` in the 26.3 registry, which was the
+/// guess before there was a capture to check against, and it would have tinted
+/// every blade of grass wrong. The registry order is not reported by the data
+/// generator, so the number could not have been derived; it could only be read.
+pub const DEFAULT_BIOME_ID: i32 = 41;
 
 /// Bits a heightmap entry needs.
 ///
 /// Heights run from -65 (an empty column) to 320 (the top of the world plus one),
 /// so 386 distinct values and nine bits.
-const HEIGHTMAP_BITS: usize = 9;
+pub const HEIGHTMAP_BITS: usize = 9;
 
 /// Entries in one heightmap: one per column.
-const HEIGHTMAP_ENTRIES: usize = (WIDTH * WIDTH) as usize;
+pub const HEIGHTMAP_ENTRIES: usize = (WIDTH * WIDTH) as usize;
 
 /// Heightmap types the client is sent.
 ///
-/// The enum in the decompiled source gives each type a number, and only two of
-/// them are marked for the client: the other three are for world generation and
-/// for the server's own use. Sending them would be ignored.
+/// Three, not two. The enum marks four of the seven for the client and one of
+/// those turned out to be one the capture has and this did not:
+///
+/// ```text
+/// // captured, walking the heightmap map of a real chunk
+/// type 1  WORLD_SURFACE
+/// type 4  MOTION_BLOCKING
+/// type 5  MOTION_BLOCKING_NO_LEAVES
+/// ```
+///
+/// Sent one fewer is not an error: the client reads the count and takes what it
+/// is given. But the capture is the ground truth and it has three.
 pub mod heightmap {
     /// Height of the first non-air block, used for lighting and for clouds.
     pub const WORLD_SURFACE: i32 = 1;
     /// Height of the first motion-blocking or fluid block.
     pub const MOTION_BLOCKING: i32 = 4;
+    /// As MOTION_BLOCKING, but leaves do not count as blocking.
+    pub const MOTION_BLOCKING_NO_LEAVES: i32 = 5;
 }
+
+/// How many heightmaps are sent.
+pub const HEIGHTMAP_COUNT: i32 = 3;
 
 /// Writes `ClientboundLevelChunkWithLightPacket` for one chunk.
 ///
@@ -124,9 +143,13 @@ pub mod id {
 /// empty column has no block to record, and the client only uses these to decide
 /// where clouds and lighting sit, neither of which is visible yet.
 fn write_heightmaps(out: &mut Vec<u8>) {
-    VarInt(2).write(out);
+    VarInt(HEIGHTMAP_COUNT).write(out);
 
-    for kind in [heightmap::WORLD_SURFACE, heightmap::MOTION_BLOCKING] {
+    for kind in [
+        heightmap::WORLD_SURFACE,
+        heightmap::MOTION_BLOCKING,
+        heightmap::MOTION_BLOCKING_NO_LEAVES,
+    ] {
         VarInt(kind).write(out);
         write_heightmap_bits(out);
     }
@@ -157,7 +180,7 @@ fn write_heightmap_bits(out: &mut Vec<u8>) {
 /// The client uses the block count to decide whether a section is worth building
 /// geometry for, so a section full of stone that claims to hold zero blocks is
 /// skipped. Both counts are zero only when the section really is empty.
-fn write_sections(out: &mut Vec<u8>, sections: &[Vec<i32>]) {
+pub fn write_sections(out: &mut Vec<u8>, sections: &[Vec<i32>]) {
     assert_eq!(
         sections.len(),
         SECTIONS,
@@ -207,10 +230,10 @@ fn write_single_value_palette(out: &mut Vec<u8>, value: i32) {
 /// So a palette of four blocks is stored at four bits an entry, not two. Writing
 /// the minimum would be smaller and would decode as the wrong blocks, since the
 /// reader derives the layout from this byte rather than from the palette.
-const BLOCK_BITS: usize = 4;
+pub const BLOCK_BITS: usize = 4;
 
 /// Entries in a block state container: one section.
-const BLOCK_ENTRIES: usize = SECTION_VOLUME;
+pub const BLOCK_ENTRIES: usize = SECTION_VOLUME;
 
 /// Re-exported so a decoder outside this module can size its own loop.
 pub const BLOCK_ENTRIES_DIV: usize = BLOCK_ENTRIES;
@@ -370,7 +393,7 @@ mod tests {
     }
 
     /// Twenty-four sections of air, which is what an empty chunk is.
-    fn empty_sections() -> Vec<Vec<i32>> {
+    pub fn empty_sections() -> Vec<Vec<i32>> {
         vec![vec![AIR_STATE_ID; BLOCK_ENTRIES]; SECTIONS]
     }
 

@@ -1,5 +1,5 @@
 [package]
-name = "minec-server"
+name = "filament"
 version = "0.1.0"
 edition = "2024"
 
@@ -21,7 +21,7 @@ bytemuck = { version = "1.25.2", features = ["derive"] }
 # rayon = "1.10"
 
 [lib]
-name = "minec_server"
+name = "filament"
 path = "src/lib.rs"
 
 [profile.dev]

@@ -23,7 +23,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "minec-server"
+name = "filament"
 version = "0.1.0"
 dependencies = [
  "bytemuck",

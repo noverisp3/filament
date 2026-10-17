@@ -112,7 +112,7 @@ impl std::fmt::Display for Uuid {
 /// The id is ignored in offline mode. Reading it rather than skipping it keeps
 /// the reader positioned for whatever follows.
 pub fn read_hello(body: &[u8]) -> Result<(String, Uuid), DecodeError> {
-    let mut r = &body[..];
+    let mut r = body;
 
     let (VarInt(id), _) = VarInt::read(&mut r)?;
     if id != id::SERVERBOUND_HELLO {

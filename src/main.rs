@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     log::note(format!("filament listening on {addr}"));
     log::note(format!("protocol {}", server::PROTOCOL_VERSION));
-    log::note(format!("max players 20"));
+    log::note("max players 20");
     log::note("login is implemented; configuration and the world are not yet");
 
     server.serve_forever();

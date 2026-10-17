@@ -165,13 +165,13 @@ fn login(stream: &mut TcpStream, log: ConnLog) -> std::io::Result<()> {
             }
             dec.queue(&scratch[..n]);
 
-            while let Some(frame) = dec.next_frame().map_err(io_err)? {
+            // One frame is expected here, but `while let` is wrong for that:
+            // breaking out of it is a break with no condition, which reads like
+            // a loop that cannot terminate and is flagged as one. Only the first
+            // frame is wanted, so the rest is drained below.
+            if let Some(frame) = dec.next_frame().map_err(io_err)? {
                 let id = packet_id_of(&frame);
-                log.in_packet(
-                    &packet_name("login-s2c", id),
-                    "login",
-                    frame.len(),
-                );
+                log.in_packet(&packet_name("login-s2c", id), "login", frame.len());
 
                 match read_hello(&frame) {
                     Ok((name, _)) => break 'hello name,

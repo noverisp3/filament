@@ -82,7 +82,6 @@ impl ClientIntention {
         let (protocol_version, _) = VarInt::read(&mut r)?;
 
         // 255, not the 32767 other strings allow: this field is a hostname.
-        let mut limit = r.len().min(MAX_HOST_LENGTH);
         let (VarInt(len_raw), _) = VarInt::read(&mut r)?;
         if len_raw < 0 {
             return Err(DecodeError::TooLong);
@@ -91,7 +90,7 @@ impl ClientIntention {
         if len > MAX_HOST_LENGTH || len > r.len() {
             return Err(DecodeError::StringTooLong {
                 len,
-                available: limit,
+                available: r.len(),
             });
         }
         let host = std::str::from_utf8(&r[..len])

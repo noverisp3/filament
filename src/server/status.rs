@@ -546,7 +546,12 @@ fn play(
     p::write_chunk_batch_start(&mut body);
     enc.encode(&body, &mut out).map_err(io_err)?;
 
-    let mut sent = 0;
+    // The chunks the client is holding. Filled by the spawn batch below, and
+    // compared against the set it should be holding on every pass after, so
+    // both directions are known: what arrived and what left.
+    let mut sent: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
+
+    let mut sent_count = 0;
     for ring in 0..=radius {
         let mut chunks: Vec<(i32, i32)> = Vec::new();
         for dx in -ring..=ring {
@@ -578,7 +583,8 @@ fn play(
             let mut body = Vec::new();
             crate::protocol::chunk::write_chunk_with_states(&mut body, dx, dz, &sections);
             enc.encode(&body, &mut out).map_err(io_err)?;
-            sent += 1;
+            sent_count += 1;
+            sent.insert((dx, dz));
             if super::log::verbose() {
                 log.out_packet("level_chunk_with_light", "play", body.len());
             }
@@ -586,10 +592,10 @@ fn play(
     }
     let mut body = Vec::new();
     // The count is how many chunks the batch held, which is the number just sent.
-    p::write_chunk_batch_finished(&mut body, sent);
+    p::write_chunk_batch_finished(&mut body, sent_count);
     enc.encode(&body, &mut out).map_err(io_err)?;
 
-    log.note(format!("sent {sent} chunks around the spawn"));
+    log.note(format!("sent {sent_count} chunks around the spawn"));
 
     stream.write_all(&out)?;
     stream.flush()?;
@@ -617,12 +623,6 @@ fn play(
     // Where the player is, updated by the movement packets. The spawn is where
     // the teleport above put it.
     let mut player = spawn;
-    // The square of chunks already sent, as its south-west and north-east
-    // corners. Starts as the spawn batch: the radius around (0, 0).
-    let mut sent_min = (-radius, -radius);
-    let mut sent_max = (radius, radius);
-    // Chunks this pass found the player wanting, drained into the next write.
-    let mut pending: Vec<(i32, i32)> = Vec::new();
     // The cache center the client was last told about. The client keeps chunks
     // only within the view distance of this point, so it has to move with the
     // player: left at the spawn forever, the world renders as a fixed window
@@ -703,28 +703,6 @@ fn play(
             (player.z as i32).div_euclid(16),
         );
 
-        // Whether the sent square still holds the player's chunk with a margin
-        // of the same radius the first batch used. Without the margin the edge
-        // would arrive as the player crosses it, which is a wall of unrendered
-        // terrain appearing at a run.
-        let want_min = (
-            player_chunk.0 - radius,
-            player_chunk.1 - radius,
-        );
-        let want_max = (
-            player_chunk.0 + radius,
-            player_chunk.1 + radius,
-        );
-
-        // Grow the sent square until it covers the wanted one. Each step sends
-        // one row or column, so a diagonal walk sends both, and a sprint across
-        // several chunks sends several at once.
-        //
-        // The square only grows here; it never shrinks. Chunks the client has
-        // dropped are dropped, and resending them would be a new batch for a
-        // place the player has left.
-        let mut sent_now = 0i32;
-
         // The cache center moves with the player, and it has to move even when
         // no chunk follows: the client drops chunks outside the view distance
         // of it, so leaving it behind means chunks arriving that the client
@@ -737,56 +715,70 @@ fn play(
             center_sent = player_chunk;
         }
 
-        while sent_min.0 > want_min.0 {
-            sent_min.0 -= 1;
-            for dz in sent_min.1..=sent_max.1 {
-                pending.push((sent_min.0, dz));
-                sent_now += 1;
-            }
-        }
-        while sent_max.0 < want_max.0 {
-            sent_max.0 += 1;
-            for dz in sent_min.1..=sent_max.1 {
-                pending.push((sent_max.0, dz));
-                sent_now += 1;
-            }
-        }
-        while sent_min.1 > want_min.1 {
-            sent_min.1 -= 1;
-            for dx in sent_min.0..=sent_max.0 {
-                pending.push((dx, sent_min.1));
-                sent_now += 1;
-            }
-        }
-        while sent_max.1 < want_max.1 {
-            sent_max.1 += 1;
-            for dx in sent_min.0..=sent_max.0 {
-                pending.push((dx, sent_max.1));
-                sent_now += 1;
+        // The set of chunks the client should be holding: a square of the view
+        // radius around the player. The game sends a square too, so this is not
+        // a smaller world than the client expects.
+        //
+        // What was missing was the other half. The set this is compared against
+        // only ever grew, so every chunk the player ever walked past stayed
+        // loaded on both sides and was paid for again on every subsequent
+        // move.
+        let mut wanted = std::collections::HashSet::with_capacity(((2 * radius + 1) * (2 * radius + 1)) as usize);
+        for dx in -radius..=radius {
+            for dz in -radius..=radius {
+                wanted.insert((player_chunk.0 + dx, player_chunk.1 + dz));
             }
         }
 
-        if !pending.is_empty() {
-            // The batch pair again, for the same reason as the first one: the
-            // client measures how fast chunks arrive and decides how far ahead
-            // to ask for them. A finish without a start is a measurement of
-            // nothing.
+        // New: wanted but not yet sent. Gone: sent but no longer wanted.
+        //
+        // Sorted, so the same walk produces the same bytes in the same order,
+        // which is what makes a session reproducible.
+        let arriving: Vec<(i32, i32)> = wanted.difference(&sent).copied().collect();
+        let leaving: Vec<(i32, i32)> = sent.difference(&wanted).copied().collect();
+
+        if !arriving.is_empty() || !leaving.is_empty() {
             let mut body = Vec::new();
             p::write_chunk_batch_start(&mut body);
             enc.encode(&body, &mut out).map_err(io_err)?;
 
-            for (dx, dz) in std::mem::take(&mut pending) {
-                send_one_chunk(&mut out, &mut enc, &mut world, dx, dz)?;
+            let mut sorted = arriving.clone();
+            sorted.sort_unstable();
+
+            for (dx, dz) in &sorted {
+                send_one_chunk(&mut out, &mut enc, &mut world, *dx, *dz)?;
+                sent.insert((*dx, *dz));
             }
 
             let mut body = Vec::new();
-            p::write_chunk_batch_finished(&mut body, sent_now);
+            p::write_chunk_batch_finished(&mut body, sorted.len() as i32);
             enc.encode(&body, &mut out).map_err(io_err)?;
+
+            // The forgets go after the batch, and each is its own packet. They
+            // are the client dropping chunks, so they are not part of a chunk
+            // batch: the batch pair brackets chunks arriving, not leaving.
+            let mut dropped = leaving.clone();
+            dropped.sort_unstable();
+            for (dx, dz) in &dropped {
+                let mut body = Vec::new();
+                p::write_forget_chunk(&mut body, *dx, *dz);
+                let mut wire = Vec::new();
+                enc.encode(&body, &mut wire).map_err(io_err)?;
+                out.extend_from_slice(&wire);
+                sent.remove(&(*dx, *dz));
+                world.forget_chunk(crate::world::pos::ChunkPos { x: *dx, z: *dz });
+            }
+
             stream.write_all(&out)?;
             stream.flush()?;
-            log.note(format!(
-                "{sent_now} chunks followed the player to {player_chunk:?}"
-            ));
+
+            if !sorted.is_empty() {
+                log.note(format!(
+                    "{} chunks arrived and {} were let go at {player_chunk:?}",
+                    sorted.len(),
+                    dropped.len()
+                ));
+            }
         } else if !out.is_empty() {
             // The center moved without any chunk following it, which is what
             // happens on a diagonal walk back through ground already sent.

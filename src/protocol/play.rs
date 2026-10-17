@@ -59,6 +59,8 @@ pub mod id {
 
     // The clientbound packet that tells the client one block changed.
     pub const BLOCK_UPDATE: i32 = 8;
+    // The clientbound packet that tells the client to drop a chunk.
+    pub const FORGET_LEVEL_CHUNK: i32 = 38;
 }
 
 /// Writes `ClientboundLoginPacket`.
@@ -458,6 +460,17 @@ pub fn pack_block_pos(x: i32, y: i32, z: i32) -> i64 {
     const VERTICAL: i64 = (1 << 12) - 1;
 
     ((x as i64 & HORIZONTAL) << 38) | ((z as i64 & HORIZONTAL) << 12) | (y as i64 & VERTICAL)
+}
+
+/// Writes a `forget_level_chunk`, telling the client to drop a chunk.
+///
+/// Without this the client's chunk cache only ever grows, and the server's
+/// memory goes with it: every chunk ever visited stays loaded on both sides
+/// for the length of the session.
+pub fn write_forget_chunk(out: &mut Vec<u8>, chunk_x: i32, chunk_z: i32) {
+    VarInt(id::FORGET_LEVEL_CHUNK).write(out);
+    VarInt(chunk_x).write(out);
+    VarInt(chunk_z).write(out);
 }
 
 /// Writes a `block_update` for one block.
@@ -899,6 +912,25 @@ mod tests {
         assert_eq!(w[1], 19, "key length");
         assert_eq!(&w[2..21], b"minecraft:overworld");
         assert_eq!(w.len(), 37, "the capture's length for this packet");
+    }
+
+    #[test]
+    fn a_forget_packet_is_a_chunk_coordinate_pair() {
+        let mut out = Vec::new();
+        write_forget_chunk(&mut out, -7, 12);
+
+        let mut r = &out[..];
+        let (id, used_id) = VarInt::read(&mut r).expect("an id");
+        assert_eq!(id.0, id::FORGET_LEVEL_CHUNK);
+        let (x, used_x) = VarInt::read(&mut r).expect("an x");
+        let (z, used_z) = VarInt::read(&mut r).expect("a z");
+        assert_eq!((x.0, z.0), (-7, 12));
+        // A negative coordinate costs five bytes, so this is not a flat three.
+        assert_eq!(
+            used_id + used_x + used_z,
+            out.len(),
+            "the packet ends after the pair"
+        );
     }
 
     #[test]

@@ -94,6 +94,16 @@ impl World {
         false
     }
 
+    /// Drops a chunk and its edits.
+    ///
+    /// Called when the player walks out of range of it. The terrain comes back
+    /// identically if they walk back, since the generator is deterministic, but
+    /// anything the player built in it does not: that lived only in the stored
+    /// copy, and this is the code that decides how long a build is kept.
+    pub fn forget_chunk(&mut self, pos: ChunkPos) -> bool {
+        self.chunks.remove(&pos).is_some()
+    }
+
     /// Builds a world of generated terrain.
     ///
     /// Takes the chunk radius to generate along each axis.

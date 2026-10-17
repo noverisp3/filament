@@ -50,6 +50,15 @@ pub mod id {
     pub const MOVE_PLAYER_POS_ROT: i32 = 31;
     pub const MOVE_PLAYER_ROT: i32 = 32;
     pub const MOVE_PLAYER_STATUS_ONLY: i32 = 33;
+
+    // Breaking a block: the client sends this with START_DESTROY when the
+    // button goes down and STOP_DESTROY when the block is gone.
+    pub const SERVERBOUND_PLAYER_ACTION: i32 = 41;
+    // Placing a block: the client sends this when the player clicks a face.
+    pub const SERVERBOUND_USE_ITEM_ON: i32 = 66;
+
+    // The clientbound packet that tells the client one block changed.
+    pub const BLOCK_UPDATE: i32 = 8;
 }
 
 /// Writes `ClientboundLoginPacket`.
@@ -344,6 +353,124 @@ fn read_u8(r: &mut &[u8]) -> Result<u8, DecodeError> {
     Ok(byte)
 }
 
+/// A signed 64-bit integer straight off the wire, which is how a block position
+/// travels: one long holding the x, y and z packed together.
+fn read_i64(r: &mut &[u8]) -> Result<i64, DecodeError> {
+    if r.len() < 8 {
+        return Err(DecodeError::UnexpectedEof {
+            wanted: "a long",
+            got: r.len(),
+        });
+    }
+    let bytes: [u8; 8] = r[..8].try_into().unwrap();
+    *r = &r[8..];
+    Ok(i64::from_be_bytes(bytes))
+}
+
+/// What the client is asking the server to do to a block.
+///
+/// Only the three actions that matter for breaking are named; the rest of the
+/// enum (dropping items, swapping hands, opening a chest) is not acted on yet,
+/// so it reads as a raw number.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PlayerAction {
+    StartDestroy,
+    AbortDestroy,
+    StopDestroy,
+    Other,
+}
+
+/// One `player_action` from the client.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlayerActionPacket {
+    pub action: PlayerAction,
+    /// The block being acted on, still packed as the wire sent it.
+    pub pos: i64,
+    /// Which face was clicked, 0 to 5. Unused for now.
+    pub direction: u8,
+}
+
+impl PlayerActionPacket {
+    /// Decodes a `player_action` frame.
+    pub fn read(frame: &[u8]) -> Result<Self, DecodeError> {
+        let mut r: &[u8] = frame;
+        let (id, _) = VarInt::read(&mut r)?;
+        if id.0 != id::SERVERBOUND_PLAYER_ACTION {
+            return Err(DecodeError::UnexpectedEof {
+                wanted: "player_action",
+                got: id.0 as usize,
+            });
+        }
+
+        // The action is an enum, which travels as a VarInt.
+        let (raw, _) = VarInt::read(&mut r)?;
+        let action = match raw.0 {
+            0 => PlayerAction::StartDestroy,
+            2 => PlayerAction::AbortDestroy,
+            3 => PlayerAction::StopDestroy,
+            _ => PlayerAction::Other,
+        };
+
+        let pos = read_i64(&mut r)?;
+        let direction = read_u8(&mut r)?;
+
+        Ok(Self {
+            action,
+            pos,
+            direction,
+        })
+    }
+}
+
+/// Unpacks a block position from the long the wire carries.
+///
+/// Three coordinates in one sixty-four bit number. The decompiled source is
+/// explicit about the layout and it is not the order the fields are read in:
+///
+/// ```text
+/// PACKED_HORIZONTAL_LENGTH = 26      // enough for thirty million blocks
+/// PACKED_Y_LENGTH         = 64 - 52 = 12
+/// Y_OFFSET  = 0
+/// Z_OFFSET  = 12
+/// X_OFFSET  = 38
+/// ```
+///
+/// So y is in the low twelve bits, z above it in twenty-six, and x in the top
+/// twenty-six. Reading it as x, y, z top to bottom gives three wrong numbers for
+/// three right ones, which is the worst kind of wrong.
+pub fn unpack_block_pos(packed: i64) -> (i32, i32, i32) {
+    // The masks are written as shifts rather than constants so that the sign
+    // extension is visible: y's twelve bits reach the top of the word before
+    // being shifted back down.
+    let x = (packed >> 38) as i32;
+    let y = ((packed << 52) >> 52) as i32;
+    let z = ((packed << 26) >> 38) as i32;
+    (x, y, z)
+}
+
+/// Packs a block position back into the long the wire carries.
+///
+/// The inverse of `unpack_block_pos`, and it has to round trip: a position packed
+/// and unpacked is the position that went in, or the block appears somewhere
+/// else entirely and is never found again.
+pub fn pack_block_pos(x: i32, y: i32, z: i32) -> i64 {
+    const HORIZONTAL: i64 = (1 << 26) - 1;
+    const VERTICAL: i64 = (1 << 12) - 1;
+
+    ((x as i64 & HORIZONTAL) << 38) | ((z as i64 & HORIZONTAL) << 12) | (y as i64 & VERTICAL)
+}
+
+/// Writes a `block_update` for one block.
+///
+/// The client learns a block changed from this packet alone: a position and the
+/// new state at it. Nothing else tells it to rebuild the mesh at that spot, so
+/// without it a break the server applied stays invisible.
+pub fn write_block_update(out: &mut Vec<u8>, x: i32, y: i32, z: i32, state: i32) {
+    VarInt(id::BLOCK_UPDATE).write(out);
+    VarLong(pack_block_pos(x, y, z)).write(out);
+    VarInt(state).write(out);
+}
+
 pub fn write_player_position(out: &mut Vec<u8>, teleport_id: i32, move_to: &Movement) {
     let Movement {
         x,
@@ -461,17 +588,6 @@ pub fn write_set_default_spawn(out: &mut Vec<u8>, dimension: &str, x: i32, y: i3
     out.extend_from_slice(&pack_block_pos(x, y, z).to_be_bytes());
     out.extend_from_slice(&0.0f32.to_be_bytes());
     out.extend_from_slice(&0.0f32.to_be_bytes());
-}
-
-/// Packs a block position the way the protocol carries one.
-///
-/// Three values into one long: x in bits 38 to 63, y in bits 26 to 37 and z in
-/// the low 26. The widths are the ones the world uses, so a position outside
-/// them would silently overlap its neighbour rather than fail.
-pub fn pack_block_pos(x: i32, y: i32, z: i32) -> i64 {
-    ((x as i64 & 0x3FF_FFFF) << 38)
-        | ((y as i64 & 0xFFF) << 26)
-        | (z as i64 & 0x3FF_FFFF)
 }
 
 /// Not written: `ClientboundSetTimePacket`.
@@ -784,12 +900,26 @@ mod tests {
     #[test]
     fn a_block_position_packs_into_one_eight_byte_value() {
         assert_eq!(pack_block_pos(0, 0, 0), 0);
-        // z occupies the low 26 bits, so it sits at the bottom.
-        assert_eq!(pack_block_pos(0, 0, 1), 1);
-        // y starts at bit 26.
-        assert_eq!(pack_block_pos(0, 1, 0), 1 << 26);
-        // x starts at bit 38.
+        // y occupies the low twelve bits, so it sits at the bottom.
+        assert_eq!(pack_block_pos(0, 1, 0), 1);
+        // z starts at bit twelve.
+        assert_eq!(pack_block_pos(0, 0, 1), 1 << 12);
+        // x starts at bit thirty-eight.
         assert_eq!(pack_block_pos(1, 0, 0), 1 << 38);
+    }
+
+    #[test]
+    fn a_block_position_survives_the_round_trip() {
+        // The spawn, and then its negative neighbours: the world runs from -64
+        // upward in y, so the twelve bit field has to carry a negative number
+        // without spilling into z.
+        for (x, y, z) in [(0, 64, 0), (-1, -64, -1), (30_000_000, 320, -30_000_000)] {
+            assert_eq!(
+                unpack_block_pos(pack_block_pos(x, y, z)),
+                (x, y, z),
+                "packing and unpacking must give back the position that went in"
+            );
+        }
     }
 
     #[test]

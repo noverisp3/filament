@@ -3,10 +3,21 @@ name = "filament"
 version = "0.1.0"
 edition = "2024"
 
+# Both a library and a binary. The library is what the tests exercise and what
+# the server logic lives in; the binary is only the argument parsing and the
+# startup message around it.
+[lib]
+name = "filament"
+path = "src/lib.rs"
+
+[[bin]]
+name = "filament"
+path = "src/main.rs"
+
 [dependencies]
 # `world/` is pure std today, and that is deliberate. Storage, light
-# propagation and meshing are the parts worth being able to unit test without
-# a window, a GPU or a network, and an engine that claims to be multithreaded
+# propagation and meshing are the parts worth being able to unit test without a
+# window, a GPU or a network, and an engine that claims to be multithreaded
 # should not be holding a handle to a render device from its storage layer.
 #
 # `bytemuck` is the one exception, and only for the derive on the vertex
@@ -20,14 +31,10 @@ bytemuck = { version = "1.25.2", features = ["derive"] }
 # not an implementation choice.
 flate2 = "1.1"
 
-# For chunk generation, lighting and meshing off the main thread. Added with
-# the first threaded system rather than on day one, so the first version of
-# this repo can be tested against something that works.
-# rayon = "1.10"
-
-[lib]
-name = "filament"
-path = "src/lib.rs"
+# Only used by tests, to check the status JSON is well-formed by parsing it
+# back. Escaping is easy to get subtly wrong and a broken status document makes
+# the client report the server as unreachable rather than as badly formatted.
+serde_json = "1.0"
 
 [profile.dev]
 opt-level = 1

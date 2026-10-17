@@ -6,6 +6,7 @@
 //! with the client rather than a local optimisation.
 
 pub mod frame;
+pub mod handshake;
 pub mod primitive;
 
 #[cfg(test)]

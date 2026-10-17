@@ -215,9 +215,11 @@ fn login(stream: &mut TcpStream, log: ConnLog) -> std::io::Result<()> {
     log.out_packet("login_finished", "login", body.len());
     log.note(format!("profile {name} as {profile_id}"));
 
-    // 4. The client acknowledges, and after that the connection is in the
-    // configuration phase, which is not implemented yet.
-    let log = log.phase("configuration");
+    // 4. The acknowledgement is the last packet of the *login* phase. It has to be
+    // read and logged as such: the client sends it and only then switches to
+    // the configuration protocol, so labelling it configuration makes the log
+    // claim the client sent something it never sent, and every real
+    // configuration packet gets logged as a login one.
     loop {
         let n = stream.read(&mut scratch)?;
         if n == 0 {
@@ -226,16 +228,17 @@ fn login(stream: &mut TcpStream, log: ConnLog) -> std::io::Result<()> {
         }
         dec.queue(&scratch[..n]);
 
-        while let Some(frame) = dec.next_frame().map_err(io_err)? {
+        if let Some(frame) = dec.next_frame().map_err(io_err)? {
             let id = packet_id_of(&frame);
             log.in_packet(
-                &packet_name("configuration-s2c", id),
-                "configuration",
+                &packet_name("login-s2c", id),
+                "login",
                 frame.len(),
             );
 
             if id == crate::protocol::login::id::SERVERBOUND_LOGIN_ACKNOWLEDGED {
-                log.note("acknowledged, the client is now in configuration");
+                log.note("acknowledged; the client is now waiting for configuration");
+                log.note("configuration is not implemented, closing the connection");
                 return Ok(());
             }
         }

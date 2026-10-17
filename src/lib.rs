@@ -11,5 +11,6 @@
 //!
 //! Height is Minecraft's own: -64 to 320, 384 blocks, 24 sections.
 
+pub mod generated;
 pub mod render;
 pub mod world;

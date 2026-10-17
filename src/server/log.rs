@@ -154,6 +154,8 @@ pub fn packet_name(state: &str, id: i32) -> String {
         ("configuration", 5) => "ping".to_string(),
         ("configuration", 7) => "registry_data".to_string(),
         ("configuration", 13) => "update_enabled_features".to_string(),
+        ("configuration", 14) => "update_tags".to_string(),
+        ("configuration", 15) => "select_known_packs".to_string(),
 
         (state, id) => format!("{state}:{id}"),
     }
@@ -258,5 +260,27 @@ mod tests {
     #[test]
     fn an_unknown_id_still_reports_the_state_it_came_from() {
         assert_eq!(packet_name("play", 99), "play:99");
+    }
+
+    #[test]
+    fn the_configuration_packets_this_server_sends_are_named() {
+        // Without these, the log for the configuration phase reads
+        // "configuration:14" and "configuration:15", which is what made the ids
+        // worth confirming against a capture in the first place.
+        assert_eq!(packet_name("configuration", 14), "update_tags");
+        assert_eq!(packet_name("configuration", 15), "select_known_packs");
+        assert_eq!(packet_name("configuration", 7), "registry_data");
+        assert_eq!(
+            packet_name("configuration", 13),
+            "update_enabled_features"
+        );
+    }
+
+    #[test]
+    fn select_known_packs_has_a_name_in_both_directions() {
+        // 15 clientbound is the server asking about packs, and 7 serverbound is
+        // the client answering. Same packet, different id, opposite direction.
+        assert_eq!(packet_name("configuration", 15), "select_known_packs");
+        assert_eq!(packet_name("configuration-s2c", 7), "select_known_packs");
     }
 }

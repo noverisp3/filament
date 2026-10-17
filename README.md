@@ -87,13 +87,16 @@ installed.
 | Offline login | done |
 | Configuration: feature flags, registries, tags | done |
 | Play phase: spawn and world setup | done |
-| Chunks sent to a client | **not started** |
+| Chunks sent to a client | done, all air |
+| Terrain in those chunks | **not started** |
 | Entities, ticking, the tick loop | **not started** |
 
-217 tests. A client connects, negotiates, is placed in the world and sits on the
-loading screen with no chunks to load. The evidence that the protocol is right is
-in the log: every packet is accepted, and then the client sends `client_tick_end`
-twenty times a second, which is what a waiting client does.
+236 tests. A client connects, negotiates, receives nine chunks and is placed in
+a world. The world is empty — air everywhere, full skylight, no block light — so
+what you see is sky, and the player falls, because there is nothing to stand on.
+That is the whole of it and it took no shortcuts to get here: the protocol is
+implemented against the decompiled 26.3 server and checked against a real client
+at every step.
 
 ### Running it
 

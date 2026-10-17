@@ -543,7 +543,7 @@ fn play(
     stream.write_all(&out)?;
     stream.flush()?;
 
-    log.note("chunks sent; the world is empty but it is a world");
+    log.note("chunks sent; all air, so a client falls until it disconnects");
 
     // 11. Stay connected. There is nothing to tick, so this only logs what the
     //     client sends and keeps the socket warm.

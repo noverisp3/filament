@@ -63,7 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::note(format!("protocol {}", server::PROTOCOL_VERSION));
     log::note("max players 20");
     log::note("status, login, configuration and the start of play are implemented");
-    log::note("no chunks yet, so a client will wait on the loading screen");
+    log::note("chunks are sent, and they are empty: the world has no terrain in it yet");
     if verbose {
         log::note("verbose: every packet will be logged");
     }

@@ -5,8 +5,15 @@
 //! second length and their contents are zlib-deflated, which is a wire contract
 //! with the client rather than a local optimisation.
 
+pub mod frame;
 pub mod primitive;
 
+#[cfg(test)]
+mod frame_tests;
+
+pub use frame::{
+    FrameDecoder, FrameEncoder, FrameError, DEFAULT_COMPRESSION_THRESHOLD, MAX_FRAME_SIZE,
+};
 pub use primitive::{
     BoundedStr, DecodeError, Ident, VarInt, VarLong, DEFAULT_MAX_STRING,
 };

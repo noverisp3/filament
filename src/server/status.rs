@@ -263,7 +263,8 @@ fn login(stream: &mut TcpStream, log: ConnLog) -> std::io::Result<()> {
 /// nothing until a datapack needs to override one.
 fn configure(stream: &mut TcpStream, log: ConnLog) -> std::io::Result<()> {
     use crate::protocol::configuration::{
-        write_finish_configuration, write_update_enabled_features,
+        update_tags_summary, write_finish_configuration, write_update_enabled_features,
+        write_update_tags,
     };
     use crate::protocol::frame::DEFAULT_COMPRESSION_THRESHOLD;
 
@@ -282,9 +283,22 @@ fn configure(stream: &mut TcpStream, log: ConnLog) -> std::io::Result<()> {
     enc.encode(&body, &mut out).map_err(io_err)?;
     log.out_packet("update_enabled_features", "configuration", body.len());
 
-    // 2. No registry data, on the grounds above.
+    // 2. No registry data. The client falls back to the registries it was built
+    //    with, and sending our own would mean writing thirty-one of them in NBT
+    //    for no gain.
 
-    // 3. Finish.
+    // 3. Tags, which are not optional. The client builds its tag list from this
+    //    and from nothing else, and the first tag it looks for is
+    //    damage_type/is_fire. Without it the client throws
+    //    "Missing tag TagKey[minecraft:damage_type / minecraft:is_fire]" while
+    //    assembling its components and hangs up before the world.
+    let mut body = Vec::new();
+    write_update_tags(&mut body);
+    log.note(format!("tags: {}", update_tags_summary()));
+    enc.encode(&body, &mut out).map_err(io_err)?;
+    log.out_packet("update_tags", "configuration", body.len());
+
+    // 4. Finish.
     let mut body = Vec::new();
     write_finish_configuration(&mut body);
     enc.encode(&body, &mut out).map_err(io_err)?;

@@ -6,3 +6,12 @@ target/
 # deleted after each run and never committed. `extracted/`, by contrast, is
 # committed: it is the input to `build_tables.py` and needs to be reproducible.
 tools/logs/
+
+# Python bytecode from the capture tools.
+__pycache__/
+
+# A capture run is a debugging aid, not an input. `captured/packets.bin` and the
+# generated `assets/update_tags.bin` are committed; the log and the index are
+# not, because regenerating them is one command and they change on every run.
+captured/run.log
+captured/packets.jsonl

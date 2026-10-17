@@ -4,8 +4,8 @@
 //! server to say which registries and feature flags apply, and will not accept
 //! a world without being told.
 //!
-//! None of it is sent. A Minecraft 26.3 client carries its own registries, built
-//! from the same jar the server came from, and falls back to them when the server
+//! Registries are not sent. A Minecraft 26.3 client carries its own, built from
+//! the same jar the server came from, and falls back to them when the server
 //! sends nothing:
 //!
 //! ```java
@@ -18,9 +18,29 @@
 //! server that sends none never creates it and the client uses its own. Sending
 //! registries is only needed to override them, which a datapack does.
 //!
-//! That is why there is no NBT writer here. Writing thirty-one registries in NBT
-//! would be a large amount of code for something a client this version does not
-//! require.
+//! Tags have to be sent regardless, and this is the part that is not optional.
+//! The same collector keeps a second structure:
+//!
+//! ```java
+//! if (this.tagCollector != null) { this.tagCollector.loadOnlyTags(...); }
+//! ```
+//!
+//! `tagCollector` is null unless an update_tags packet arrives, so nothing is
+//! loaded and the client's own tag list is never built. The first tag it then
+//! looks for while assembling its components is `minecraft:damage_type/minecraft:is_fire`,
+//! and the state it does not exist fails on the spot:
+//!
+//! ```text
+//! java.lang.IllegalStateException:
+//!   Missing tag TagKey[minecraft:damage_type / minecraft:is_fire]
+//! ```
+//!
+//! That is why `write_update_tags` exists and why it embeds a capture rather
+//! than a list of names. Tags hold registry *indices*, and the order a registry
+//! is packed in is not recorded anywhere in the data generator's output:
+//! `registries.json` covers 95 registries and none of the 31 that get
+//! synchronised, so damage_type is missing from it altogether. Reading the
+//! values off a live connection was the only way to get them.
 
 use crate::protocol::{DecodeError, VarInt};
 
@@ -78,6 +98,29 @@ pub fn write_update_enabled_features(out: &mut Vec<u8>, features: &[&str]) {
 /// No body upstream, so nothing after the id.
 pub fn write_finish_configuration(out: &mut Vec<u8>) {
     VarInt(id::FINISH_CONFIGURATION).write(out);
+}
+
+/// Writes `ClientboundUpdateTagsPacket`.
+///
+/// The body comes from `UPDATE_TAGS_BODY` rather than being assembled from a
+/// list here, because a tag's contents are registry indices and nothing in the
+/// game reports what those indices are. It is the same bytes a vanilla server
+/// sends, so the client resolves every tag it asks for.
+///
+/// Roughly 58 KiB, which is past the compression threshold, so the encoder
+/// compresses it. That is fine and expected: the frame length says 58 KiB, the
+/// body says the same, and a client that asked for 256 has asked for it.
+pub fn write_update_tags(out: &mut Vec<u8>) {
+    VarInt(id::UPDATE_TAGS).write(out);
+    out.extend_from_slice(crate::generated::UPDATE_TAGS_BODY);
+}
+
+/// How many tags `write_update_tags` will send, for logging.
+pub fn update_tags_summary() -> String {
+    let registries = crate::generated::TAG_COUNTS.len();
+    let tags = crate::generated::TAG_TOTAL;
+    let bytes = crate::generated::UPDATE_TAGS_BODY.len();
+    format!("{registries} registries, {tags} tags, {bytes} bytes")
 }
 
 /// Reads a serverbound configuration packet id and leaves the rest alone.
@@ -234,7 +277,41 @@ mod tests {
         assert_eq!(id::FINISH_CONFIGURATION, 3);
         assert_eq!(id::REGISTRY_DATA, 7);
         assert_eq!(id::UPDATE_ENABLED_FEATURES, 13);
+        assert_eq!(id::UPDATE_TAGS, 14);
+        assert_eq!(id::SELECT_KNOWN_PACKS, 15);
         assert_eq!(id::SERVERBOUND_FINISH_CONFIGURATION, 3);
         assert_eq!(id::SERVERBOUND_CLIENT_INFORMATION, 0);
+    }
+
+    #[test]
+    fn update_tags_is_the_id_followed_by_the_captured_body() {
+        let mut w = Vec::new();
+        write_update_tags(&mut w);
+
+        assert_eq!(
+            w[0],
+            id::UPDATE_TAGS as u8,
+            "the id is 14, confirmed by the capture: the packet that carries \
+             58 KiB of tags arrived as id 14"
+        );
+        assert_eq!(&w[1..], crate::generated::UPDATE_TAGS_BODY);
+        assert_eq!(w.len(), 1 + crate::generated::UPDATE_TAGS_BODY.len());
+    }
+
+    #[test]
+    fn update_tags_starts_with_fifteen_registries() {
+        // The leading VarInt in the captured body. Worth pinning separately
+        // because a truncated capture would still start with a plausible
+        // number and the failure would only show up as a client disconnect.
+        let mut w = Vec::new();
+        write_update_tags(&mut w);
+        assert_eq!(w[1], 15);
+    }
+
+    #[test]
+    fn the_tag_summary_names_what_is_being_sent() {
+        let summary = update_tags_summary();
+        assert!(summary.contains("15 registries"), "{summary}");
+        assert!(summary.contains("773 tags"), "{summary}");
     }
 }

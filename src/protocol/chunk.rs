@@ -173,15 +173,14 @@ fn write_block_entities(out: &mut Vec<u8>) {
 /// rather than sent as a thousand blocks of zero.
 fn write_light(out: &mut Vec<u8>) {
     // Sky light is present in every section, and every section is empty of block
-    // light. Computed twice rather than moved, because a Vec is not Copy and
-    // saying so once would only move the problem.
-    let sky_present = full_section_mask();
-    let block_absent = full_section_mask();
+    // light. Built twice rather than moved, since a Vec is not Copy.
+    let sky_present = section_mask_bytes();
+    let block_absent = section_mask_bytes();
 
-    write_bit_set(out, sky_present);
-    write_bit_set(out, None);
-    write_bit_set(out, None);
-    write_bit_set(out, block_absent);
+    write_bit_set(out, &sky_present);
+    write_bit_set(out, &[]);
+    write_bit_set(out, &[]);
+    write_bit_set(out, &block_absent);
 
     // Sky updates: one layer per section, every block fully lit.
     VarInt(SECTIONS as i32).write(out);
@@ -194,48 +193,43 @@ fn write_light(out: &mut Vec<u8>) {
     VarInt(0).write(out);
 }
 
-/// A bit set with every section in it, or an empty one.
+/// The shortest byte form of a bit set with every section in it.
 ///
-/// `None` means no sections at all, which is a bit set of length zero rather than
-/// one of zeros.
-fn full_section_mask() -> Option<Vec<u64>> {
-    let needed = SECTIONS.div_ceil(64);
-    if needed == 0 {
-        return None;
-    }
-
-    let mut longs = vec![0u64; needed];
-    for (index, slot) in longs.iter_mut().enumerate() {
-        let bits_in_this = (SECTIONS - index * 64).min(64);
-        *slot = if bits_in_this == 64 {
-            u64::MAX
-        } else {
-            (1u64 << bits_in_this) - 1
-        };
-    }
-
-    Some(longs)
-}
-
-/// Writes a bit set: a VarInt count, then that many longs.
-///
-/// An absent mask is a count of zero, which is different from a mask of zeros:
-/// the first says there are no sections at all, the second says there is one
-/// section that has no bits set.
-fn write_bit_set(out: &mut Vec<u8>, mask: Option<Vec<u64>>) {
-    match mask {
-        None => {
-            VarInt(0).write(out);
-        }
-        Some(longs) => {
-            VarInt(longs.len() as i32).write(out);
-            for value in &longs {
-                out.extend_from_slice(&value.to_be_bytes());
+/// `BitSet.toByteArray` indexes from the least significant byte, and the length
+/// is however far it must reach to cover the highest bit set, so a partial last
+/// byte is included and not padded.
+fn section_mask_bytes() -> Vec<u8> {
+    let needed = SECTIONS.div_ceil(8);
+    (0..needed)
+        .map(|byte| {
+            let low = byte * 8;
+            let in_this = SECTIONS.saturating_sub(low).min(8);
+            if in_this >= 8 {
+                0xFFu8
+            } else {
+                ((1u16 << in_this) - 1) as u8
             }
-        }
-    }
+        })
+        .collect()
 }
 
+/// Writes a bit set.
+///
+/// This is `ByteBufCodecs.BIT_SET`, which is a VarInt **byte count** followed by
+/// that many bytes, and the bytes are the shortest that reach the highest bit
+/// set.
+///
+/// Not a VarInt count of sixty-four bit words, which is the obvious reading of "a
+/// bit set" and the one written first. That made the client fail to decode the
+/// chunk, because it read one long's worth of mask as a single byte and then
+/// took the rest of the mask for the light layers.
+///
+/// Twenty-four sections set means the highest bit is twenty-three, which is in
+/// the third byte: three bytes of FF.
+fn write_bit_set(out: &mut Vec<u8>, mask: &[u8]) {
+    VarInt(mask.len() as i32).write(out);
+    out.extend_from_slice(mask);
+}
 /// A seed for the world, kept here so the world module does not need to know
 /// about the packet.
 pub fn seed_from_string(name: &str) -> i64 {
@@ -310,23 +304,35 @@ mod tests {
         let mut w = Vec::new();
         write_light(&mut w);
 
-        // Checked against the raw bytes rather than by reading the bit sets
-        // back. The encoding is simple enough to state directly, and reading it
-        // back with the same VarInt reader that wrote it would prove less than
-        // it looks: it passed on an offset that was off by one.
-        let full: i64 = (1i64 << SECTIONS) - 1;
+        // A bit set is a byte count and then the bytes, so twenty-four sections
+        // is three bytes of FF and not one eight byte word.
+        assert_eq!(w[0], 3, "the sky mask is three bytes");
+        assert_eq!(&w[1..4], &[0xFF, 0xFF, 0xFF], "every section has sky light");
 
-        assert_eq!(w[0], 1, "the sky mask is one long");
-        assert_eq!(&w[1..9], &full.to_be_bytes(), "every section has sky light");
+        assert_eq!(w[4], 0, "the block mask is empty, not zero");
+        assert_eq!(w[5], 0, "and no section is empty of sky light");
 
-        assert_eq!(w[9], 0, "the block mask is empty, not zero");
-        assert_eq!(w[10], 0, "and no section is empty of sky light");
-        assert_eq!(w[11], 1, "the empty block mask is one long");
-        assert_eq!(&w[12..20], &full.to_be_bytes(), "no block light anywhere");
+        assert_eq!(w[6], 3, "the empty block mask is three bytes");
+        assert_eq!(&w[7..10], &[0xFF, 0xFF, 0xFF], "no block light anywhere");
 
-        let (updates, after) = VarInt::read(&mut &w[20..]).expect("an update count");
+        let (updates, after) = VarInt::read(&mut &w[10..]).expect("an update count");
         assert_eq!(updates.0 as usize, SECTIONS);
-        assert!(after < w.len());
+        assert_eq!(after, 1);
+    }
+
+    #[test]
+    fn a_bit_set_of_sections_is_three_bytes() {
+        // BitSet.toByteArray is the shortest form that reaches the highest bit,
+        // so twenty-four sections is three bytes and not eight.
+        assert_eq!(section_mask_bytes(), vec![0xFF, 0xFF, 0xFF]);
+
+        let mut w = Vec::new();
+        write_bit_set(&mut w, &section_mask_bytes());
+        assert_eq!(w, vec![3, 0xFF, 0xFF, 0xFF]);
+
+        let mut empty = Vec::new();
+        write_bit_set(&mut empty, &[]);
+        assert_eq!(empty, vec![0], "an empty bit set is a zero length");
     }
 
     #[test]
@@ -334,30 +340,27 @@ mod tests {
         let mut w = Vec::new();
         write_light(&mut w);
 
-        // The tail is asserted by position rather than by walking it. Walking
-        // costs a VarInt cursor per layer and an off-by-one in the test is
-        // indistinguishable from one in the writer; the mask test above already
-        // pins the head, so what is left to say is the size.
-        // Twenty bytes of masks, then a one byte count, then a layer each: a
+        // Ten bytes of masks, then a one byte count, then a layer each: a
         // VarInt length of 2048, which is two bytes, and 2048 bytes of light.
-        let expected = 20 + 1 + SECTIONS * (2 + LIGHT_BYTES) + 1;
+        let expected = 10 + 1 + SECTIONS * (2 + LIGHT_BYTES) + 1;
         assert_eq!(
             w.len(),
             expected,
-            "twenty bytes of masks, then a count, {SECTIONS} layers of \
+            "ten bytes of masks, then a count, {SECTIONS} layers of \
              {LIGHT_BYTES} bytes each, then an empty block list"
         );
 
-        assert!(w[..12].contains(&0xFF), "sanity: the mask is set");
-        assert_eq!(w[12], 0);
+        assert!(w[..10].contains(&0xFF), "sanity: the mask is set");
+        assert_eq!(w[4], 0);
     }
 
     #[test]
-    fn the_full_mask_covers_every_section() {
-        let mask = full_section_mask().expect("there are sections");
-        let bits = mask[0];
-        assert_eq!(bits, (1u64 << SECTIONS) - 1, "only the real sections");
-        assert!(bits > 0);
+    fn the_full_mask_covers_every_section_and_nothing_else() {
+        let mask = section_mask_bytes();
+        assert_eq!(mask.len(), 3);
+        // Every bit in those three bytes is a section, and the fourth byte does
+        // not exist, which is the difference between this and a padded mask.
+        assert_eq!(mask.iter().map(|b| b.count_ones()).sum::<u32>(), SECTIONS as u32);
     }
 
     #[test]

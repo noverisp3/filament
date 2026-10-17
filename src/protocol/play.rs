@@ -467,7 +467,11 @@ pub fn pack_block_pos(x: i32, y: i32, z: i32) -> i64 {
 /// without it a break the server applied stays invisible.
 pub fn write_block_update(out: &mut Vec<u8>, x: i32, y: i32, z: i32, state: i32) {
     VarInt(id::BLOCK_UPDATE).write(out);
-    VarLong(pack_block_pos(x, y, z)).write(out);
+    // Eight bytes, always. A block position is a fixed long and not a VarLong,
+    // so the value is written out in full whatever its size: a VarLong would be
+    // one byte here and the client would read the rest of the packet as the
+    // position.
+    out.extend_from_slice(&pack_block_pos(x, y, z).to_be_bytes());
     VarInt(state).write(out);
 }
 
@@ -895,6 +899,35 @@ mod tests {
         assert_eq!(w[1], 19, "key length");
         assert_eq!(&w[2..21], b"minecraft:overworld");
         assert_eq!(w.len(), 37, "the capture's length for this packet");
+    }
+
+    #[test]
+    fn a_break_action_reads_the_block_it_names() {
+        let mut frame = Vec::new();
+        VarInt(id::SERVERBOUND_PLAYER_ACTION).write(&mut frame);
+        VarInt(3).write(&mut frame); // STOP_DESTROY_BLOCK
+        frame.extend_from_slice(&pack_block_pos(10, 64, -3).to_be_bytes());
+        frame.push(1); // the top face
+        VarInt(7).write(&mut frame); // the client's sequence number
+
+        let action = PlayerActionPacket::read(&frame).expect("well formed");
+
+        assert_eq!(action.action, PlayerAction::StopDestroy);
+        assert_eq!(unpack_block_pos(action.pos), (10, 64, -3));
+        assert_eq!(action.direction, 1);
+    }
+
+    #[test]
+    fn an_action_that_is_not_a_break_is_named_as_such() {
+        let mut frame = Vec::new();
+        VarInt(id::SERVERBOUND_PLAYER_ACTION).write(&mut frame);
+        VarInt(4).write(&mut frame); // DROP_ALL_ITEMS
+        frame.extend_from_slice(&0i64.to_be_bytes());
+        frame.push(0);
+        VarInt(0).write(&mut frame);
+
+        let action = PlayerActionPacket::read(&frame).expect("well formed");
+        assert_eq!(action.action, PlayerAction::Other);
     }
 
     #[test]

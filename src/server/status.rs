@@ -526,16 +526,19 @@ fn play(
     // 11. The chunks. This is the first thing the client renders, so it goes after
     //     the world setup above and before anything else about the world.
     //
-    //     Generated here rather than stored, because nothing persists a world yet.
+    //     Generated on demand into a world that lives as long as the
+    //     connection. It used to be generated per chunk and thrown away, which
+    //     made the storage layer unreachable: a block the player broke had
+    //     nowhere to live, and walking back regenerated the ground over it.
+    //
     //     The terrain generator's own block ids are mapped to the game's state
     //     ids on the way out: the two registries are unrelated, and the world
     //     module has no business knowing a protocol id.
-    use crate::world::block::BlockRegistry;
     use crate::world::pos::ChunkPos;
-    use crate::world::terrain;
+    use crate::world::world::World;
 
-    let mut registry = BlockRegistry::new();
-    let palette = terrain::register_terrain(&mut registry);
+    let mut world = World::empty();
+    let palette = *world.terrain_blocks();
 
     // A batch, so the client knows more chunks are coming. The float in the
     // closing packet is the tick rate the server intends to run at.
@@ -557,13 +560,14 @@ fn play(
         }
 
         for (dx, dz) in chunks {
-            let chunk = terrain::generate_chunk(
-                ChunkPos { x: dx, z: dz },
-                &palette,
-            );
+            world.ensure_chunk(ChunkPos { x: dx, z: dz });
 
             let mut sections = Vec::with_capacity(crate::protocol::chunk::SECTIONS);
-            for section in chunk.sections() {
+            for section in world
+                .chunk(ChunkPos { x: dx, z: dz })
+                .expect("the chunk was just stored")
+                .sections()
+            {
                 sections.push(
                     crate::world::section::iter_blocks(section)
                         .map(|block| to_state_id(block, &palette))
@@ -626,6 +630,10 @@ fn play(
     let mut center_sent = (0i32, 0i32);
 
     loop {
+        // Blocks changed by the player, sent out after the drain rather than
+        // during it, so a burst of edits is one write.
+        let mut edits = Vec::new();
+
         while let Some(frame) = dec.next_frame().map_err(io_err)? {
             let id = packet_id_of(&frame);
             if super::log::verbose() {
@@ -647,6 +655,46 @@ fn play(
                 player.y = y;
                 player.z = z;
             }
+
+            // Breaking a block. The client sends START_DESTROY when the button
+            // goes down and STOP_DESTROY when the block is gone; only the second
+            // changes anything, because the first is a request to start drawing
+            // cracks and there is no progress to report without a tick loop.
+            //
+            // Nothing here checks that the player is near the block, which is
+            // the check that keeps a client from editing the world at a distance.
+            if id == p::id::SERVERBOUND_PLAYER_ACTION
+                && let Ok(action) = p::PlayerActionPacket::read(&frame)
+                && action.action == p::PlayerAction::StopDestroy
+            {
+                let (bx, by, bz) = p::unpack_block_pos(action.pos);
+                let pos = crate::world::pos::BlockPos::new(bx, by, bz);
+
+                if let Some(_edit) = world.break_block(pos) {
+                    edits.push((bx, by, bz));
+                    if super::log::verbose() {
+                        log.note(format!("broke the block at {bx} {by} {bz}"));
+                    }
+                }
+            }
+        }
+
+        // Tell the client about each edit. Without this the change exists on the
+        // server and nowhere else: the client keeps drawing the block it was
+        // sent and never learns it is gone.
+        if !edits.is_empty() {
+            let palette = *world.terrain_blocks();
+            let mut body = Vec::new();
+            for (bx, by, bz) in &edits {
+                let block = world
+                    .block(crate::world::pos::BlockPos::new(*bx, *by, *bz))
+                    .unwrap_or(palette.air);
+                p::write_block_update(&mut body, *bx, *by, *bz, to_state_id(block, &palette));
+            }
+            let mut wire = Vec::new();
+            enc.encode(&body, &mut wire).map_err(io_err)?;
+            stream.write_all(&wire)?;
+            stream.flush()?;
         }
 
         // Which chunk the player stands in now.
@@ -728,7 +776,7 @@ fn play(
             enc.encode(&body, &mut out).map_err(io_err)?;
 
             for (dx, dz) in std::mem::take(&mut pending) {
-                send_one_chunk(&mut out, &mut enc, dx, dz, &palette)?;
+                send_one_chunk(&mut out, &mut enc, &mut world, dx, dz)?;
             }
 
             let mut body = Vec::new();
@@ -779,29 +827,33 @@ fn play(
     }
 }
 
-/// Generates and writes one chunk into `out`, as a framed packet.
+/// Writes one chunk into `out`, as a framed packet.
 ///
-/// The terrain is generated rather than fetched, because nothing persists a
-/// world yet: the generator is deterministic, so the same chunk comes out the
-/// same both times it is visited, which is what makes walking away and back
-/// look like a world rather than a new one each time.
+/// The chunk comes out of the live world, so a block the player broke in it is
+/// still missing when the chunk is sent again. Generating it here instead would
+/// put the ground back.
 fn send_one_chunk(
     out: &mut Vec<u8>,
     enc: &mut crate::protocol::frame::FrameEncoder,
+    world: &mut crate::world::world::World,
     dx: i32,
     dz: i32,
-    palette: &crate::world::terrain::TerrainBlocks,
 ) -> std::io::Result<()> {
     use crate::world::pos::ChunkPos;
-    use crate::world::terrain;
 
-    let chunk = terrain::generate_chunk(ChunkPos { x: dx, z: dz }, palette);
+    let pos = ChunkPos { x: dx, z: dz };
+    world.ensure_chunk(pos);
 
+    let palette = *world.terrain_blocks();
     let mut sections = Vec::with_capacity(crate::protocol::chunk::SECTIONS);
-    for section in chunk.sections() {
+    for section in world
+        .chunk(pos)
+        .expect("the chunk was just stored")
+        .sections()
+    {
         sections.push(
             crate::world::section::iter_blocks(section)
-                .map(|block| to_state_id(block, palette))
+                .map(|block| to_state_id(block, &palette))
                 .collect(),
         );
     }

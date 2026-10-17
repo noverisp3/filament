@@ -11,7 +11,7 @@ use super::chunk::{Chunk, MIN_SECTION_Y, SECTIONS_PER_CHUNK};
 use super::pos::{BlockPos, ChunkPos, SECTION_DIM, SectionPos};
 use super::raycast::{RayHit, raycast};
 use super::section::{Section, SectionNeighbors};
-use super::terrain::{generate_chunk, register_terrain};
+use super::terrain::{TerrainBlocks, generate_chunk, register_terrain};
 
 /// What changed after an edit, and therefore what has to be rebuilt.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,6 +41,7 @@ impl BlockEdit {
 
 pub struct World {
     registry: BlockRegistry,
+    terrain: TerrainBlocks,
     chunks: HashMap<ChunkPos, Chunk>,
 }
 
@@ -51,12 +52,48 @@ impl Clone for World {
     fn clone(&self) -> Self {
         Self {
             registry: self.registry.clone(),
+            terrain: self.terrain,
             chunks: self.chunks.clone(),
         }
     }
 }
 
 impl World {
+    /// An empty world that generates chunks as they are asked for.
+    ///
+    /// `generate` below fills a square up front, which is what a test or a
+    /// fixed map wants. A server does not know how big the map is: it learns the
+    /// shape from where the player walks, so it needs a world that starts with
+    /// nothing and grows.
+    pub fn empty() -> Self {
+        let mut registry = BlockRegistry::new();
+        let terrain = register_terrain(&mut registry);
+        Self {
+            registry,
+            terrain,
+            chunks: HashMap::new(),
+        }
+    }
+
+    /// The chunk at `pos`, generating and storing it if it is not there yet.
+    ///
+    /// The generator is deterministic, so this is not "generate on miss" in the
+    /// cache-invalidating sense: a chunk generated now and the same chunk
+    /// generated an hour ago are the same chunk, which is what lets a player walk
+    /// away and come back to the ground they left. What changes that is a block
+    /// the player placed, and that lives in the stored copy.
+    ///
+    /// Returns whether it was already there, so a caller can tell a fresh chunk
+    /// from a stored one.
+    pub fn ensure_chunk(&mut self, pos: ChunkPos) -> bool {
+        if self.chunks.contains_key(&pos) {
+            return true;
+        }
+        let chunk = generate_chunk(pos, &self.terrain);
+        self.chunks.insert(pos, chunk);
+        false
+    }
+
     /// Builds a world of generated terrain.
     ///
     /// Takes the chunk radius to generate along each axis.
@@ -72,11 +109,25 @@ impl World {
             }
         }
 
-        Self { registry, chunks }
+        Self {
+            registry,
+            terrain,
+            chunks,
+        }
     }
 
     pub fn registry(&self) -> &BlockRegistry {
         &self.registry
+    }
+
+    /// The terrain generator's block ids, for mapping a stored block onto the
+    /// game's state id on the way out.
+    ///
+    /// The two registries are unrelated: air is zero in both by coincidence and
+    /// nothing else lines up. The mapping belongs to whoever sends packets, not
+    /// to storage, which is why this hands the ids over rather than doing it.
+    pub fn terrain_blocks(&self) -> &TerrainBlocks {
+        &self.terrain
     }
 
     /// Chunk positions in a stable order, so rebuilds are deterministic.

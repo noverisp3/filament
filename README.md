@@ -81,7 +81,31 @@ installed.
 | Skylight propagation across sections and chunks | done |
 | Greedy meshing | done |
 | Raycast, place and break | done |
-| Protocol layer, targeting 26.3 | **not started** |
+| Block state table, generated from 26.3 | done |
+| Framing, compression, primitives | done |
+| Status, so the server appears in the browser | done |
+| Offline login | done |
+| Configuration: feature flags, registries, tags | done |
+| Play phase: spawn and world setup | done |
+| Chunks sent to a client | **not started** |
+| Entities, ticking, the tick loop | **not started** |
 
-117 tests. Nothing is connected to anything yet: `world/` and `mesh.rs` are
-complete and tested, but there is no network layer, so no client can connect.
+205 tests. A client can connect, negotiate, and be placed in the world; there
+are no chunks yet, so it waits on the loading screen rather than showing
+anything. Everything is offline and single-threaded per connection.
+
+### Where the protocol data came from
+
+Three tables are captured or generated rather than written by hand, and it is
+worth saying why, because in two cases the data generator's output does not
+contain what is needed and guessing would have been wrong:
+
+| | |
+|---|---|
+| `src/generated/blocks.rs` | from `--reports`, the generator does emit it |
+| `assets/update_tags.bin` | captured: tag contents are registry *indices* and nothing reports those |
+| `assets/registry_data.bin` | captured: same reason, and the client needs the contents to build the registries the tags refer to |
+
+Regenerate the last two with `tools/capture.py` and `tools/extract_registries.py`
+against a stock 26.3 server. The captures are committed, so regenerating is an
+option rather than a requirement.

@@ -15,6 +15,7 @@ use crate::protocol::{VarInt, VarLong};
 
 use super::log::{next_connection_id, packet_name, ConnLog};
 use super::log;
+use super::shared::SharedWorld;
 
 /// The protocol version this server speaks, from the data generator.
 pub const PROTOCOL_VERSION: i32 = 777;
@@ -23,13 +24,20 @@ pub const PROTOCOL_VERSION: i32 = 777;
 pub struct StatusServer {
     listener: TcpListener,
     status: ServerStatus,
+    /// Built once here rather than per connection, which is what makes two
+    /// players share ground. See `server::shared`.
+    world: SharedWorld,
 }
 
 impl StatusServer {
     /// Binds `addr` and prepares to answer handshakes.
     pub fn bind(addr: &str, status: ServerStatus) -> std::io::Result<Self> {
         let listener = TcpListener::bind(addr)?;
-        Ok(StatusServer { listener, status })
+        Ok(StatusServer {
+            listener,
+            status,
+            world: SharedWorld::new(),
+        })
     }
 
     /// The address actually bound, which is useful when port 0 was asked for.
@@ -56,6 +64,7 @@ impl StatusServer {
                 Ok((stream, peer)) => {
                     let id = next_connection_id();
                     let status = self.status.clone();
+                    let world = self.world.clone();
 
                     log::note(format!("[conn {id}] accepted from {peer}"));
 
@@ -67,7 +76,7 @@ impl StatusServer {
                     // shutdown can wait for the connections to finish writing
                     // instead of cutting them off mid-packet.
                     let handle = thread::spawn(move || {
-                        if let Err(e) = handle_connection(stream, status) {
+                        if let Err(e) = handle_connection(stream, status, world) {
                             log::error(format!("[conn {id}] ended with an error: {e}"));
                         }
                     });
@@ -115,7 +124,11 @@ const POLL: std::time::Duration = std::time::Duration::from_millis(50);
 ///
 /// Deliberately does not implement login: the point here is to be visible in
 /// the multiplayer browser, which the client reaches only after status.
-fn handle_connection(mut stream: TcpStream, status: ServerStatus) -> std::io::Result<()> {
+fn handle_connection(
+    mut stream: TcpStream,
+    status: ServerStatus,
+    world: SharedWorld,
+) -> std::io::Result<()> {
     let log = ConnLog::new(
         next_connection_id(),
         stream.peer_addr().map(|a| a.to_string()).unwrap_or_default(),
@@ -168,7 +181,7 @@ Ok(Some(frame)) => {
 
     match intention.intent {
         ClientIntent::Status => serve_status(&mut stream, dec, enc, status, log),
-        ClientIntent::Login => login(&mut stream, log),
+        ClientIntent::Login => login(&mut stream, log, world),
         ClientIntent::Transfer => {
             log.note("transfer is not implemented");
             Ok(())
@@ -187,7 +200,7 @@ Ok(Some(frame)) => {
 /// applies the threshold to whatever arrives *after* the compression packet, so
 /// sending that packet already compressed means the client reads its own
 /// threshold as garbage and disconnects.
-fn login(stream: &mut TcpStream, log: ConnLog) -> std::io::Result<()> {
+fn login(stream: &mut TcpStream, log: ConnLog, world: SharedWorld) -> std::io::Result<()> {
     use crate::protocol::frame::DEFAULT_COMPRESSION_THRESHOLD;
     use crate::protocol::login::{write_login_compression, write_login_finished, Uuid};
 
@@ -281,7 +294,7 @@ fn login(stream: &mut TcpStream, log: ConnLog) -> std::io::Result<()> {
                 // and more importantly it still holds any bytes that arrived
                 // behind the acknowledgement. Starting a fresh decoder dropped
                 // them, and the first configuration packets went missing.
-                return configure(stream, log, dec);
+                return configure(stream, log, dec, world);
             }
         }
 
@@ -313,6 +326,7 @@ fn configure(
     stream: &mut TcpStream,
     log: ConnLog,
     mut dec: FrameDecoder,
+    world: SharedWorld,
 ) -> std::io::Result<()> {
     use crate::protocol::configuration::{
         registry_data_count, registry_data_frames, update_tags_summary,
@@ -417,7 +431,7 @@ fn configure(
             match id {
                 crate::protocol::configuration::id::SERVERBOUND_FINISH_CONFIGURATION => {
                     log.note("client finished configuration");
-                    return play(stream, dec, enc, log, view_distance);
+                    return play(stream, dec, enc, log, view_distance, world);
                 }
                 crate::protocol::configuration::id::SERVERBOUND_CLIENT_INFORMATION => {
                     match crate::protocol::configuration::ClientInformation::read(&frame) {
@@ -473,6 +487,7 @@ fn play(
     mut enc: FrameEncoder,
     log: ConnLog,
     radius: i32,
+    world: SharedWorld,
 ) -> std::io::Result<()> {
     use crate::protocol::play as p;
 
@@ -578,21 +593,17 @@ fn play(
     //     ids on the way out: the two registries are unrelated, and the world
     //     module has no business knowing a protocol id.
     use crate::world::pos::ChunkPos;
-    use crate::world::world::World;
 
-    let mut world = World::empty();
-    let palette = *world.terrain_blocks();
+    // The chunks the client is holding. Filled by the spawn batch below, and
+    // compared against the set it should be holding on every pass after, so
+    // both directions are known: what arrived and what left.
+    let mut sent: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
 
     // A batch, so the client knows more chunks are coming. The float in the
     // closing packet is the tick rate the server intends to run at.
     let mut body = Vec::new();
     p::write_chunk_batch_start(&mut body);
     enc.encode(&body, &mut out).map_err(io_err)?;
-
-    // The chunks the client is holding. Filled by the spawn batch below, and
-    // compared against the set it should be holding on every pass after, so
-    // both directions are known: what arrived and what left.
-    let mut sent: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
 
     let mut sent_count = 0;
     for ring in 0..=radius {
@@ -608,20 +619,7 @@ fn play(
         }
 
         for (dx, dz) in chunks {
-            world.ensure_chunk(ChunkPos { x: dx, z: dz });
-
-            let mut sections = Vec::with_capacity(crate::protocol::chunk::SECTIONS);
-            for section in world
-                .chunk(ChunkPos { x: dx, z: dz })
-                .expect("the chunk was just stored")
-                .sections()
-            {
-                sections.push(
-                    crate::world::section::iter_blocks(section)
-                        .map(|block| to_state_id(block, &palette))
-                        .collect(),
-                );
-            }
+            let sections = world.sections_for_wire(ChunkPos { x: dx, z: dz });
 
             let mut body = Vec::new();
             crate::protocol::chunk::write_chunk_with_states(&mut body, dx, dz, &sections);
@@ -713,7 +711,7 @@ fn play(
                 let (bx, by, bz) = p::unpack_block_pos(action.pos);
                 let pos = crate::world::pos::BlockPos::new(bx, by, bz);
 
-                if let Some(_edit) = world.break_block(pos) {
+                if world.break_block(pos).is_some() {
                     edits.push((bx, by, bz));
                     if super::log::verbose() {
                         log.note(format!("broke the block at {bx} {by} {bz}"));
@@ -726,13 +724,11 @@ fn play(
         // server and nowhere else: the client keeps drawing the block it was
         // sent and never learns it is gone.
         if !edits.is_empty() {
-            let palette = *world.terrain_blocks();
             let mut body = Vec::new();
             for (bx, by, bz) in &edits {
-                let block = world
-                    .block(crate::world::pos::BlockPos::new(*bx, *by, *bz))
-                    .unwrap_or(palette.air);
-                p::write_block_update(&mut body, *bx, *by, *bz, to_state_id(block, &palette));
+                let pos = crate::world::pos::BlockPos::new(*bx, *by, *bz);
+                let state = world.state_at(pos).unwrap_or(AIR_STATE);
+                p::write_block_update(&mut body, *bx, *by, *bz, state);
             }
             let mut wire = Vec::new();
             enc.encode(&body, &mut wire).map_err(io_err)?;
@@ -789,7 +785,7 @@ fn play(
             sorted.sort_unstable();
 
             for (dx, dz) in &sorted {
-                send_one_chunk(&mut out, &mut enc, &mut world, *dx, *dz)?;
+                send_one_chunk(&mut out, &mut enc, &world, *dx, *dz)?;
                 sent.insert((*dx, *dz));
             }
 
@@ -809,7 +805,7 @@ fn play(
                 enc.encode(&body, &mut wire).map_err(io_err)?;
                 out.extend_from_slice(&wire);
                 sent.remove(&(*dx, *dz));
-                world.forget_chunk(crate::world::pos::ChunkPos { x: *dx, z: *dz });
+                world.forget(crate::world::pos::ChunkPos { x: *dx, z: *dz });
             }
 
             stream.write_all(&out)?;
@@ -864,34 +860,18 @@ fn play(
 
 /// Writes one chunk into `out`, as a framed packet.
 ///
-/// The chunk comes out of the live world, so a block the player broke in it is
-/// still missing when the chunk is sent again. Generating it here instead would
-/// put the ground back.
+/// The chunk comes out of the shared world, so a block one player broke is still
+/// missing when the chunk is sent to the next, and to the same one walking back.
 fn send_one_chunk(
     out: &mut Vec<u8>,
     enc: &mut crate::protocol::frame::FrameEncoder,
-    world: &mut crate::world::world::World,
+    world: &SharedWorld,
     dx: i32,
     dz: i32,
 ) -> std::io::Result<()> {
     use crate::world::pos::ChunkPos;
 
-    let pos = ChunkPos { x: dx, z: dz };
-    world.ensure_chunk(pos);
-
-    let palette = *world.terrain_blocks();
-    let mut sections = Vec::with_capacity(crate::protocol::chunk::SECTIONS);
-    for section in world
-        .chunk(pos)
-        .expect("the chunk was just stored")
-        .sections()
-    {
-        sections.push(
-            crate::world::section::iter_blocks(section)
-                .map(|block| to_state_id(block, &palette))
-                .collect(),
-        );
-    }
+    let sections = world.sections_for_wire(ChunkPos { x: dx, z: dz });
 
     let mut body = Vec::new();
     crate::protocol::chunk::write_chunk_with_states(&mut body, dx, dz, &sections);
@@ -905,43 +885,11 @@ fn send_one_chunk(
 /// Fifteen seconds against a thirty second client timeout, so one can be lost
 /// without the connection going.
 const KEEP_ALIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
-/// State ids for the blocks the terrain generator produces.
+/// The game state id for air, used when a block cannot be read.
 ///
-/// Read from the generated table rather than written out, because these are
-/// indices into thirty-five thousand block states and a hand-written number is a
-/// number that can be wrong without anything noticing.
-fn state_id(name: &str) -> i32 {
-    crate::generated::BLOCKS
-        .iter()
-        .find(|b| b.name == name)
-        .map(|b| b.default_state as i32)
-        .unwrap_or_else(|| panic!("{name} is in the generated block table"))
-}
-
-/// Maps one of the world module's blocks onto the game's state id.
-///
-/// The two registries are unrelated: the world's ids are fixed by registration
-/// order, air through glowstone, and the game's are indices into a generated
-/// table of thirty-five thousand states. Air happens to be zero in both, which is
-/// a coincidence and not a reason to assume the rest line up.
-fn to_state_id(
-    block: crate::world::block::BlockId,
-    palette: &crate::world::terrain::TerrainBlocks,
-) -> i32 {
-    if block == palette.air {
-        state_id("minecraft:air")
-    } else if block == palette.grass {
-        state_id("minecraft:grass_block")
-    } else if block == palette.dirt {
-        state_id("minecraft:dirt")
-    } else if block == palette.stone {
-        state_id("minecraft:stone")
-    } else {
-        // Anything else, glowstone included, is not terrain. Air is the safe
-        // answer: an unknown block would be a hole in the world.
-        state_id("minecraft:air")
-    }
-}
+/// A hole in the world, or a chunk the server has not built: either way the
+/// honest answer for "what is there" is nothing.
+const AIR_STATE: i32 = 0;
 
 /// The leading VarInt of a frame body, which is its packet id.
 fn packet_id_of(frame: &[u8]) -> i32 {
@@ -1026,7 +974,7 @@ fn serve_status(
 }
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::server::shared::{state_id, to_state_id};
 
     /// Generates a chunk and reads the blocks back out of the wire bytes.
     ///

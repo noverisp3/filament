@@ -95,6 +95,19 @@ loading screen with no chunks to load. The evidence that the protocol is right i
 in the log: every packet is accepted, and then the client sends `client_tick_end`
 twenty times a second, which is what a waiting client does.
 
+### Running it
+
+```text
+filament                # 127.0.0.1:25565
+filament --verbose      # and log every packet
+filament --addr 0.0.0.0:25566
+```
+
+Packet logging is off by default. A client waiting on chunks sends an empty
+packet twenty times a second, so leaving it on buries the lines that say anything
+in a wall of one-byte records. Without `--verbose` the log is the lifecycle:
+connections, phases, and errors.
+
 ### Where the protocol data came from
 
 Three tables are captured or generated rather than written by hand, and it is

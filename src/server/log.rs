@@ -9,7 +9,7 @@
 //! messages. Knowing which packet was the last one to arrive narrows that down
 //! to exactly one place in this server.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -21,6 +21,25 @@ static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 
 pub fn next_connection_id() -> u64 {
     NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Whether every packet is recorded.
+///
+/// Off by default. A client waiting on chunks sends an empty packet twenty times
+/// a second, so packet logging turned on unconditionally buries the handful of
+/// lines that say anything in a wall of one-byte records. What is left without
+/// it is the lifecycle: connections, phases, and the errors, which are the lines
+/// anyone actually reads.
+static VERBOSE: AtomicBool = AtomicBool::new(false);
+
+/// Turns packet logging on or off.
+pub fn set_verbose(on: bool) {
+    VERBOSE.store(on, Ordering::Relaxed);
+}
+
+/// Whether packet logging is on.
+pub fn verbose() -> bool {
+    VERBOSE.load(Ordering::Relaxed)
 }
 
 /// A handle used to log one connection's traffic.
@@ -49,26 +68,32 @@ impl ConnLog {
         &self.peer
     }
 
-    /// Records a packet that arrived.
-    ///
-    /// `packet` is the name from `packets.json` and `state` the phase it
-    /// belongs to, because the same id means different things in different
-    /// phases: 3 is `finish_configuration` in configuration and
-    /// `login_compression` in login.
-    pub fn in_packet(&self, packet: &str, state: &str, len: usize) {
-        log_line(&format_args!(
-            "[conn {}] <- {} ({}/{}) {} bytes",
-            self.id, packet, state, self.phase, len
-        ));
+/// Records a packet that arrived, when packet logging is on.
+///
+/// `packet` is the name from `packets.json` and `state` the phase it
+/// belongs to, because the same id means different things in different
+/// phases: 3 is `finish_configuration` in configuration and
+/// `login_compression` in login.
+pub fn in_packet(&self, packet: &str, state: &str, len: usize) {
+    if !verbose() {
+        return;
     }
+    log_line(&format_args!(
+        "[conn {}] <- {} ({}/{}) {} bytes",
+        self.id, packet, state, self.phase, len
+    ));
+}
 
-    /// Records a packet that was sent.
-    pub fn out_packet(&self, packet: &str, state: &str, len: usize) {
-        log_line(&format_args!(
-            "[conn {}] -> {} ({}/{}) {} bytes",
-            self.id, packet, state, self.phase, len
-        ));
+/// Records a packet that was sent, when packet logging is on.
+pub fn out_packet(&self, packet: &str, state: &str, len: usize) {
+    if !verbose() {
+        return;
     }
+    log_line(&format_args!(
+        "[conn {}] -> {} ({}/{}) {} bytes",
+        self.id, packet, state, self.phase, len
+    ));
+}
 
     pub fn note(&self, msg: impl AsRef<str>) {
         log_line(&format_args!("[conn {}] {}", self.id, msg.as_ref()));
@@ -266,6 +291,20 @@ impl Default for RateLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packet_logging_is_off_until_it_is_asked_for() {
+        // The gate itself is what is being checked; what it prints goes to stdout
+        // and is not worth capturing here.
+        set_verbose(false);
+        assert!(!verbose());
+
+        set_verbose(true);
+        assert!(verbose());
+
+        // Left off, so a later test in this binary does not depend on order.
+        set_verbose(false);
+    }
 
     #[test]
     fn the_rate_limiter_repeats_only_the_first_few() {

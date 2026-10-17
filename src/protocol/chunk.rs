@@ -75,13 +75,31 @@ pub mod heightmap {
 ///
 /// `x` and `z` are chunk coordinates, so block (0, 0) is chunk (0, 0) and block
 /// (16, 0) is chunk (1, 0).
+///
+/// With no terrain this sends air everywhere. See [`write_chunk_with_states`]
+/// for the version that carries real ground.
 pub fn write_chunk(out: &mut Vec<u8>, x: i32, z: i32) {
+    let air = vec![AIR_STATE_ID; BLOCK_ENTRIES];
+    let mut sections = Vec::with_capacity(SECTIONS);
+    for _ in 0..SECTIONS {
+        sections.push(air.clone());
+    }
+    write_chunk_with_states(out, x, z, &sections);
+}
+
+/// Writes the chunk, with each section's block states supplied.
+///
+/// `sections` has one entry per section, bottom first, and each is 4096 state
+/// ids in wire order. This is the split between generating a world and putting it
+/// on the wire: the world module knows about terrain and the wire module knows
+/// about the protocol, and neither needs to know about the other.
+pub fn write_chunk_with_states(out: &mut Vec<u8>, x: i32, z: i32, sections: &[Vec<i32>]) {
     VarInt(id::LEVEL_CHUNK_WITH_LIGHT).write(out);
     out.extend_from_slice(&x.to_be_bytes());
     out.extend_from_slice(&z.to_be_bytes());
 
     write_heightmaps(out);
-    write_section_buffer(out);
+    write_sections(out, sections);
     write_block_entities(out);
     write_light(out);
 }
@@ -127,16 +145,23 @@ fn write_heightmap_bits(out: &mut Vec<u8>) {
 /// The section buffer: every section back to back, no lengths between them.
 ///
 /// Each section is two shorts counting the blocks and fluids it holds, then the
-/// block states, then the biomes.
-fn write_section_buffer(out: &mut Vec<u8>) {
-    let mut body = Vec::with_capacity(SECTIONS * 8);
+/// block states, then the biomes. Both counts are zero here, which is right for
+/// a world with no fluid in it: a section with water in it would report a
+/// different fluid count and the client uses it to decide what to render.
+fn write_sections(out: &mut Vec<u8>, sections: &[Vec<i32>]) {
+    assert_eq!(
+        sections.len(),
+        SECTIONS,
+        "a chunk is twenty-four sections tall"
+    );
 
-    for _ in 0..SECTIONS {
-        // Both counts are zero: there is nothing in an empty section.
+    let mut body = Vec::with_capacity(SECTIONS * 16);
+
+    for states in sections {
         body.extend_from_slice(&0i16.to_be_bytes());
         body.extend_from_slice(&0i16.to_be_bytes());
 
-        write_single_value_palette(&mut body, AIR_STATE_ID);
+        write_block_states(&mut body, states);
         write_single_value_palette(&mut body, DEFAULT_BIOME_ID);
     }
 
@@ -155,6 +180,79 @@ fn write_section_buffer(out: &mut Vec<u8>) {
 fn write_single_value_palette(out: &mut Vec<u8>, value: i32) {
     out.push(0);
     VarInt(value).write(out);
+}
+
+/// Bits per entry for a block state container with more than one value.
+///
+/// Four, always, and not the minimum. `Strategy.getConfigurationForBitCount`
+/// maps one through four onto a single configuration:
+///
+/// ```java
+/// case 1, 2, 3, 4 -> Strategy.FOUR_BITS_LINEAR;
+/// ```
+///
+/// So a palette of four blocks is stored at four bits an entry, not two. Writing
+/// the minimum would be smaller and would decode as the wrong blocks, since the
+/// reader derives the layout from this byte rather than from the palette.
+const BLOCK_BITS: usize = 4;
+
+/// Entries in a block state container: one section.
+const BLOCK_ENTRIES: usize = SECTION_VOLUME;
+
+/// Writes a block state container from the section's states in wire order.
+///
+/// The order matters and is already pinned by the world module: the index of a
+/// block is `x + z * 16 + y * 256`, which is the formula the game uses. Passing
+/// the states in a different order would produce a chunk that decodes cleanly and
+/// is wrong.
+fn write_block_states(out: &mut Vec<u8>, states: &[i32]) {
+    assert_eq!(
+        states.len(),
+        BLOCK_ENTRIES,
+        "a section is sixteen by sixteen by sixteen"
+    );
+
+    // The palette, in order of first appearance so the same terrain always
+    // produces the same bytes.
+    let mut palette: Vec<i32> = Vec::new();
+    let mut indices: Vec<u8> = Vec::with_capacity(BLOCK_ENTRIES);
+
+    for state in states {
+        match palette.iter().position(|p| p == state) {
+            Some(at) => indices.push(at as u8),
+            None => {
+                palette.push(*state);
+                indices.push((palette.len() - 1) as u8);
+            }
+        }
+    }
+
+    if palette.len() == 1 {
+        write_single_value_palette(out, palette[0]);
+        return;
+    }
+
+    out.push(BLOCK_BITS as u8);
+
+    VarInt(palette.len() as i32).write(out);
+    for state in &palette {
+        VarInt(*state).write(out);
+    }
+
+    // Sixteen entries to a long at four bits, and 4096 entries is 256 longs.
+    let per_long = 64 / BLOCK_BITS;
+    let longs = BLOCK_ENTRIES.div_ceil(per_long);
+    let mut packed = vec![0u64; longs];
+
+    for (entry, index) in indices.iter().enumerate() {
+        let long = entry / per_long;
+        let shift = (entry % per_long) * BLOCK_BITS;
+        packed[long] |= (*index as u64) << shift;
+    }
+
+    for value in packed {
+        out.extend_from_slice(&value.to_be_bytes());
+    }
 }
 
 /// Block entities: none.
@@ -244,7 +342,7 @@ mod tests {
     #[test]
     fn the_section_buffer_has_twenty_four_sections() {
         let mut w = Vec::new();
-        write_section_buffer(&mut w);
+        write_sections(&mut w, &empty_sections());
 
         let (length, consumed) = VarInt::read(&mut &w[..]).expect("a length");
         let body = &w[consumed..consumed + length.0 as usize];
@@ -253,6 +351,112 @@ mod tests {
         let per_section = 2 + 2 + 2 + 2;
         assert_eq!(body.len(), SECTIONS * per_section);
         assert_eq!(length.0 as usize, SECTIONS * per_section);
+    }
+
+    /// Twenty-four sections of air, which is what an empty chunk is.
+    fn empty_sections() -> Vec<Vec<i32>> {
+        vec![vec![AIR_STATE_ID; BLOCK_ENTRIES]; SECTIONS]
+    }
+
+    #[test]
+    fn a_palette_of_more_than_one_is_four_bits() {
+        // Not the minimum. Four blocks would fit in two bits, and the game
+        // stores it in four.
+        let mut states = vec![AIR_STATE_ID; BLOCK_ENTRIES];
+        states[0] = 1; // stone
+        states[1] = 9; // grass
+        states[2] = 10; // dirt
+
+        let mut w = Vec::new();
+        write_block_states(&mut w, &states);
+
+        assert_eq!(w[0], 4, "four bits an entry, however few blocks");
+        // Air is still in there, so four entries, not three.
+        assert_eq!(w[1], 4, "air, stone, grass and dirt");
+        assert_eq!(
+            &w[2..6],
+            &[1, 9, 10, 0],
+            "in order of first appearance, so the three written blocks come \
+             first and the air they replaced is last"
+        );
+
+        // Sixteen entries to a long, 4096 entries, so 256 longs.
+        let longs = 2 + 4 + 256 * 8;
+        assert_eq!(w.len(), longs, "then the packed data with no length prefix");
+    }
+
+    #[test]
+    fn a_single_value_still_takes_the_zero_bit_path() {
+        let mut w = Vec::new();
+        write_block_states(&mut w, &vec![7i32; BLOCK_ENTRIES]);
+
+        assert_eq!(w, vec![0, 7], "a byte of bits and the value, nothing else");
+    }
+
+    #[test]
+    fn the_packed_data_holds_palette_indices_not_state_ids() {
+        let mut states = vec![0i32; BLOCK_ENTRIES];
+        states[0] = 1;
+        states[15] = 2;
+        states[16] = 3;
+
+        let mut w = Vec::new();
+        write_block_states(&mut w, &states);
+
+        // Stone is seen first, so the palette is [1, 0, 2, 3] and stone is index
+        // zero. This is the part worth pinning: the packed data is a lookup into
+        // the palette, not the state id itself.
+        assert_eq!(&w[2..6], &[1, 0, 2, 3], "palette order");
+
+        // One byte of bits, one of palette size, four palette ids.
+        let data = 1 + 1 + 4;
+        let first = u64::from_be_bytes(w[data..data + 8].try_into().expect("a long"));
+        assert_eq!(first & 0xF, 0, "entry zero is stone, which is palette index zero");
+        assert_eq!((first >> 60) & 0xF, 2, "and entry fifteen is index two");
+
+        let second = u64::from_be_bytes(w[data + 8..data + 16].try_into().expect("a long"));
+        assert_eq!(second & 0xF, 3, "entry sixteen starts the next long");
+    }
+
+    #[test]
+    fn a_chunk_of_terrain_carries_more_than_the_empty_one() {
+        let mut ground = empty_sections();
+        // One section with a flat floor across its bottom layer.
+        for block in ground[0].iter_mut().take(16 * 16) {
+            *block = 1;
+        }
+
+        let mut w = Vec::new();
+        write_chunk_with_states(&mut w, 0, 0, &ground);
+
+        let mut empty = Vec::new();
+        write_chunk(&mut empty, 0, 0);
+
+        assert_eq!(w[0], id::LEVEL_CHUNK_WITH_LIGHT as u8);
+        assert!(
+            w.len() > 3000,
+            "a section at four bits is 2052 bytes, so this should be well past \
+             the empty chunk's size of {}",
+            empty.len()
+        );
+    }
+
+    #[test]
+    fn the_block_ids_the_terrain_uses_are_the_ones_the_game_sends() {
+        // The world module has its own five block registry, and these are the
+        // ids it hands out for them. If the generated table is renumbered these
+        // have to move with it, which is what this pins.
+        let check = |name: &str, expected: i32| {
+            let block = crate::generated::BLOCKS
+                .iter()
+                .find(|b| b.name == name)
+                .unwrap_or_else(|| panic!("{name} is in the block table"));
+            assert_eq!(block.default_state as i32, expected, "{name}");
+        };
+        check("minecraft:air", 0);
+        check("minecraft:stone", 1);
+        check("minecraft:grass_block", 9);
+        check("minecraft:dirt", 10);
     }
 
     #[test]

@@ -513,8 +513,17 @@ fn play(
     // 11. The chunks. This is the first thing the client renders, so it goes after
     //     the world setup above and before anything else about the world.
     //
-    //     Sent in order from the centre outwards, which is what the client
-    //     expects when it is deciding how much of the world is worth keeping.
+    //     Generated here rather than stored, because nothing persists a world yet.
+    //     The terrain generator's own block ids are mapped to the game's state
+    //     ids on the way out: the two registries are unrelated, and the world
+    //     module has no business knowing a protocol id.
+    use crate::world::block::BlockRegistry;
+    use crate::world::pos::ChunkPos;
+    use crate::world::terrain;
+
+    let mut registry = BlockRegistry::new();
+    let palette = terrain::register_terrain(&mut registry);
+
     let mut sent = 0;
     for ring in 0..=crate::protocol::chunk::RADIUS {
         let mut chunks: Vec<(i32, i32)> = Vec::new();
@@ -529,8 +538,22 @@ fn play(
         }
 
         for (dx, dz) in chunks {
+            let chunk = terrain::generate_chunk(
+                ChunkPos { x: dx, z: dz },
+                &palette,
+            );
+
+            let mut sections = Vec::with_capacity(crate::protocol::chunk::SECTIONS);
+            for section in chunk.sections() {
+                sections.push(
+                    crate::world::section::iter_blocks(section)
+                        .map(|block| to_state_id(block, &palette))
+                        .collect(),
+                );
+            }
+
             let mut body = Vec::new();
-            crate::protocol::chunk::write_chunk(&mut body, dx, dz);
+            crate::protocol::chunk::write_chunk_with_states(&mut body, dx, dz, &sections);
             enc.encode(&body, &mut out).map_err(io_err)?;
             sent += 1;
             if super::log::verbose() {
@@ -543,7 +566,7 @@ fn play(
     stream.write_all(&out)?;
     stream.flush()?;
 
-    log.note("chunks sent; all air, so a client falls until it disconnects");
+    log.note("chunks sent; terrain generated, and it is not persisted");
 
     // 11. Stay connected. There is nothing to tick, so this only logs what the
     //     client sends and keeps the socket warm.
@@ -559,6 +582,44 @@ fn play(
             return Ok(());
         }
         dec.queue(&scratch[..n]);
+    }
+}
+
+/// State ids for the blocks the terrain generator produces.
+///
+/// Read from the generated table rather than written out, because these are
+/// indices into thirty-five thousand block states and a hand-written number is a
+/// number that can be wrong without anything noticing.
+fn state_id(name: &str) -> i32 {
+    crate::generated::BLOCKS
+        .iter()
+        .find(|b| b.name == name)
+        .map(|b| b.default_state as i32)
+        .unwrap_or_else(|| panic!("{name} is in the generated block table"))
+}
+
+/// Maps one of the world module's blocks onto the game's state id.
+///
+/// The two registries are unrelated: the world's ids are fixed by registration
+/// order, air through glowstone, and the game's are indices into a generated
+/// table of thirty-five thousand states. Air happens to be zero in both, which is
+/// a coincidence and not a reason to assume the rest line up.
+fn to_state_id(
+    block: crate::world::block::BlockId,
+    palette: &crate::world::terrain::TerrainBlocks,
+) -> i32 {
+    if block == palette.air {
+        state_id("minecraft:air")
+    } else if block == palette.grass {
+        state_id("minecraft:grass_block")
+    } else if block == palette.dirt {
+        state_id("minecraft:dirt")
+    } else if block == palette.stone {
+        state_id("minecraft:stone")
+    } else {
+        // Anything else, glowstone included, is not terrain. Air is the safe
+        // answer: an unknown block would be a hole in the world.
+        state_id("minecraft:air")
     }
 }
 

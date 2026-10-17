@@ -87,16 +87,21 @@ installed.
 | Offline login | done |
 | Configuration: feature flags, registries, tags | done |
 | Play phase: spawn and world setup | done |
-| Chunks sent to a client | done, all air |
-| Terrain in those chunks | **not started** |
+| Chunks sent to a client | done |
+| Terrain in those chunks | done, generated on the fly |
+| Persistence | **not started** |
 | Entities, ticking, the tick loop | **not started** |
 
-236 tests. A client connects, negotiates, receives nine chunks and is placed in
-a world. The world is empty — air everywhere, full skylight, no block light — so
-what you see is sky, and the player falls, because there is nothing to stand on.
-That is the whole of it and it took no shortcuts to get here: the protocol is
-implemented against the decompiled 26.3 server and checked against a real client
-at every step.
+241 tests. A client connects, negotiates, and gets nine chunks of generated
+terrain: grass on top, dirt under it, stone below, hills from two octaves of
+value noise. The world is generated on request and nothing is stored, so it costs
+nothing to start and is forgotten on exit.
+
+Two things about it are worth knowing. The generator's five-block registry and
+the game's thirty-five thousand block states are unrelated, so blocks are mapped
+between them on the way out; and a palette with more than one entry is stored at
+four bits an entry even though four blocks would fit in two, because that is what
+the game does and the reader takes the layout from that byte.
 
 ### Running it
 

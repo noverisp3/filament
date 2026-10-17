@@ -55,10 +55,16 @@ pub fn install() {
 
         unsafe extern "system" fn on_console_signal(_kind: u32) -> i32 {
             request();
-            // Handled, and specifically not "exit": returning zero tells the
-            // console this handler dealt with it and the process keeps running
-            // until the accept loop notices.
-            0
+            // One, which means handled: the console stops there and the process
+            // keeps running until the accept loop notices the flag.
+            //
+            // Zero would mean not handled, which sends the signal on to the next
+            // handler in the list and then to the default action, which is to
+            // terminate the process. That is the opposite of what this function
+            // is for, and returning zero from it was how the first version of
+            // this let Ctrl+C kill the server outright while appearing to
+            // install a handler.
+            1
         }
 
         SetConsoleCtrlHandler(Some(on_console_signal), 1);

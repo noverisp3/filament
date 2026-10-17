@@ -48,11 +48,18 @@ fn commit() -> (String, bool) {
     (sha, dirty)
 }
 
-/// When the build ran, as a unix timestamp.
+/// When the build ran, as a unix timestamp, printed in UTC.
 ///
 /// `SOURCE_DATE_EPOCH` wins when it is set, because a reproducible build that
 /// stamps the wall clock is not reproducible, and the convention exists to let
 /// a build stamp a fixed time instead.
+///
+/// UTC rather than local time on purpose. A build stamp is an instant, and
+/// instants do not have a timezone: it is the reading of it that does. Printed
+/// local, the same build would carry a different string on a machine in
+/// Bangkok and one in Berlin, which makes two builds of the same commit look
+/// different. It is labelled, because a bare `Z` was read as local by the person
+/// who wrote it and cost a confusing minute.
 fn built_at() -> String {
     let seconds: u64 = std::env::var("SOURCE_DATE_EPOCH")
         .ok()
@@ -89,13 +96,24 @@ fn built_at() -> String {
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = if month <= 2 { year + 1 } else { year };
 
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z (UTC)")
 }
 
 fn main() {
+    // Which files this banner depends on, listed rather than left to the default.
+    //
+    // Two mistakes are worth recording. Listing only `build.rs` looks like
+    // tidiness and freezes the banner: any `rerun-if-changed` switches Cargo to
+    // "only these paths", so the commit and build time stopped moving while the
+    // binary kept rebuilding with the fixes in it. And leaving it to the default
+    // alongside a `rerun-if-env-changed` did not work either: the script stopped
+    // running at all once the sources changed.
+    //
+    // Saying "the banner depends on src, Cargo.toml and build.rs" is dull and
+    // correct, which is the whole requirement.
+    println!("cargo:rerun-if-changed=src");
+    println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-changed=build.rs");
-    // The git state is the only thing here that can change without a file
-    // changing, so it asks to be re-run every time rather than on a file watch.
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
 
     let (sha, dirty) = commit();

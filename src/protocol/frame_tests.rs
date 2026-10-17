@@ -97,7 +97,7 @@ fn a_compressed_frame_round_trips() {
     // Highly compressible, so it crosses the threshold.
     let body = vec![7u8; 4096];
     let mut wire = Vec::new();
-    enc.encode(&body, &mut wire);
+    enc.encode(&body, &mut wire).expect("encodes");
     dec.queue(&wire);
 
     let got = dec.next_frame().expect("decodes").expect("a frame");
@@ -105,16 +105,50 @@ fn a_compressed_frame_round_trips() {
 }
 
 #[test]
-fn a_body_under_the_threshold_is_sent_uncompressed() {
+fn a_body_under_the_threshold_still_carries_a_zero_inner_length() {
     let mut enc = FrameEncoder::new();
     enc.set_compression(DEFAULT_COMPRESSION_THRESHOLD);
 
     let body = b"short";
     let mut wire = Vec::new();
-    enc.encode(body, &mut wire);
+    enc.encode(body, &mut wire).expect("encodes");
 
-    // Equal to the plain form: no inner length, no deflate.
-    assert_eq!(wire, raw_frame(body));
+    // Length of the frame, then an inner length of zero, then the payload. The
+    // zero is what tells the client not to inflate, so leaving it out is how a
+    // real client ends up trying to inflate five ASCII bytes.
+    let mut expected = Vec::new();
+    VarInt((body.len() + 1) as i32).write(&mut expected);
+    VarInt(0).write(&mut expected);
+    expected.extend_from_slice(body);
+
+    assert_eq!(wire, expected);
+}
+
+#[test]
+fn the_threshold_is_inclusive() {
+    // `CompressionEncoder` takes the deflate branch when `uncompressedLength >=
+    // threshold`, so a body of exactly the threshold is deflated and one byte
+    // less is sent raw. Getting this backwards costs one byte at the boundary
+    // and nothing visible, which is why it is pinned rather than left implicit.
+    let mut enc = FrameEncoder::new();
+    enc.set_compression(64);
+
+    // Long enough that compressing wins, so the wire size tells the two apart
+    // without decoding anything.
+    let payload = vec![0u8; 64];
+
+    let mut at = Vec::new();
+    enc.encode(&payload, &mut at).expect("encodes");
+
+    let mut below = Vec::new();
+    enc.encode(&payload[..63], &mut below).expect("encodes");
+
+    assert!(
+        at.len() < below.len(),
+        "a body exactly at the threshold must be deflated: {} vs {}",
+        at.len(),
+        below.len()
+    );
 }
 
 #[test]
@@ -127,7 +161,7 @@ fn a_compressed_frame_smaller_than_it_would_be_uncompressed_is_still_compressed(
 
     let body = b"abcd"; // exactly at the threshold, and incompressible
     let mut wire = Vec::new();
-    enc.encode(body, &mut wire);
+    enc.encode(body, &mut wire).expect("encodes");
 
     assert_ne!(
         wire,
@@ -214,7 +248,7 @@ fn many_frames_of_mixed_sizes_stay_aligned() {
 
     let mut wire = Vec::new();
     for b in &bodies {
-        enc.encode(b, &mut wire);
+        enc.encode(b, &mut wire).expect("encodes");
     }
     dec.queue(&wire);
 

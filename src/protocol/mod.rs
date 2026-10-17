@@ -7,6 +7,7 @@
 
 pub mod frame;
 pub mod handshake;
+pub mod login;
 pub mod primitive;
 
 #[cfg(test)]

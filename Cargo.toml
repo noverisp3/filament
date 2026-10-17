@@ -36,6 +36,11 @@ flate2 = "1.1"
 # the client report the server as unreachable rather than as badly formatted.
 serde_json = "1.0"
 
+# MD5, and only to reproduce Mojang's offline UUID: `UUID.nameUUIDFromBytes`
+# is defined in terms of it. Not used for anything security related, since the
+# input is a name the client already chose.
+md-5 = "0.10"
+
 [profile.dev]
 opt-level = 1
 

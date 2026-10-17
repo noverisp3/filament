@@ -198,27 +198,46 @@ impl FrameEncoder {
     }
 
     /// Encodes one packet body into `out`.
-    pub fn encode(&self, body: &[u8], out: &mut Vec<u8>) {
-        match self.threshold {
-            Some(t) if body.len() as i32 >= t => {
-                let mut deflated = Vec::new();
-                {
-                    use std::io::Write;
-                    let mut z = flate2::write::ZlibEncoder::new(&mut deflated, flate2::Compression::default());
-                    let _ = z.write_all(body);
-                }
+///
+/// Once a threshold is set, **every** frame carries an inner length: the
+/// uncompressed size when the payload is deflated, and zero when it is not.
+/// Writing that zero is not optional. `CompressionEncoder.encode` upstream
+/// writes it in both branches, because the client decides whether to inflate by
+/// reading it, and a frame that omits it makes the client read the first byte
+/// of the payload as a length. That surfaces as `DataFormatException:
+/// incorrect header check`, which says nothing about the real cause.
+pub fn encode(&self, body: &[u8], out: &mut Vec<u8>) -> Result<(), FrameError> {
+        let Some(threshold) = self.threshold else {
+            VarInt(body.len() as i32).write(out);
+            out.extend_from_slice(body);
+            return Ok(());
+        };
 
-                let mut inner = Vec::new();
-                VarInt(body.len() as i32).write(&mut inner);
-                inner.extend_from_slice(&deflated);
+        let mut inner = Vec::with_capacity(body.len() + 8);
 
-                VarInt(inner.len() as i32).write(out);
-                out.extend_from_slice(&inner);
+        if (body.len() as i32) < threshold {
+            // Under the threshold: the length is zero and the payload follows as
+            // it is.
+            VarInt(0).write(&mut inner);
+            inner.extend_from_slice(body);
+        } else {
+            let mut deflated = Vec::new();
+            {
+                use std::io::Write;
+                let mut z = flate2::write::ZlibEncoder::new(
+                    &mut deflated,
+                    flate2::Compression::default(),
+                );
+                z.write_all(body).map_err(|e| FrameError::Inflate(e.to_string()))?;
             }
-            _ => {
-                VarInt(body.len() as i32).write(out);
-                out.extend_from_slice(body);
-            }
+            // The length written is the uncompressed size, which is what the
+            // client allocates before inflating.
+            VarInt(body.len() as i32).write(&mut inner);
+            inner.extend_from_slice(&deflated);
         }
+
+        VarInt(inner.len() as i32).write(out);
+        out.extend_from_slice(&inner);
+        Ok(())
     }
 }

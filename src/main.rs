@@ -11,6 +11,7 @@ pub mod world;
 use std::net::SocketAddr;
 
 use server::StatusServer;
+use server::log;
 
 /// Where to listen unless told otherwise.
 const DEFAULT_ADDR: &str = "127.0.0.1:25565";
@@ -27,8 +28,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| DEFAULT_ADDR.to_string())
         .parse()?;
 
-    let port = addr.port();
-
     let status = protocol::handshake::status(
         DEFAULT_DESCRIPTION,
         format!("filament {}", server::PROTOCOL_VERSION),
@@ -38,10 +37,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let server = StatusServer::bind(&addr.to_string(), status)?;
-    println!("[filament] listening on {addr}");
-    println!("[filament] protocol {}", server::PROTOCOL_VERSION);
-    println!("[filament] port {port}");
-    println!("[filament] login and the world are not implemented yet");
+
+    log::note(format!("filament listening on {addr}"));
+    log::note(format!("protocol {}", server::PROTOCOL_VERSION));
+    log::note(format!("max players 20"));
+    log::note("login is implemented; configuration and the world are not yet");
 
     server.serve_forever();
     Ok(())

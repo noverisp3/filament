@@ -364,8 +364,7 @@ fn configure(stream: &mut TcpStream, log: ConnLog) -> std::io::Result<()> {
             match id {
                 crate::protocol::configuration::id::SERVERBOUND_FINISH_CONFIGURATION => {
                     log.note("client finished configuration");
-                    log.note("the play state is not implemented, closing");
-                    return Ok(());
+                    return play(stream, dec, enc, log, out);
                 }
                 crate::protocol::configuration::id::SERVERBOUND_CLIENT_INFORMATION => {
                     match crate::protocol::configuration::ClientInformation::read(&frame) {
@@ -382,6 +381,138 @@ fn configure(stream: &mut TcpStream, log: ConnLog) -> std::io::Result<()> {
                 }
                 _ => {}
             }
+        }
+    }
+}
+
+/// The play phase, and the first one that shows anything.
+///
+/// The order is the order a real server uses, and it matters more here than in
+/// the earlier phases: the client processes what arrives and drops what it
+/// cannot use, so a packet in the wrong place is not an error, it is silence.
+/// The sequence the capture recorded is login, difficulty, abilities, held slot,
+/// recipes, position, spawn, border, time, and finally the game event that says
+/// to start waiting for chunks.
+///
+/// There are no chunks yet, so the client will sit on the loading screen. That
+/// is the honest state of the server: it can be joined, and the world is empty.
+fn play(
+    stream: &mut TcpStream,
+    mut dec: FrameDecoder,
+    enc: FrameEncoder,
+    log: ConnLog,
+    pending: Vec<u8>,
+) -> std::io::Result<()> {
+    use crate::protocol::play as p;
+
+    let log = log.phase("play");
+
+    // Compression carries over from the configuration phase; both sides keep
+    // it for the rest of the connection.
+    let mut scratch = [0u8; 8192];
+    let mut out = pending;
+
+    let send = |out: &mut Vec<u8>, body: &[u8], name: &str, log: &ConnLog| -> std::io::Result<()> {
+        enc.encode(body, out).map_err(io_err)?;
+        log.out_packet(name, "play", body.len());
+        Ok(())
+    };
+
+    // 1. Login. Entity id 0 because nothing else exists to collide with it.
+    let mut body = Vec::new();
+    p::write_login(
+        &mut body,
+        &p::Login {
+            entity_id: 0,
+            hardcore: false,
+            levels: &[
+                "minecraft:overworld",
+                "minecraft:the_nether",
+                "minecraft:the_end",
+            ],
+            max_players: 20,
+            view_distance: 10,
+            simulation_distance: 10,
+            dimension: "minecraft:overworld",
+            seed: 0,
+            game_type: 0,
+            is_flat: true,
+            portal_cooldown: 0,
+            sea_level: -64,
+        },
+    );
+    send(&mut out, &body, "login", &log)?;
+
+    // 2. Difficulty: easy, which is index 1. Peaceful would be 0 and would stop
+    //    mobs spawning, which is not a decision this server should make.
+    let mut body = Vec::new();
+    p::write_difficulty(&mut body, 1);
+    send(&mut out, &body, "change_difficulty", &log)?;
+
+    // 3. Abilities: nothing allowed.
+    let mut body = Vec::new();
+    p::write_player_abilities(&mut body);
+    send(&mut out, &body, "player_abilities", &log)?;
+
+    // 4. The slot in hand.
+    let mut body = Vec::new();
+    p::write_set_held_slot(&mut body, 0);
+    send(&mut out, &body, "set_held_slot", &log)?;
+
+    // 5. The spawn. Halfway between block corners, so the player is inside a
+    //    block rather than on a seam, and above the sea level the login says.
+    let spawn = p::Movement::default();
+    let (x, y, z) = (spawn.x, spawn.y, spawn.z);
+    let mut body = Vec::new();
+    p::write_player_position(&mut body, 1, &spawn);
+    send(&mut out, &body, "player_position", &log)?;
+
+    // 6. Where a respawn returns to.
+    let mut body = Vec::new();
+    p::write_set_default_spawn(&mut body, "minecraft:overworld", x, y, z);
+    send(&mut out, &body, "set_default_spawn_position", &log)?;
+
+    // 7. No world border.
+    let mut body = Vec::new();
+    p::write_initialize_border(&mut body);
+    send(&mut out, &body, "initialize_border", &log)?;
+
+    // 8. Time. Day one, noon, with the client allowed to change it.
+    let mut body = Vec::new();
+    p::write_set_time(&mut body, 0, 6000);
+    send(&mut out, &body, "set_time", &log)?;
+
+    // 9. Where chunks are centred. Until this arrives the client has nowhere to
+    //    ask for them.
+    let mut body = Vec::new();
+    p::write_chunk_cache_center(&mut body, 0, 0);
+    send(&mut out, &body, "set_chunk_cache_center", &log)?;
+
+    // 10. Start waiting for level chunks. Reason 13 is the one the client treats
+    //     as "hold the loading screen", and it is what makes it wait instead of
+    //     reporting that the world failed to load.
+    let mut body = Vec::new();
+    p::write_game_event(&mut body, 13, 0.0);
+    send(&mut out, &body, "game_event", &log)?;
+
+    stream.write_all(&out)?;
+    stream.flush()?;
+
+    log.note("play sent; no chunks yet, so the client will wait on the loading screen");
+
+    // 11. Stay connected. There is nothing to tick, so this only answers what
+    //     the client sends and keeps the socket warm.
+    loop {
+        let n = stream.read(&mut scratch)?;
+        if n == 0 {
+            log.note("client closed during play");
+            return Ok(());
+        }
+        dec.queue(&scratch[..n]);
+
+        while let Some(frame) = dec.next_frame().map_err(io_err)? {
+            let id = packet_id_of(&frame);
+            log.in_packet(&packet_name("play-s2c", id), "play", frame.len());
         }
     }
 }

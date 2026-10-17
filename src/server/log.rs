@@ -157,6 +157,53 @@ pub fn packet_name(state: &str, id: i32) -> String {
         ("configuration", 14) => "update_tags".to_string(),
         ("configuration", 15) => "select_known_packs".to_string(),
 
+        // Play, clientbound. The ids come from packets.json and the ones here
+        // are the ones a connection entering the world actually sees, which is
+        // what made the capture readable: before this every play packet came
+        // out as "play:75".
+        ("play", 10) => "change_difficulty".to_string(),
+        ("play", 11) => "chunk_batch_finished".to_string(),
+        ("play", 12) => "chunk_batch_start".to_string(),
+        ("play", 13) => "chunks_biomes".to_string(),
+        ("play", 16) => "commands".to_string(),
+        ("play", 32) => "disconnect".to_string(),
+        ("play", 34) => "entity_event".to_string(),
+        ("play", 39) => "game_event".to_string(),
+        ("play", 44) => "initialize_border".to_string(),
+        ("play", 45) => "keep_alive".to_string(),
+        ("play", 46) => "level_chunk_with_light".to_string(),
+        ("play", 49) => "light_update".to_string(),
+        ("play", 50) => "login".to_string(),
+        ("play", 63) => "pong_response".to_string(),
+        ("play", 65) => "player_abilities".to_string(),
+        ("play", 71) => "player_info_update".to_string(),
+        ("play", 72) => "player_look_at".to_string(),
+        ("play", 73) => "player_position".to_string(),
+        ("play", 75) => "recipe_book_add".to_string(),
+        ("play", 77) => "recipe_book_settings".to_string(),
+        ("play", 83) => "post_effects".to_string(),
+        ("play", 88) => "server_data".to_string(),
+        ("play", 96) => "set_chunk_cache_center".to_string(),
+        ("play", 97) => "set_chunk_cache_radius".to_string(),
+        ("play", 99) => "set_default_spawn_position".to_string(),
+        ("play", 107) => "set_held_slot".to_string(),
+        ("play", 115) => "set_time".to_string(),
+        ("play", 120) => "start_configuration".to_string(),
+        ("play", 130) => "ticking_state".to_string(),
+        ("play", 131) => "ticking_step".to_string(),
+        ("play", 134) => "update_attributes".to_string(),
+        ("play", 136) => "update_recipes".to_string(),
+        ("play", 137) => "update_tags".to_string(),
+        ("play", 142) => "clear_dialog".to_string(),
+
+        // Serverbound in play. Only the ones a connection actually sends
+        // before any chunk arrives.
+        ("play-s2c", 0) => "confirm_teleportation".to_string(),
+        ("play-s2c", 6) => "client_command".to_string(),
+        ("play-s2c", 23) => "keep_alive".to_string(),
+        ("play-s2c", 32) => "player_position".to_string(),
+        ("play-s2c", 38) => "player_loaded".to_string(),
+
         (state, id) => format!("{state}:{id}"),
     }
 }
@@ -259,7 +306,8 @@ mod tests {
 
     #[test]
     fn an_unknown_id_still_reports_the_state_it_came_from() {
-        assert_eq!(packet_name("play", 99), "play:99");
+        assert_eq!(packet_name("play", 9999), "play:9999");
+        assert_eq!(packet_name("nonsense", 1), "nonsense:1");
     }
 
     #[test]

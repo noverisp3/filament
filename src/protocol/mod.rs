@@ -9,6 +9,7 @@ pub mod configuration;
 pub mod frame;
 pub mod handshake;
 pub mod login;
+pub mod play;
 pub mod primitive;
 
 #[cfg(test)]

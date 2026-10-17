@@ -902,6 +902,31 @@ mod tests {
     }
 
     #[test]
+    fn a_block_update_is_a_whole_packet_in_a_fixed_shape() {
+        let mut out = Vec::new();
+        write_block_update(&mut out, 0, 63, 0, 0);
+
+        // One byte for the id, eight for the position, one for the state.
+        assert_eq!(
+            out.len(),
+            10,
+            "a block position is a fixed eight byte long; a VarLong here is one \
+             byte and the client reads the rest of the packet as coordinates"
+        );
+        assert_eq!(out[0], id::BLOCK_UPDATE as u8);
+        assert_eq!(&out[1..9], &pack_block_pos(0, 63, 0).to_be_bytes());
+        assert_eq!(out[9], 0, "state zero is air");
+
+        // Two updates in one buffer is two packets back to back, which is what
+        // the caller encodes as separate frames.
+        let mut two = Vec::new();
+        write_block_update(&mut two, 1, 2, 3, 4);
+        write_block_update(&mut two, 5, 6, 7, 8);
+        assert_eq!(two.len(), 20);
+        assert_eq!(two[10], id::BLOCK_UPDATE as u8);
+    }
+
+    #[test]
     fn a_break_action_reads_the_block_it_names() {
         let mut frame = Vec::new();
         VarInt(id::SERVERBOUND_PLAYER_ACTION).write(&mut frame);

@@ -118,6 +118,34 @@ connections, phases, and errors.
 
 ### Where the protocol data came from
 
+#### Read every packet's own codec
+
+Nearly every packet bug in this project was the same mistake: taking the shape of
+a neighbouring packet and assuming it carried over. Three so far, each of which
+decoded cleanly here and was rejected by the game:
+
+- `accept_teleportation` written with one field. The game reads six, and says so
+  by hanging up.
+- `block_update` with its position as a VarLong. A block position is a fixed
+  eight byte long, so a VarLong is one byte and the client runs out of packet.
+- `forget_level_chunk` with two VarInts for the chunk coordinate. It is a
+  `ChunkPos`, which is one long with x in the low half.
+
+The neighbours are all different, which is exactly why they are dangerous:
+
+| Packet | Coordinate encoding |
+|---|---|
+| `level_chunk_with_light` | two `int32` |
+| `set_chunk_cache_center` | two `VarInt` |
+| `block_update` | one packed long, 26/12/26 |
+| `forget_level_chunk` | one long, x low and z high |
+
+The rule that follows: open the packet's own class in the decompiled source and
+read its `STREAM_CODEC` before writing it. Do not infer it from a packet in the
+same family, and do not infer it from the id.
+
+#### Three tables
+
 Three tables are captured or generated rather than written by hand, and it is
 worth saying why, because in two cases the data generator's output does not
 contain what is needed and guessing would have been wrong:

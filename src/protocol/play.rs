@@ -467,10 +467,17 @@ pub fn pack_block_pos(x: i32, y: i32, z: i32) -> i64 {
 /// Without this the client's chunk cache only ever grows, and the server's
 /// memory goes with it: every chunk ever visited stays loaded on both sides
 /// for the length of the session.
+///
+/// The coordinate is one long, not two VarInts. That is not a guess about this
+/// packet being different: the neighbouring ones genuinely differ.
+/// `set_chunk_cache_center` is two VarInts and `level_chunk_with_light` is two
+/// int32s, and this is a `ChunkPos`, which packs into a fixed eight bytes with x
+/// in the low half and z in the high half. Writing VarInts here makes a packet
+/// that decodes as far as the id and no further.
 pub fn write_forget_chunk(out: &mut Vec<u8>, chunk_x: i32, chunk_z: i32) {
     VarInt(id::FORGET_LEVEL_CHUNK).write(out);
-    VarInt(chunk_x).write(out);
-    VarInt(chunk_z).write(out);
+    let packed = (chunk_x as i64 & 0xFFFF_FFFF) | ((chunk_z as i64 & 0xFFFF_FFFF) << 32);
+    out.extend_from_slice(&packed.to_be_bytes());
 }
 
 /// Writes a `block_update` for one block.
@@ -915,22 +922,23 @@ mod tests {
     }
 
     #[test]
-    fn a_forget_packet_is_a_chunk_coordinate_pair() {
+    fn a_forget_packet_carries_a_chunk_position_in_one_long() {
         let mut out = Vec::new();
         write_forget_chunk(&mut out, -7, 12);
 
+        // One byte for the id and eight for the position, and no more: a
+        // VarInt pair here decodes as far as the id.
+        assert_eq!(out.len(), 9);
+
         let mut r = &out[..];
-        let (id, used_id) = VarInt::read(&mut r).expect("an id");
+        let (id, used) = VarInt::read(&mut r).expect("an id");
         assert_eq!(id.0, id::FORGET_LEVEL_CHUNK);
-        let (x, used_x) = VarInt::read(&mut r).expect("an x");
-        let (z, used_z) = VarInt::read(&mut r).expect("a z");
-        assert_eq!((x.0, z.0), (-7, 12));
-        // A negative coordinate costs five bytes, so this is not a flat three.
-        assert_eq!(
-            used_id + used_x + used_z,
-            out.len(),
-            "the packet ends after the pair"
-        );
+        assert_eq!(used, 1);
+
+        // x in the low half, z in the high half.
+        let packed = i64::from_be_bytes(r.try_into().expect("eight bytes"));
+        assert_eq!((packed & 0xFFFF_FFFF) as i32, -7);
+        assert_eq!((packed >> 32) as i32, 12);
     }
 
     #[test]

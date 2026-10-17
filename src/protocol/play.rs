@@ -157,8 +157,13 @@ fn write_spawn_info(
     // An optional last death location, absent.
     out.push(0);
 
-    out.extend_from_slice(&portal_cooldown.to_be_bytes());
-    out.extend_from_slice(&sea_level.to_be_bytes());
+    // VarInts, not the ints the record declares them as. The declaration is what
+    // led to writing four bytes each: the client reads one, stops on the first
+    // zero byte of the pair, and reports the remaining six as trailing bytes on
+    // the login packet. The capture settles it, and the capture writes the
+    // cooldown as a single 00 and the sea level as a five byte VarInt.
+    VarInt(portal_cooldown).write(out);
+    VarInt(sea_level).write(out);
 }
 
 /// Writes `ClientboundPlayerPositionPacket`.
@@ -440,6 +445,44 @@ mod tests {
         write_login(&mut w, &login_zeroed());
 
         assert_eq!(&w[w.len() - 2..], &[0, 0], "offline mode, no secure chat");
+    }
+
+    #[test]
+    fn the_cooldown_and_sea_level_are_varints() {
+        // This is the field pair that cost a run. Writing them as the ints the
+        // record declares them produces a login the client reads six bytes short
+        // of, and reports as "login was larger than I expected, found 6 bytes
+        // extra". The capture shows the real encoding: a cooldown of zero is one
+        // byte, and the sea level is a five byte VarInt because it is negative.
+        let login = Login {
+            portal_cooldown: 0,
+            sea_level: -63,
+            ..login_zeroed()
+        };
+        let mut w = Vec::new();
+        write_login(&mut w, &login);
+
+        assert_eq!(
+            &w[w.len() - 8..],
+            &[0, 0xc1, 0xff, 0xff, 0xff, 0x0f, 0, 0],
+            "cooldown as one byte, sea level as five, then the two session flags"
+        );
+    }
+
+    #[test]
+    fn a_login_is_the_length_the_capture_recorded() {
+        // 114 bytes for the packet as a stock server sent it: one id, four for
+        // the entity, one for hardcore, one count, the three dimension names,
+        // three distances, three flags, the holder and its key, the seed, the
+        // five spawn fields, two VarInts and the two session flags.
+        let mut w = Vec::new();
+        write_login(&mut w, &login_6());
+
+        assert_eq!(
+            w.len(),
+            114,
+            "a mismatch here means a field is being written at the wrong width"
+        );
     }
 
     #[test]

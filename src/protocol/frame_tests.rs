@@ -285,3 +285,43 @@ fn many_frames_of_mixed_sizes_stay_aligned() {
         assert_eq!(a, b, "frame {i} came back wrong");
     }
 }
+#[test]
+fn frames_already_buffered_are_available_without_reading_the_socket() {
+    // The client sends its handshake and its status request in one write, so by
+    // the time the first frame has been taken, the second is already sitting in
+    // the decoder. A reader that calls read() before draining blocks on a socket
+    // that has nothing coming, because the client is waiting for the reply. That
+    // is what left the server looking stuck on "Pinging...".
+    let mut dec = FrameDecoder::new();
+    let mut wire = raw_frame(b"first");
+    wire.extend(raw_frame(b"second"));
+
+    dec.queue(&wire);
+
+    assert_eq!(dec.next_frame().expect("decodes"), Some(b"first".to_vec()));
+    // No read() in between: the second frame must be ready right away.
+    assert_eq!(
+        dec.next_frame().expect("decodes"),
+        Some(b"second".to_vec()),
+        "a frame already in the buffer must not wait on the socket"
+    );
+    assert_eq!(dec.next_frame().expect("decodes"), None, "and then it is empty");
+}
+
+#[test]
+fn a_partner_decoder_still_sees_everything_a_handover_missed() {
+    // The other half of the same bug: starting a fresh decoder at a phase
+    // boundary throws away whatever arrived behind the packet that ended the
+    // previous phase. This checks the fix, which is to hand the decoder over.
+    let mut dec = FrameDecoder::new();
+    let mut wire = raw_frame(b"hello");
+    wire.extend(raw_frame(b"hello_again"));
+    dec.queue(&wire);
+
+    assert_eq!(dec.next_frame().expect("decodes"), Some(b"hello".to_vec()));
+    // Same decoder, not a new one.
+    assert_eq!(
+        dec.next_frame().expect("decodes"),
+        Some(b"hello_again".to_vec())
+    );
+}

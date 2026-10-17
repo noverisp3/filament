@@ -146,41 +146,40 @@ Ok(Some(frame)) => {
 /// threshold as garbage and disconnects.
 fn login(stream: &mut TcpStream, log: ConnLog) -> std::io::Result<()> {
     use crate::protocol::frame::DEFAULT_COMPRESSION_THRESHOLD;
-    use crate::protocol::login::{
-        read_hello, write_login_compression, write_login_finished, Uuid,
-    };
+    use crate::protocol::login::{write_login_compression, write_login_finished, Uuid};
 
     let log = log.phase("login");
     let mut dec = FrameDecoder::new();
     let mut enc = FrameEncoder::new();
     let mut scratch = [0u8; 8192];
 
-    // The client names itself.
-    let name = 'hello: {
+    // The client names itself. The loop is the value: `break name` leaves it with
+    // the name, and that is what the block evaluates to.
+    let name: String = {
         loop {
+            // Drain what is already buffered before reading. The hello is often
+            // in the same segment as the handshake, so it is usually already
+            // here on the first pass, and reading the socket first would wait
+            // on a client that is waiting for us.
+            if let Some(frame) = dec.next_frame().map_err(io_err)? {
+                let id = packet_id_of(&frame);
+                log.in_packet(&packet_name("login-s2c", id), "login", frame.len());
+
+                match crate::protocol::login::read_hello(&frame) {
+                    Ok((name, _)) => break name,
+                    Err(e) => {
+                        log.error(format!("bad login hello: {e}"));
+                        return Ok(());
+                    }
+                }
+            }
+
             let n = stream.read(&mut scratch)?;
             if n == 0 {
                 log.note("closed before the login hello arrived");
                 return Ok(());
             }
             dec.queue(&scratch[..n]);
-
-            // One frame is expected here, but `while let` is wrong for that:
-            // breaking out of it is a break with no condition, which reads like
-            // a loop that cannot terminate and is flagged as one. Only the first
-            // frame is wanted, so the rest is drained below.
-            if let Some(frame) = dec.next_frame().map_err(io_err)? {
-                let id = packet_id_of(&frame);
-                log.in_packet(&packet_name("login-s2c", id), "login", frame.len());
-
-                match read_hello(&frame) {
-                    Ok((name, _)) => break 'hello name,
-                    Err(e) => {
-                        log.error(format!("could not read the login hello: {e}"));
-                        return Ok(());
-                    }
-                }
-            }
         }
     };
 
@@ -220,14 +219,10 @@ fn login(stream: &mut TcpStream, log: ConnLog) -> std::io::Result<()> {
     // the configuration protocol, so labelling it configuration makes the log
     // claim the client sent something it never sent, and every real
     // configuration packet gets logged as a login one.
+    //
+    // Drain first: the client's acknowledgement usually arrives in the same
+    // segment as its hello, so it is often already buffered.
     loop {
-        let n = stream.read(&mut scratch)?;
-        if n == 0 {
-            log.note("closed before acknowledging");
-            return Ok(());
-        }
-        dec.queue(&scratch[..n]);
-
         if let Some(frame) = dec.next_frame().map_err(io_err)? {
             let id = packet_id_of(&frame);
             log.in_packet(
@@ -238,16 +233,21 @@ fn login(stream: &mut TcpStream, log: ConnLog) -> std::io::Result<()> {
 
             if id == crate::protocol::login::id::SERVERBOUND_LOGIN_ACKNOWLEDGED {
                 log.note("acknowledged; moving to the configuration phase");
-                // The login phase's decoder and encoder have served their purpose; the
-                // configuration phase builds its own because compression state
-                // differs. Rebinding rather than moving them, so neither is
-                // used past the point it is valid.
-                let dec = FrameDecoder::new();
-                let enc = FrameEncoder::new();
-                let _ = (dec, enc);
-                return configure(stream, log);
+                // The decoder is handed over rather than replaced. It already
+                // has compression enabled, which is what the next phase needs,
+                // and more importantly it still holds any bytes that arrived
+                // behind the acknowledgement. Starting a fresh decoder dropped
+                // them, and the first configuration packets went missing.
+                return configure(stream, log, dec);
             }
         }
+
+        let n = stream.read(&mut scratch)?;
+        if n == 0 {
+            log.note("closed before acknowledging");
+            return Ok(());
+        }
+        dec.queue(&scratch[..n]);
     }
 }
 
@@ -263,7 +263,14 @@ fn login(stream: &mut TcpStream, log: ConnLog) -> std::io::Result<()> {
 /// client falls back to the registries built into its jar when no registry_data
 /// arrives, but that set is not the one the tags name, and tags carry registry
 /// indices, so one packet without the other fails either way.
-fn configure(stream: &mut TcpStream, log: ConnLog) -> std::io::Result<()> {
+///
+/// `dec` comes from the login phase and arrives with compression already on and
+/// whatever bytes followed the acknowledgement still buffered.
+fn configure(
+    stream: &mut TcpStream,
+    log: ConnLog,
+    mut dec: FrameDecoder,
+) -> std::io::Result<()> {
     use crate::protocol::configuration::{
         registry_data_count, registry_data_frames, update_tags_summary,
         write_finish_configuration, write_update_enabled_features, write_update_tags,
@@ -272,9 +279,9 @@ fn configure(stream: &mut TcpStream, log: ConnLog) -> std::io::Result<()> {
 
     let log = log.phase("configuration");
 
-    // Compression is already on and stays on for the rest of the connection.
-    let mut dec = FrameDecoder::new();
-    dec.set_compression(DEFAULT_COMPRESSION_THRESHOLD);
+    // Compression is already on in the decoder that arrived from login and
+    // stays on for the rest of the connection, so only the encoder is set up
+    // here.
     let enc = FrameEncoder::compressed(DEFAULT_COMPRESSION_THRESHOLD);
     let mut scratch = [0u8; 8192];
 
@@ -341,15 +348,12 @@ fn configure(stream: &mut TcpStream, log: ConnLog) -> std::io::Result<()> {
     log.note("configuration sent, waiting for the client to finish");
 
     // 4. Wait. The client sends its own finish, and after that the connection
-    //    is in the play state, which is not implemented.
+    //    is in the play state.
+    //
+    //    Draining before reading matters here too: the client sends its
+    //    information and its brand together with its finish, and reading the
+    //    socket first would wait on a client that is waiting for us to finish.
     loop {
-        let n = stream.read(&mut scratch)?;
-        if n == 0 {
-            log.note("client closed during configuration");
-            return Ok(());
-        }
-        dec.queue(&scratch[..n]);
-
         while let Some(frame) = dec.next_frame().map_err(io_err)? {
             let id = packet_id_of(&frame);
             // The names are looked up in the serverbound table: these are
@@ -364,7 +368,7 @@ fn configure(stream: &mut TcpStream, log: ConnLog) -> std::io::Result<()> {
             match id {
                 crate::protocol::configuration::id::SERVERBOUND_FINISH_CONFIGURATION => {
                     log.note("client finished configuration");
-                    return play(stream, dec, enc, log, out);
+                    return play(stream, dec, enc, log);
                 }
                 crate::protocol::configuration::id::SERVERBOUND_CLIENT_INFORMATION => {
                     match crate::protocol::configuration::ClientInformation::read(&frame) {
@@ -382,12 +386,19 @@ fn configure(stream: &mut TcpStream, log: ConnLog) -> std::io::Result<()> {
                 _ => {}
             }
         }
+
+        let n = stream.read(&mut scratch)?;
+        if n == 0 {
+            log.note("client closed during configuration");
+            return Ok(());
+        }
+        dec.queue(&scratch[..n]);
     }
 }
 
 /// The play phase, and the first one that shows anything.
 ///
-/// The order is the order a real server uses, and it matters more here than in
+/// The order is the order a real server sends, and it matters more here than in
 /// the earlier phases: the client processes what arrives and drops what it
 /// cannot use, so a packet in the wrong place is not an error, it is silence.
 /// The sequence the capture recorded is login, difficulty, abilities, held slot,
@@ -396,12 +407,16 @@ fn configure(stream: &mut TcpStream, log: ConnLog) -> std::io::Result<()> {
 ///
 /// There are no chunks yet, so the client will sit on the loading screen. That
 /// is the honest state of the server: it can be joined, and the world is empty.
+///
+/// Note the fresh output buffer. The configuration phase's buffer already went
+/// out on the wire; handing it here and writing it again made the client read
+/// 158 KB of configuration a second time while it was in the play phase, where
+/// registry id 7 means something else entirely.
 fn play(
     stream: &mut TcpStream,
     mut dec: FrameDecoder,
     enc: FrameEncoder,
     log: ConnLog,
-    pending: Vec<u8>,
 ) -> std::io::Result<()> {
     use crate::protocol::play as p;
 
@@ -410,7 +425,7 @@ fn play(
     // Compression carries over from the configuration phase; both sides keep
     // it for the rest of the connection.
     let mut scratch = [0u8; 8192];
-    let mut out = pending;
+    let mut out = Vec::new();
 
     let send = |out: &mut Vec<u8>, body: &[u8], name: &str, log: &ConnLog| -> std::io::Result<()> {
         enc.encode(body, out).map_err(io_err)?;
@@ -500,20 +515,20 @@ fn play(
 
     log.note("play sent; no chunks yet, so the client will wait on the loading screen");
 
-    // 11. Stay connected. There is nothing to tick, so this only answers what
-    //     the client sends and keeps the socket warm.
+    // 11. Stay connected. There is nothing to tick, so this only logs what the
+    //     client sends and keeps the socket warm.
     loop {
+        while let Some(frame) = dec.next_frame().map_err(io_err)? {
+            let id = packet_id_of(&frame);
+            log.in_packet(&packet_name("play-s2c", id), "play", frame.len());
+        }
+
         let n = stream.read(&mut scratch)?;
         if n == 0 {
             log.note("client closed during play");
             return Ok(());
         }
         dec.queue(&scratch[..n]);
-
-        while let Some(frame) = dec.next_frame().map_err(io_err)? {
-            let id = packet_id_of(&frame);
-            log.in_packet(&packet_name("play-s2c", id), "play", frame.len());
-        }
     }
 }
 
@@ -543,13 +558,13 @@ fn serve_status(
     let log = log.phase("status");
     let mut scratch = [0u8; 8192];
 
+    // Drain before reading. The client sends its handshake and its status
+    // request together, so the request is usually already sitting in the
+    // decoder when this starts. Reading the socket first waits for bytes that
+    // are not coming, because the client is waiting for the response: the
+    // symptom is the server entry stuck on "Pinging..." until the client gives
+    // up and opens a second connection to log in directly.
     loop {
-        let n = stream.read(&mut scratch)?;
-        if n == 0 {
-            return Ok(());
-        }
-        dec.queue(&scratch[..n]);
-
         while let Some(body) = dec.next_frame().map_err(io_err)? {
             let mut r = &body[..];
             let (VarInt(id), _) = match VarInt::read(&mut r) {
@@ -588,5 +603,11 @@ fn serve_status(
                 _ => {}
             }
         }
+
+        let n = stream.read(&mut scratch)?;
+        if n == 0 {
+            return Ok(());
+        }
+        dec.queue(&scratch[..n]);
     }
 }

@@ -510,10 +510,40 @@ fn play(
     p::write_game_event(&mut body, 13, 0.0);
     send(&mut out, &body, "game_event", &log)?;
 
+    // 11. The chunks. This is the first thing the client renders, so it goes after
+    //     the world setup above and before anything else about the world.
+    //
+    //     Sent in order from the centre outwards, which is what the client
+    //     expects when it is deciding how much of the world is worth keeping.
+    let mut sent = 0;
+    for ring in 0..=crate::protocol::chunk::RADIUS {
+        let mut chunks: Vec<(i32, i32)> = Vec::new();
+        for dx in -ring..=ring {
+            for dz in -ring..=ring {
+                // Only the edge of each ring; the inner square was already sent.
+                if ring > 0 && dx.abs() != ring && dz.abs() != ring {
+                    continue;
+                }
+                chunks.push((dx, dz));
+            }
+        }
+
+        for (dx, dz) in chunks {
+            let mut body = Vec::new();
+            crate::protocol::chunk::write_chunk(&mut body, dx, dz);
+            enc.encode(&body, &mut out).map_err(io_err)?;
+            sent += 1;
+            if super::log::verbose() {
+                log.out_packet("level_chunk_with_light", "play", body.len());
+            }
+        }
+    }
+    log.note(format!("sent {sent} chunks around the spawn"));
+
     stream.write_all(&out)?;
     stream.flush()?;
 
-    log.note("play sent; no chunks yet, so the client will wait on the loading screen");
+    log.note("chunks sent; the world is empty but it is a world");
 
     // 11. Stay connected. There is nothing to tick, so this only logs what the
     //     client sends and keeps the socket warm.

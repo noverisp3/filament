@@ -415,7 +415,7 @@ fn configure(
 fn play(
     stream: &mut TcpStream,
     mut dec: FrameDecoder,
-    enc: FrameEncoder,
+    mut enc: FrameEncoder,
     log: ConnLog,
 ) -> std::io::Result<()> {
     use crate::protocol::play as p;
@@ -579,18 +579,33 @@ fn play(
 
     log.note("chunks sent; terrain generated, and it is not persisted");
 
-    // 12. Keep the connection alive.
+    // 12. Keep the connection alive, and follow the player.
     //
     //     The client hangs up after thirty seconds of silence and reads silence
-    //     as "the server has stopped answering". There is no tick loop yet, so the
-    //     only traffic there is to send is this.
+    //     as "the server has stopped answering". There is no tick loop yet, so
+    //     the only traffic there is to send is this.
     //
     //     A read timeout rather than a second thread, so the deadline is checked
     //     in the same loop that drains packets and there is no writer to lock
     //     against.
+    //
+    //     The movement packets update where the player is, and when that moves
+    //     the chunk it stands in outside the square already sent, the new edge
+    //     follows. That is the difference between a world and a diorama: without
+    //     it the player walks off the terrain into white nothing.
     stream.set_read_timeout(Some(std::time::Duration::from_secs(1)))?;
     let mut last_keep_alive = std::time::Instant::now();
     let mut keep_alive_id: i64 = 1;
+
+    // Where the player is, updated by the movement packets. The spawn is where
+    // the teleport above put it.
+    let mut player = spawn;
+    // The square of chunks already sent, as its south-west and north-east
+    // corners. Starts as the spawn batch: radius RADIUS around (0, 0).
+    let mut sent_min = (-crate::protocol::chunk::RADIUS, -crate::protocol::chunk::RADIUS);
+    let mut sent_max = (crate::protocol::chunk::RADIUS, crate::protocol::chunk::RADIUS);
+    // Chunks this pass found the player wanting, drained into the next write.
+    let mut pending: Vec<(i32, i32)> = Vec::new();
 
     loop {
         while let Some(frame) = dec.next_frame().map_err(io_err)? {
@@ -598,6 +613,103 @@ fn play(
             if super::log::verbose() {
                 log.in_packet(&packet_name("play-s2c", id), "play", frame.len());
             }
+
+            // The four movement packets. Position when the packet has one,
+            // rotation ignored for now: nothing on the server looks at it.
+            if matches!(
+                id,
+                p::id::MOVE_PLAYER_POS
+                    | p::id::MOVE_PLAYER_POS_ROT
+                    | p::id::MOVE_PLAYER_ROT
+                    | p::id::MOVE_PLAYER_STATUS_ONLY
+            ) && let Ok(moved) = p::ClientMovement::read(&frame)
+                && let (Some(x), Some(y), Some(z)) = (moved.x, moved.y, moved.z)
+            {
+                player.x = x;
+                player.y = y;
+                player.z = z;
+            }
+        }
+
+        // Which chunk the player stands in now.
+        let player_chunk = (
+            (player.x as i32).div_euclid(16),
+            (player.z as i32).div_euclid(16),
+        );
+
+        // Whether the sent square still holds the player's chunk with a margin
+        // of the same radius the first batch used. Without the margin the edge
+        // would arrive as the player crosses it, which is a wall of unrendered
+        // terrain appearing at a run.
+        let want_min = (
+            player_chunk.0 - crate::protocol::chunk::RADIUS,
+            player_chunk.1 - crate::protocol::chunk::RADIUS,
+        );
+        let want_max = (
+            player_chunk.0 + crate::protocol::chunk::RADIUS,
+            player_chunk.1 + crate::protocol::chunk::RADIUS,
+        );
+
+        // Grow the sent square until it covers the wanted one. Each step sends
+        // one row or column, so a diagonal walk sends both, and a sprint across
+        // several chunks sends several at once.
+        //
+        // The square only grows here; it never shrinks. Chunks the client has
+        // dropped are dropped, and resending them would be a new batch for a
+        // place the player has left.
+        let mut sent_now = 0i32;
+
+        while sent_min.0 > want_min.0 {
+            sent_min.0 -= 1;
+            for dz in sent_min.1..=sent_max.1 {
+                pending.push((sent_min.0, dz));
+                sent_now += 1;
+            }
+        }
+        while sent_max.0 < want_max.0 {
+            sent_max.0 += 1;
+            for dz in sent_min.1..=sent_max.1 {
+                pending.push((sent_max.0, dz));
+                sent_now += 1;
+            }
+        }
+        while sent_min.1 > want_min.1 {
+            sent_min.1 -= 1;
+            for dx in sent_min.0..=sent_max.0 {
+                pending.push((dx, sent_min.1));
+                sent_now += 1;
+            }
+        }
+        while sent_max.1 < want_max.1 {
+            sent_max.1 += 1;
+            for dx in sent_min.0..=sent_max.0 {
+                pending.push((dx, sent_max.1));
+                sent_now += 1;
+            }
+        }
+
+        if !pending.is_empty() {
+            // The batch pair again, for the same reason as the first one: the
+            // client measures how fast chunks arrive and decides how far ahead
+            // to ask for them. A finish without a start is a measurement of
+            // nothing.
+            let mut out = Vec::new();
+            let mut body = Vec::new();
+            p::write_chunk_batch_start(&mut body);
+            enc.encode(&body, &mut out).map_err(io_err)?;
+
+            for (dx, dz) in std::mem::take(&mut pending) {
+                send_one_chunk(&mut out, &mut enc, dx, dz, &palette)?;
+            }
+
+            let mut body = Vec::new();
+            p::write_chunk_batch_finished(&mut body, sent_now);
+            enc.encode(&body, &mut out).map_err(io_err)?;
+            stream.write_all(&out)?;
+            stream.flush()?;
+            log.note(format!(
+                "{sent_now} chunks followed the player to {player_chunk:?}"
+            ));
         }
 
         if last_keep_alive.elapsed() >= KEEP_ALIVE_EVERY {
@@ -631,6 +743,40 @@ fn play(
             Err(e) => return Err(e),
         }
     }
+}
+
+/// Generates and writes one chunk into `out`, as a framed packet.
+///
+/// The terrain is generated rather than fetched, because nothing persists a
+/// world yet: the generator is deterministic, so the same chunk comes out the
+/// same both times it is visited, which is what makes walking away and back
+/// look like a world rather than a new one each time.
+fn send_one_chunk(
+    out: &mut Vec<u8>,
+    enc: &mut crate::protocol::frame::FrameEncoder,
+    dx: i32,
+    dz: i32,
+    palette: &crate::world::terrain::TerrainBlocks,
+) -> std::io::Result<()> {
+    use crate::world::pos::ChunkPos;
+    use crate::world::terrain;
+
+    let chunk = terrain::generate_chunk(ChunkPos { x: dx, z: dz }, palette);
+
+    let mut sections = Vec::with_capacity(crate::protocol::chunk::SECTIONS);
+    for section in chunk.sections() {
+        sections.push(
+            crate::world::section::iter_blocks(section)
+                .map(|block| to_state_id(block, palette))
+                .collect(),
+        );
+    }
+
+    let mut body = Vec::new();
+    crate::protocol::chunk::write_chunk_with_states(&mut body, dx, dz, &sections);
+    enc.encode(&body, out).map_err(io_err)?;
+
+    Ok(())
 }
 
 /// How often to send a keep alive.

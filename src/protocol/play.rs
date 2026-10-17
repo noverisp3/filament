@@ -12,7 +12,7 @@
 //! all, while the wire bytes show a dimension key, a seed and a game type: the
 //! position arrives afterwards, in `ClientboundPlayerPositionPacket`.
 
-use crate::protocol::{VarInt, VarLong};
+use crate::protocol::{DecodeError, VarInt, VarLong};
 
 /// Packet ids in the play state, read from `packets.json`.
 pub mod id {
@@ -40,8 +40,16 @@ pub mod id {
     pub const SERVERBOUND_DEBUG_SUBSCRIPTION: i32 = 23;
     pub const SERVERBOUND_KEEP_ALIVE: i32 = 28;
     pub const SERVERBOUND_CLIENT_TICK_END: i32 = 13;
-    pub const SERVERBOUND_PLAYER_POSITION: i32 = 32;
-    pub const SERVERBOUND_PLAYER_LOADED: i32 = 38;
+    pub const SERVERBOUND_PLAYER_LOADED: i32 = 44;
+
+    // The four movement packets share one class upstream, which is why their
+    // bodies are near identical: three doubles and two floats, and each subclass
+    // dropping the fields it does not carry. The ids are consecutive because the
+    // registrations are.
+    pub const MOVE_PLAYER_POS: i32 = 30;
+    pub const MOVE_PLAYER_POS_ROT: i32 = 31;
+    pub const MOVE_PLAYER_ROT: i32 = 32;
+    pub const MOVE_PLAYER_STATUS_ONLY: i32 = 33;
 }
 
 /// Writes `ClientboundLoginPacket`.
@@ -217,6 +225,123 @@ impl Default for Movement {
             pitch: 0.0,
         }
     }
+}
+
+/// One movement packet from the client, decoded.
+///
+/// The four packets share a class upstream and a shape on the wire: the ones
+/// that carry a position open with three doubles, the ones that carry a
+/// rotation follow with two floats, and every one of them closes with a byte
+/// of flags. Which fields a packet carries depends on its id, and the id is
+/// what says which of them below are `Some`.
+///
+/// The flags byte packs two booleans: bit 0 is whether the player is on the
+/// ground, bit 1 is whether it hit a wall on the way.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClientMovement {
+    /// The position, when the packet carries one.
+    pub x: Option<f64>,
+    pub y: Option<f64>,
+    pub z: Option<f64>,
+    /// The rotation in degrees, when the packet carries one.
+    pub yaw: Option<f32>,
+    pub pitch: Option<f32>,
+    /// Bit 0 of the trailing flags byte.
+    pub on_ground: bool,
+    /// Bit 1 of the trailing flags byte.
+    pub horizontal_collision: bool,
+}
+
+impl ClientMovement {
+    /// Decodes one of the four movement packets.
+    ///
+    /// `frame` is the whole packet: the id VarInt first, then the body. The id
+    /// decides which fields follow, and an id that is not one of the four is
+    /// rejected rather than guessed at.
+    pub fn read(frame: &[u8]) -> Result<Self, DecodeError> {
+        let mut r: &[u8] = frame;
+        let (id, _) = VarInt::read(&mut r)?;
+        let id = id.0;
+
+        let has_pos = matches!(id, id::MOVE_PLAYER_POS | id::MOVE_PLAYER_POS_ROT);
+        let has_rot = matches!(id, id::MOVE_PLAYER_POS_ROT | id::MOVE_PLAYER_ROT);
+
+        if !matches!(
+            id,
+            id::MOVE_PLAYER_POS
+                | id::MOVE_PLAYER_POS_ROT
+                | id::MOVE_PLAYER_ROT
+                | id::MOVE_PLAYER_STATUS_ONLY
+        ) {
+            return Err(DecodeError::UnexpectedEof {
+                wanted: "a movement packet id",
+                got: id as usize,
+            });
+        }
+
+        let mut movement = ClientMovement {
+            x: None,
+            y: None,
+            z: None,
+            yaw: None,
+            pitch: None,
+            on_ground: false,
+            horizontal_collision: false,
+        };
+
+        if has_pos {
+            movement.x = Some(read_f64(&mut r)?);
+            movement.y = Some(read_f64(&mut r)?);
+            movement.z = Some(read_f64(&mut r)?);
+        }
+
+        if has_rot {
+            movement.yaw = Some(read_f32(&mut r)?);
+            movement.pitch = Some(read_f32(&mut r)?);
+        }
+
+        let flags = read_u8(&mut r)?;
+        movement.on_ground = flags & 1 != 0;
+        movement.horizontal_collision = flags & 2 != 0;
+
+        Ok(movement)
+    }
+}
+
+/// A double straight off the wire.
+fn read_f64(r: &mut &[u8]) -> Result<f64, DecodeError> {
+    if r.len() < 8 {
+        return Err(DecodeError::UnexpectedEof {
+            wanted: "a double",
+            got: r.len(),
+        });
+    }
+    let bytes: [u8; 8] = r[..8].try_into().unwrap();
+    *r = &r[8..];
+    Ok(f64::from_be_bytes(bytes))
+}
+
+/// A float straight off the wire.
+fn read_f32(r: &mut &[u8]) -> Result<f32, DecodeError> {
+    if r.len() < 4 {
+        return Err(DecodeError::UnexpectedEof {
+            wanted: "a float",
+            got: r.len(),
+        });
+    }
+    let bytes: [u8; 4] = r[..4].try_into().unwrap();
+    *r = &r[4..];
+    Ok(f32::from_be_bytes(bytes))
+}
+
+/// One byte straight off the wire.
+fn read_u8(r: &mut &[u8]) -> Result<u8, DecodeError> {
+    let byte = *r.first().ok_or(DecodeError::UnexpectedEof {
+        wanted: "a byte",
+        got: r.len(),
+    })?;
+    *r = &r[1..];
+    Ok(byte)
 }
 
 pub fn write_player_position(out: &mut Vec<u8>, teleport_id: i32, move_to: &Movement) {
@@ -721,6 +846,73 @@ mod tests {
         assert_eq!(id::KEEP_ALIVE, 45);
         assert_eq!(id::SERVERBOUND_KEEP_ALIVE, 28);
         assert_eq!(id::SERVERBOUND_CLIENT_TICK_END, 13);
-        assert_eq!(id::SERVERBOUND_PLAYER_POSITION, 32);
+        assert_eq!(id::MOVE_PLAYER_ROT, 32);
+    }
+
+    /// One movement packet, hand built the way the client builds them.
+    fn movement_packet(id: i32, body: &[u8]) -> Vec<u8> {
+        let mut frame = Vec::new();
+        VarInt(id).write(&mut frame);
+        frame.extend_from_slice(body);
+        frame
+    }
+
+    #[test]
+    fn a_position_packet_reads_its_position_and_flags() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&8.5f64.to_be_bytes());
+        body.extend_from_slice(&64.0f64.to_be_bytes());
+        body.extend_from_slice(&(-2.5f64).to_be_bytes());
+        body.push(1); // on the ground, no collision
+
+        let moved = ClientMovement::read(&movement_packet(id::MOVE_PLAYER_POS, &body))
+            .expect("the packet is well formed");
+
+        assert_eq!(moved.x, Some(8.5));
+        assert_eq!(moved.y, Some(64.0));
+        assert_eq!(moved.z, Some(-2.5));
+        assert_eq!(moved.yaw, None, "a position packet carries no rotation");
+        assert!(moved.on_ground);
+        assert!(!moved.horizontal_collision);
+    }
+
+    #[test]
+    fn a_rotation_packet_carries_only_the_angles() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&90.0f32.to_be_bytes());
+        body.extend_from_slice(&(-45.0f32).to_be_bytes());
+        body.push(3); // on the ground and into a wall
+
+        let moved = ClientMovement::read(&movement_packet(id::MOVE_PLAYER_ROT, &body))
+            .expect("the packet is well formed");
+
+        assert_eq!(moved.x, None, "a rotation packet carries no position");
+        assert_eq!(moved.yaw, Some(90.0));
+        assert_eq!(moved.pitch, Some(-45.0));
+        assert!(moved.on_ground);
+        assert!(moved.horizontal_collision);
+    }
+
+    #[test]
+    fn a_status_only_packet_is_one_byte_of_flags() {
+        let moved =
+            ClientMovement::read(&movement_packet(id::MOVE_PLAYER_STATUS_ONLY, &[2]))
+                .expect("the packet is well formed");
+
+        assert_eq!(moved.x, None);
+        assert_eq!(moved.yaw, None);
+        assert!(!moved.on_ground);
+        assert!(moved.horizontal_collision);
+    }
+
+    #[test]
+    fn a_packet_that_cuts_off_mid_position_is_rejected() {
+        let short = &8.5f64.to_be_bytes()[..6];
+
+        assert!(ClientMovement::read(&movement_packet(
+            id::MOVE_PLAYER_POS,
+            short
+        ))
+        .is_err());
     }
 }

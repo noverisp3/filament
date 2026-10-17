@@ -12,7 +12,7 @@
 //! all, while the wire bytes show a dimension key, a seed and a game type: the
 //! position arrives afterwards, in `ClientboundPlayerPositionPacket`.
 
-use crate::protocol::VarInt;
+use crate::protocol::{VarInt, VarLong};
 
 /// Packet ids in the play state, read from `packets.json`.
 pub mod id {
@@ -280,50 +280,83 @@ pub fn write_chunk_cache_center(out: &mut Vec<u8>, chunk_x: i32, chunk_z: i32) {
     VarInt(chunk_z).write(out);
 }
 
+/// Writes `ClientboundInitializeBorderPacket`.
+///
+/// Two sizes, two centres and then four numbers that are not doubles. Reading
+/// the record alone suggests seven doubles; the capture says four, followed by a
+/// VarLong and three VarInts, and it walks to exactly forty bytes with no
+/// remainder. Those are the numbers that matter, so the ordering here is the one
+/// the capture shows rather than the one the field declaration implies.
+///
+/// A zero size means the whole world is playable, which is right for a world
+/// that is not finished. The centres are the vanilla maximum, again to mean
+/// "no restriction", and the warning fields are what the client would show
+/// before the border was drawn at all.
+pub fn write_initialize_border(out: &mut Vec<u8>) {
+    VarInt(id::INITIALIZE_BORDER).write(out);
+
+    let doubles = [
+        0.0,         // old size
+        0.0,         // new size
+        MAX_BORDER,  // centre x
+        MAX_BORDER,  // centre z
+    ];
+    for value in doubles {
+        out.extend_from_slice(&value.to_be_bytes());
+    }
+
+    VarLong(0).write(out); // lerp time, in ticks
+    VarInt(29_999_984).write(out); // absolute maximum size
+    VarInt(5).write(out); // warning distance, in blocks
+    VarInt(300).write(out); // warning delay, in ticks
+}
+
+/// The centre a border with no restriction is parked at.
+///
+/// 59_999_968 is the value a stock server sends. Any centre works when the size
+/// is zero, but matching the capture keeps the packet byte-identical.
+const MAX_BORDER: f64 = 59_999_968.0;
+
 /// Writes `ClientboundSetDefaultSpawnPositionPacket`.
 ///
-/// A dimension key, three doubles and an angle in a single byte. The byte is
-/// worth noting: the position packets use float degrees, this one does not.
-pub fn write_set_default_spawn(out: &mut Vec<u8>, dimension: &str, x: f64, y: f64, z: f64) {
+/// A dimension, a block position, then a yaw and a pitch. The position is not
+/// three doubles: it is a block position, which is packed into a single eight
+/// byte value, and writing coordinates as doubles here produces a packet nine
+/// bytes too long.
+///
+/// The pack is x in the low 26 bits, z in the next 26 and y in the top 12.
+pub fn write_set_default_spawn(out: &mut Vec<u8>, dimension: &str, x: i32, y: i32, z: i32) {
     VarInt(id::SET_DEFAULT_SPAWN).write(out);
     VarInt(dimension.len() as i32).write(out);
     out.extend_from_slice(dimension.as_bytes());
-    out.extend_from_slice(&x.to_be_bytes());
-    out.extend_from_slice(&y.to_be_bytes());
-    out.extend_from_slice(&z.to_be_bytes());
-    out.push(0);
+    out.extend_from_slice(&pack_block_pos(x, y, z).to_be_bytes());
+    out.extend_from_slice(&0.0f32.to_be_bytes());
+    out.extend_from_slice(&0.0f32.to_be_bytes());
 }
 
-/// Writes `ClientboundInitializeBorderPacket`.
+/// Packs a block position the way the protocol carries one.
 ///
-/// All seven fields are doubles. Size zero means no restriction, which is the
-/// right answer for a world that is not finished.
-pub fn write_initialize_border(out: &mut Vec<u8>) {
-    VarInt(id::INITIALIZE_BORDER).write(out);
-    let fields: [f64; 7] = [
-        0.0,  // size
-        0.0,  // centre x
-        0.0,  // centre z
-        0.0,  // speed, blocks per tick
-        -1.0, // warning delay, in ticks
-        0.0,  // warning distance
-        0.0,  // lerp target
-    ];
-    for value in fields {
-        out.extend_from_slice(&value.to_be_bytes());
-    }
+/// Three values into one long: x in bits 38 to 63, y in bits 26 to 37 and z in
+/// the low 26. The widths are the ones the world uses, so a position outside
+/// them would silently overlap its neighbour rather than fail.
+pub fn pack_block_pos(x: i32, y: i32, z: i32) -> i64 {
+    ((x as i64 & 0x3FF_FFFF) << 38)
+        | ((y as i64 & 0xFFF) << 26)
+        | (z as i64 & 0x3FF_FFFF)
 }
 
-/// Writes `ClientboundSetTimePacket`.
+/// Not written: `ClientboundSetTimePacket`.
 ///
-/// Two longs and a flag. The flag says whether the client may change the time,
-/// and a negative time of day sets it, which is how a server freezes a world.
-pub fn write_set_time(out: &mut Vec<u8>, world_age: i64, time_of_day: i64) {
-    VarInt(id::SET_TIME).write(out);
-    out.extend_from_slice(&world_age.to_be_bytes());
-    out.extend_from_slice(&time_of_day.to_be_bytes());
-    out.push(if time_of_day < 0 { 1 } else { 0 });
-}
+/// Left unimplemented on purpose rather than sent wrong. The 26.3 packet is
+/// thirty-two bytes for a capture that starts with a long and then carries a map
+/// of world clock states, and the record does not make the shape obvious from
+/// the outside. Sending an approximation would move the failure to the next
+/// packet along and cost another round trip to find, whereas omitting it leaves
+/// the client with its own clock, which is the lesser problem.
+///
+/// The id stays declared so the log can name the packet when it is needed.
+#[allow(dead_code)]
+fn set_time_is_not_implemented() {}
 
 /// Writes `ClientboundKeepAlivePacket`.
 ///
@@ -338,25 +371,44 @@ pub fn write_keep_alive(out: &mut Vec<u8>, id: i64) {
 ///
 /// Four bytes of flags and four floats of values. Everything is false and zero:
 /// the player cannot fly, is not invulnerable and does not ignore gravity.
+/// Writes `ClientboundPlayerAbilitiesPacket`.
+///
+/// A bitfield byte and two floats: the flying speed and the walking speed. There
+/// is no field for a field of view and no optional marker, which is what an
+/// earlier version of this wrote and why the client reported two bytes extra.
+///
+/// Nothing is granted. The bitfield stays zero, so the player is not
+/// invulnerable, is not flying, may not fly and is not in creative mode.
 pub fn write_player_abilities(out: &mut Vec<u8>) {
     VarInt(id::PLAYER_ABILITIES).write(out);
-    out.push(0); // invulnerable, flying, allow flying, creative mode
-    out.push(0x3D); // flight speed: 0.05
-    out.push(0x3D);
-    out.push(0x3D);
+
+    // invulnerable | flying | may fly | instabuild
     out.push(0);
-    out.push(0xCC);
-    out.push(0xCD);
-    out.push(0x3D);
-    out.push(0xCC);
-    out.push(0xCC);
-    out.push(0xCD);
+
+    out.extend_from_slice(&flying_speed().to_be_bytes());
+    out.extend_from_slice(&walking_speed().to_be_bytes());
+}
+
+/// The default flying speed, 0.05.
+///
+/// The literal rather than a value read from the player, because there is no
+/// player yet: this is what a fresh login is sent.
+fn flying_speed() -> f32 {
+    0.05
+}
+
+/// The default walking speed, 0.1.
+fn walking_speed() -> f32 {
+    0.1
 }
 
 /// Writes `ClientboundSetHeldSlotPacket`.
-pub fn write_set_held_slot(out: &mut Vec<u8>, slot: i16) {
+///
+/// A VarInt, not the short an earlier version used. The capture is two bytes
+/// for the whole packet, which leaves one for the slot.
+pub fn write_set_held_slot(out: &mut Vec<u8>, slot: i32) {
     VarInt(id::SET_HELD_SLOT).write(out);
-    out.extend_from_slice(&slot.to_be_bytes());
+    VarInt(slot).write(out);
 }
 
 /// Writes `ClientboundChunkBatchStartPacket`, empty upstream.
@@ -514,6 +566,28 @@ mod tests {
     }
 
     #[test]
+    fn abilities_are_a_bitfield_and_two_floats() {
+        // The capture recorded exactly ten bytes: 41 00 3d 4c cc cd 3d cc cc
+        // cd. That is the id, a zero bitfield, 0.05 and 0.1. An earlier version
+        // wrote eleven bytes of body and the client reported "found 2 bytes
+        // extra" on this packet.
+        let mut w = Vec::new();
+        write_player_abilities(&mut w);
+
+        assert_eq!(
+            w,
+            vec![
+                id::PLAYER_ABILITIES as u8,
+                0x00,
+                0x3D, 0x4C, 0xCC, 0xCD,
+                0x3D, 0xCC, 0xCC, 0xCD,
+            ],
+            "byte for byte what the capture recorded"
+        );
+        assert_eq!(w.len(), 10, "the capture's length for this packet");
+    }
+
+    #[test]
     fn difficulty_is_two_bytes_after_the_id() {
         // The capture recorded "0a 01 00": peaceful is 0, and the byte after is
         // whether the difficulty is locked.
@@ -545,40 +619,57 @@ mod tests {
     }
 
     #[test]
-    fn the_default_spawn_leads_with_the_dimension_key() {
+    fn the_default_spawn_is_a_key_a_block_pos_and_two_angles() {
+        // Thirty-seven bytes in the capture, and three doubles for the position
+        // would make it forty-six.
         let mut w = Vec::new();
-        write_set_default_spawn(&mut w, "minecraft:overworld", 0.5, 64.0, 0.5);
+        write_set_default_spawn(&mut w, "minecraft:overworld", 0, 64, 0);
 
         assert_eq!(w[0], id::SET_DEFAULT_SPAWN as u8);
         assert_eq!(w[1], 19, "key length");
         assert_eq!(&w[2..21], b"minecraft:overworld");
-        assert_eq!(&w[21..29], &0.5f64.to_be_bytes());
-        assert_eq!(
-            &w[w.len() - 1..],
-            &[0],
-            "the angle is a single byte, unlike the position packet"
-        );
+        assert_eq!(w.len(), 37, "the capture's length for this packet");
     }
 
     #[test]
-    fn the_border_is_seven_doubles() {
+    fn a_block_position_packs_into_one_eight_byte_value() {
+        assert_eq!(pack_block_pos(0, 0, 0), 0);
+        // z occupies the low 26 bits, so it sits at the bottom.
+        assert_eq!(pack_block_pos(0, 0, 1), 1);
+        // y starts at bit 26.
+        assert_eq!(pack_block_pos(0, 1, 0), 1 << 26);
+        // x starts at bit 38.
+        assert_eq!(pack_block_pos(1, 0, 0), 1 << 38);
+    }
+
+    #[test]
+    fn the_border_walks_to_exactly_forty_bytes() {
+        // Four doubles, then a VarLong and three VarInts. Seven doubles would be
+        // fifty-six.
         let mut w = Vec::new();
         write_initialize_border(&mut w);
 
         assert_eq!(w[0], id::INITIALIZE_BORDER as u8);
-        assert_eq!(w.len(), 1 + 7 * 8);
-        assert_eq!(&w[1..9], &0.0f64.to_be_bytes(), "no restriction");
+        assert_eq!(w.len(), 41, "the capture's length for this packet");
+        assert_eq!(
+            &w[1..17],
+            &[0u8; 16],
+            "the two sizes are zero, so the whole world is playable"
+        );
+        assert_eq!(
+            f64::from_be_bytes(w[17..25].try_into().unwrap()),
+            MAX_BORDER,
+            "then the two centres, parked at the vanilla maximum"
+        );
     }
 
     #[test]
-    fn time_flags_a_negative_time_of_day() {
-        let mut day = Vec::new();
-        write_set_time(&mut day, 0, 6000);
-        assert_eq!(day[17], 0, "a world the client may change");
+    fn the_held_slot_is_one_varint() {
+        // Two bytes for the whole packet in the capture.
+        let mut w = Vec::new();
+        write_set_held_slot(&mut w, 0);
 
-        let mut frozen = Vec::new();
-        write_set_time(&mut frozen, 0, -1);
-        assert_eq!(frozen[17], 1, "a frozen world");
+        assert_eq!(w, vec![id::SET_HELD_SLOT as u8, 0]);
     }
 
     #[test]

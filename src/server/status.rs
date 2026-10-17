@@ -433,12 +433,15 @@ fn play(
         Ok(())
     };
 
-    // 1. Login. Entity id 0 because nothing else exists to collide with it.
+    // 1. Login. The entity id comes from the shared counter rather than being
+    //    written as 0, which is not a valid id: the client reads it as "not yet
+    //    assigned" and throws when it adds the player to the level.
+    let entity_id = crate::server::next_entity_id();
     let mut body = Vec::new();
     p::write_login(
         &mut body,
         &p::Login {
-            entity_id: 0,
+            entity_id,
             hardcore: false,
             levels: &[
                 "minecraft:overworld",
@@ -477,14 +480,14 @@ fn play(
     // 5. The spawn. Halfway between block corners, so the player is inside a
     //    block rather than on a seam, and above the sea level the login says.
     let spawn = p::Movement::default();
-    let (x, y, z) = (spawn.x, spawn.y, spawn.z);
     let mut body = Vec::new();
     p::write_player_position(&mut body, 1, &spawn);
     send(&mut out, &body, "player_position", &log)?;
 
-    // 6. Where a respawn returns to.
+    // 6. Where a respawn returns to. A block position, so whole blocks, unlike
+    //    the spawn above which is inside one.
     let mut body = Vec::new();
-    p::write_set_default_spawn(&mut body, "minecraft:overworld", x, y, z);
+    p::write_set_default_spawn(&mut body, "minecraft:overworld", 0, 64, 0);
     send(&mut out, &body, "set_default_spawn_position", &log)?;
 
     // 7. No world border.
@@ -492,10 +495,7 @@ fn play(
     p::write_initialize_border(&mut body);
     send(&mut out, &body, "initialize_border", &log)?;
 
-    // 8. Time. Day one, noon, with the client allowed to change it.
-    let mut body = Vec::new();
-    p::write_set_time(&mut body, 0, 6000);
-    send(&mut out, &body, "set_time", &log)?;
+    // 8 is the world clock, which is not written yet. See play::set_time.
 
     // 9. Where chunks are centred. Until this arrives the client has nowhere to
     //    ask for them.

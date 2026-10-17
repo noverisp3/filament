@@ -31,14 +31,13 @@ pub const SECTIONS: usize = (HEIGHT / 16) as usize;
 pub const SECTION_VOLUME: usize = (WIDTH * WIDTH * 16) as usize;
 /// Bytes in one light layer for one section: sixteen by sixteen, four bits each.
 pub const LIGHT_BYTES: usize = SECTION_VOLUME / 2;
-/// How many chunks are sent around the spawn.
+/// The radius used before the client's view distance is known.
 ///
 /// A radius of one is nine chunks, which is fifty metres of world: enough to see
-/// ground and walk on it, and not enough to walk out of. The client asked for a
-/// view distance of eight, which is two hundred and eighty-nine chunks, so the
-/// rest of the area is air until more of this is generated.
-///
-/// Raised as the world's generation gets cheaper or generated in advance.
+/// ground and walk on it. The client states its own view distance in its
+/// settings during the configuration phase, and that number is what the server
+/// then builds, so this is only the fallback for a client whose settings arrive
+/// after its finish.
 pub const RADIUS: i32 = 4;
 
 /// The state id of air.

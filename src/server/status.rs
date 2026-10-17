@@ -353,6 +353,12 @@ fn configure(
     //    Draining before reading matters here too: the client sends its
     //    information and its brand together with its finish, and reading the
     //    socket first would wait on a client that is waiting for us to finish.
+    //
+    //    How much world to build is the client's answer, so the radius is not
+    //    decided until its settings arrive here. The default is for a client
+    //    that sends them after the finish, which would otherwise have no
+    //    radius at all.
+    let mut view_distance = crate::protocol::chunk::RADIUS;
     loop {
         while let Some(frame) = dec.next_frame().map_err(io_err)? {
             let id = packet_id_of(&frame);
@@ -368,14 +374,20 @@ fn configure(
             match id {
                 crate::protocol::configuration::id::SERVERBOUND_FINISH_CONFIGURATION => {
                     log.note("client finished configuration");
-                    return play(stream, dec, enc, log);
+                    return play(stream, dec, enc, log, view_distance);
                 }
                 crate::protocol::configuration::id::SERVERBOUND_CLIENT_INFORMATION => {
                     match crate::protocol::configuration::ClientInformation::read(&frame) {
-                        Ok(info) => log.note(format!(
-                            "client settings: {} view distance {}, main hand {}",
-                            info.language, info.view_distance, info.main_hand
-                        )),
+                        Ok(info) => {
+                            // The client asked for this much world, so that is
+                            // how much to generate. Sending less leaves the far
+                            // ring of the view as the void it started as.
+                            view_distance = i32::from(info.view_distance);
+                            log.note(format!(
+                                "client settings: {} view distance {}, main hand {}",
+                                info.language, info.view_distance, info.main_hand
+                            ));
+                        }
                         Err(e) => log.error(format!("bad client information: {e}")),
                     }
                 }
@@ -417,6 +429,7 @@ fn play(
     mut dec: FrameDecoder,
     mut enc: FrameEncoder,
     log: ConnLog,
+    radius: i32,
 ) -> std::io::Result<()> {
     use crate::protocol::play as p;
 
@@ -531,7 +544,7 @@ fn play(
     enc.encode(&body, &mut out).map_err(io_err)?;
 
     let mut sent = 0;
-    for ring in 0..=crate::protocol::chunk::RADIUS {
+    for ring in 0..=radius {
         let mut chunks: Vec<(i32, i32)> = Vec::new();
         for dx in -ring..=ring {
             for dz in -ring..=ring {
@@ -601,11 +614,16 @@ fn play(
     // the teleport above put it.
     let mut player = spawn;
     // The square of chunks already sent, as its south-west and north-east
-    // corners. Starts as the spawn batch: radius RADIUS around (0, 0).
-    let mut sent_min = (-crate::protocol::chunk::RADIUS, -crate::protocol::chunk::RADIUS);
-    let mut sent_max = (crate::protocol::chunk::RADIUS, crate::protocol::chunk::RADIUS);
+    // corners. Starts as the spawn batch: the radius around (0, 0).
+    let mut sent_min = (-radius, -radius);
+    let mut sent_max = (radius, radius);
     // Chunks this pass found the player wanting, drained into the next write.
     let mut pending: Vec<(i32, i32)> = Vec::new();
+    // The cache center the client was last told about. The client keeps chunks
+    // only within the view distance of this point, so it has to move with the
+    // player: left at the spawn forever, the world renders as a fixed window
+    // that the player walks out of, with chunks arriving that never draw.
+    let mut center_sent = (0i32, 0i32);
 
     loop {
         while let Some(frame) = dec.next_frame().map_err(io_err)? {
@@ -642,12 +660,12 @@ fn play(
         // would arrive as the player crosses it, which is a wall of unrendered
         // terrain appearing at a run.
         let want_min = (
-            player_chunk.0 - crate::protocol::chunk::RADIUS,
-            player_chunk.1 - crate::protocol::chunk::RADIUS,
+            player_chunk.0 - radius,
+            player_chunk.1 - radius,
         );
         let want_max = (
-            player_chunk.0 + crate::protocol::chunk::RADIUS,
-            player_chunk.1 + crate::protocol::chunk::RADIUS,
+            player_chunk.0 + radius,
+            player_chunk.1 + radius,
         );
 
         // Grow the sent square until it covers the wanted one. Each step sends
@@ -658,6 +676,18 @@ fn play(
         // dropped are dropped, and resending them would be a new batch for a
         // place the player has left.
         let mut sent_now = 0i32;
+
+        // The cache center moves with the player, and it has to move even when
+        // no chunk follows: the client drops chunks outside the view distance
+        // of it, so leaving it behind means chunks arriving that the client
+        // then discards because they fall outside the window it is keeping.
+        let mut out = Vec::new();
+        if center_sent != player_chunk {
+            let mut body = Vec::new();
+            p::write_chunk_cache_center(&mut body, player_chunk.0, player_chunk.1);
+            enc.encode(&body, &mut out).map_err(io_err)?;
+            center_sent = player_chunk;
+        }
 
         while sent_min.0 > want_min.0 {
             sent_min.0 -= 1;
@@ -693,7 +723,6 @@ fn play(
             // client measures how fast chunks arrive and decides how far ahead
             // to ask for them. A finish without a start is a measurement of
             // nothing.
-            let mut out = Vec::new();
             let mut body = Vec::new();
             p::write_chunk_batch_start(&mut body);
             enc.encode(&body, &mut out).map_err(io_err)?;
@@ -710,6 +739,11 @@ fn play(
             log.note(format!(
                 "{sent_now} chunks followed the player to {player_chunk:?}"
             ));
+        } else if !out.is_empty() {
+            // The center moved without any chunk following it, which is what
+            // happens on a diagonal walk back through ground already sent.
+            stream.write_all(&out)?;
+            stream.flush()?;
         }
 
         if last_keep_alive.elapsed() >= KEEP_ALIVE_EVERY {

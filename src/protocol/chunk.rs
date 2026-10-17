@@ -145,9 +145,12 @@ fn write_heightmap_bits(out: &mut Vec<u8>) {
 /// The section buffer: every section back to back, no lengths between them.
 ///
 /// Each section is two shorts counting the blocks and fluids it holds, then the
-/// block states, then the biomes. Both counts are zero here, which is right for
-/// a world with no fluid in it: a section with water in it would report a
-/// different fluid count and the client uses it to decide what to render.
+/// block states, then the biomes.
+///
+/// The counts matter and were the reason a chunk of real terrain showed nothing.
+/// The client uses the block count to decide whether a section is worth building
+/// geometry for, so a section full of stone that claims to hold zero blocks is
+/// skipped. Both counts are zero only when the section really is empty.
 fn write_sections(out: &mut Vec<u8>, sections: &[Vec<i32>]) {
     assert_eq!(
         sections.len(),
@@ -158,7 +161,11 @@ fn write_sections(out: &mut Vec<u8>, sections: &[Vec<i32>]) {
     let mut body = Vec::with_capacity(SECTIONS * 16);
 
     for states in sections {
-        body.extend_from_slice(&0i16.to_be_bytes());
+        let solid = states.iter().filter(|s| **s != AIR_STATE_ID).count();
+        let solid = std::cmp::min(solid, i16::MAX as usize) as i16;
+
+        body.extend_from_slice(&solid.to_be_bytes());
+        // No fluid anywhere yet, so this is honestly zero.
         body.extend_from_slice(&0i16.to_be_bytes());
 
         write_block_states(&mut body, states);
@@ -198,6 +205,9 @@ const BLOCK_BITS: usize = 4;
 
 /// Entries in a block state container: one section.
 const BLOCK_ENTRIES: usize = SECTION_VOLUME;
+
+/// Re-exported so a decoder outside this module can size its own loop.
+pub const BLOCK_ENTRIES_DIV: usize = BLOCK_ENTRIES;
 
 /// Writes a block state container from the section's states in wire order.
 ///
@@ -584,5 +594,40 @@ mod tests {
             "{} bytes, over the limit",
             w.len()
         );
+    }
+
+    #[test]
+    fn a_section_reports_how_many_blocks_it_holds() {
+        // The client uses this to decide whether to build geometry for the
+        // section. A section full of stone claiming zero blocks is skipped, which
+        // is why the count is computed rather than left at zero.
+        let mut ground = empty_sections();
+        ground[0][0] = 1;
+        ground[0][1] = 9;
+
+        let mut w = Vec::new();
+        write_sections(&mut w, &ground);
+
+        let (length, consumed) = crate::protocol::VarInt::read(&mut &w[..]).expect("a length");
+        let body = &w[consumed..consumed + length.0 as usize];
+
+        let first = i16::from_be_bytes(body[..2].try_into().expect("a short"));
+        let fluid = i16::from_be_bytes(body[2..4].try_into().expect("a short"));
+        assert_eq!(first, 2, "two of the four thousand are not air");
+        assert_eq!(fluid, 0, "and there is no fluid");
+
+        // The section went out at four bits an entry, which is the other thing
+        // that has to be right for the count to matter at all.
+        assert_eq!(body[4], 4);
+    }
+
+    #[test]
+    fn a_section_of_pure_air_reports_zero() {
+        let mut w = Vec::new();
+        write_sections(&mut w, &empty_sections());
+
+        let (length, consumed) = crate::protocol::VarInt::read(&mut &w[..]).expect("a length");
+        let body = &w[consumed..consumed + length.0 as usize];
+        assert_eq!(i16::from_be_bytes(body[..2].try_into().expect("a short")), 0);
     }
 }

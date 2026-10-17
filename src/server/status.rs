@@ -704,3 +704,152 @@ fn serve_status(
         dec.queue(&scratch[..n]);
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Generates a chunk and reads the blocks back out of the wire bytes.
+    ///
+    /// This is the check that was missing when terrain was first connected: the
+    /// packet decoded at the client and showed nothing, which is the one failure
+    /// a length assertion cannot see. Decoding the bytes here says whether the
+    /// ground is actually in them.
+    #[test]
+    fn generated_terrain_survives_the_wire_format() {
+        use crate::world::block::BlockRegistry;
+        use crate::world::pos::ChunkPos;
+        use crate::world::terrain;
+
+        let mut registry = BlockRegistry::new();
+        let palette = terrain::register_terrain(&mut registry);
+        let chunk = terrain::generate_chunk(ChunkPos { x: 0, z: 0 }, &palette);
+
+        let mut sections: Vec<Vec<i32>> = Vec::new();
+        for section in chunk.sections() {
+            sections.push(
+                crate::world::section::iter_blocks(section)
+                    .map(|block| to_state_id(block, &palette))
+                    .collect(),
+            );
+        }
+
+        // The generator fills from the bottom of the world up, so the very first
+        // block of the first section is stone, and there has to be a surface
+        // somewhere above it with grass on it.
+        let first = sections[0][0];
+        assert_eq!(
+            first,
+            state_id("minecraft:stone"),
+            "the bottom of the world is stone"
+        );
+
+        let grass = state_id("minecraft:grass_block");
+        let air = state_id("minecraft:air");
+        let all: Vec<i32> = sections.concat();
+        assert!(all.contains(&grass), "there is grass somewhere");
+        assert!(all.contains(&air), "and air above the surface");
+
+        // Now the actual wire bytes, decoded by a reader written from the
+        // decompiled layout rather than from the writer.
+        let mut wire = Vec::new();
+        crate::protocol::chunk::write_chunk_with_states(&mut wire, 0, 0, &sections);
+        let decoded = decode_first_section(&wire);
+
+assert_eq!(
+            decoded.first().copied(),
+            Some(first),
+            "the first block must come back out of the packed data unchanged: \
+             wrote {first}, read {:?}, palette {:?}",
+            decoded.first(),
+            {
+                let mut j = 1 + 8;
+                let (maps, used) = crate::protocol::VarInt::read(&mut &wire[j..]).expect("a count");
+                j += used;
+                for _ in 0..maps.0 {
+                    let (_, u1) = crate::protocol::VarInt::read(&mut &wire[j..]).expect("a type");
+                    j += u1;
+                    let (longs, u2) = crate::protocol::VarInt::read(&mut &wire[j..]).expect("longs");
+                    j += u2 + longs.0 as usize * 8;
+                }
+                let (_, u3) = crate::protocol::VarInt::read(&mut &wire[j..]).expect("len");
+                j += u3;
+                let (_, u4) = crate::protocol::VarInt::read(&mut &wire[j + 4..]).expect("bits");
+                j += 4 + u4;
+                let (size, u5) = crate::protocol::VarInt::read(&mut &wire[j..]).expect("size");
+                j += u5;
+                let mut palette = Vec::new();
+                for _ in 0..size.0 {
+                    let (v, u6) = crate::protocol::VarInt::read(&mut &wire[j..]).expect("id");
+                    j += u6;
+                    palette.push(v.0);
+                }
+                palette
+            }
+        );
+assert_eq!(
+            decoded.iter().filter(|b| **b == grass).count(),
+            sections[0].iter().filter(|b| **b == grass).count(),
+            "and every grass block in the section that was decoded"
+        );
+    }
+
+    /// Reads the block states of the first section back out of a chunk packet.
+    ///
+    /// Mirrors what the client does: skip the id and the coordinates, the
+    /// heightmap map, the buffer length, then walk the first section's container.
+    fn decode_first_section(packet: &[u8]) -> Vec<i32> {
+        use crate::protocol::VarInt;
+
+        let mut i = 0;
+        let varint = |i: &mut usize| -> i32 {
+            let (value, used) = VarInt::read(&mut &packet[*i..]).expect("a VarInt");
+            *i += used;
+            value.0
+        };
+
+        assert_eq!(varint(&mut i), 46, "the chunk packet id");
+        i += 8; // x and z
+
+        let heightmaps = varint(&mut i);
+        for _ in 0..heightmaps {
+            varint(&mut i); // the heightmap type
+            let longs = varint(&mut i);
+            i += longs as usize * 8;
+        }
+
+        let buffer_len = varint(&mut i) as usize;
+        let start = i;
+
+        i += 4; // the two shorts
+        let bits = packet[i];
+        i += 1;
+
+        let mut out = Vec::new();
+if bits == 0 {
+            // A single value fills every entry, which is what the client does
+            // with a zero bit width. Returning nothing here was the bug: the
+            // section looked empty when it was uniformly one block.
+            let (value, _) = VarInt::read(&mut &packet[i..]).expect("a VarInt");
+            return vec![value.0; crate::protocol::chunk::BLOCK_ENTRIES_DIV];
+        }
+
+        let size = varint(&mut i);
+        let mut palette = Vec::new();
+        for _ in 0..size {
+            palette.push(varint(&mut i));
+        }
+
+        let per_long = 64 / bits as usize;
+        let count = crate::protocol::chunk::BLOCK_ENTRIES_DIV;
+        for entry in 0..count {
+            let long = entry / per_long;
+            let shift = (entry % per_long) * bits as usize;
+            let bytes = &packet[i + long * 8..i + long * 8 + 8];
+            let word = u64::from_be_bytes(bytes.try_into().expect("eight bytes"));
+            out.push(palette[((word >> shift) as u32 & ((1 << bits) - 1)) as usize]);
+        }
+
+        assert!(start + buffer_len <= packet.len(), "the buffer length is sane");
+        out
+    }
+}

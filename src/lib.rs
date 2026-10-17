@@ -8,6 +8,8 @@
 //! and biomes are stored as separate layers (SoA) because the hot operations
 //! genuinely differ: a skylight sweep walks one attribute across thousands of
 //! blocks and would be ruined by interleaving it with the others.
+//!
+//! Height is Minecraft's own: -64 to 320, 384 blocks, 24 sections.
 
 pub mod render;
 pub mod world;

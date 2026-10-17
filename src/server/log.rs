@@ -119,17 +119,42 @@ pub fn packet_name(state: &str, id: i32) -> String {
         ("handshake", 0) => "intention".to_string(),
         ("status", 0) => "status_request".to_string(),
         ("status", 1) => "ping_request".to_string(),
+
+        // Serverbound in login. The suffix keeps these apart from the
+        // clientbound ids in the same state, which overlap.
+        ("login-s2c", 0) => "hello".to_string(),
+        ("login-s2c", 1) => "key".to_string(),
+        ("login-s2c", 2) => "custom_query_answer".to_string(),
+        ("login-s2c", 3) => "login_acknowledged".to_string(),
+        ("login-s2c", 4) => "cookie_response".to_string(),
+
+        // Clientbound in login.
         ("login", 0) => "login_disconnect".to_string(),
         ("login", 1) => "hello".to_string(),
         ("login", 2) => "login_finished".to_string(),
         ("login", 3) => "login_compression".to_string(),
         ("login", 4) => "custom_query".to_string(),
         ("login", 5) => "cookie_request".to_string(),
-        ("login-s2c", 0) => "hello".to_string(),
-        ("login-s2c", 1) => "key".to_string(),
-        ("login-s2c", 2) => "custom_query_answer".to_string(),
-        ("login-s2c", 3) => "login_acknowledged".to_string(),
-        ("login-s2c", 4) => "cookie_response".to_string(),
+
+        // Serverbound in configuration.
+        ("configuration-s2c", 0) => "client_information".to_string(),
+        ("configuration-s2c", 1) => "cookie_response".to_string(),
+        ("configuration-s2c", 2) => "custom_payload".to_string(),
+        ("configuration-s2c", 3) => "finish_configuration".to_string(),
+        ("configuration-s2c", 4) => "keep_alive".to_string(),
+        ("configuration-s2c", 5) => "pong".to_string(),
+        ("configuration-s2c", 6) => "resource_pack".to_string(),
+        ("configuration-s2c", 7) => "select_known_packs".to_string(),
+
+        // Clientbound in configuration.
+        ("configuration", 1) => "custom_payload".to_string(),
+        ("configuration", 2) => "disconnect".to_string(),
+        ("configuration", 3) => "finish_configuration".to_string(),
+        ("configuration", 4) => "keep_alive".to_string(),
+        ("configuration", 5) => "ping".to_string(),
+        ("configuration", 7) => "registry_data".to_string(),
+        ("configuration", 13) => "update_enabled_features".to_string(),
+
         (state, id) => format!("{state}:{id}"),
     }
 }
@@ -217,9 +242,21 @@ mod tests {
 
     #[test]
     fn packet_names_distinguish_the_same_id_across_phases() {
-        // 3 is login_compression in login and finish_configuration in
-        // configuration. Logging it without the phase would be ambiguous.
+        // Ids overlap completely between phases. 3 is login_compression in
+        // login, login_acknowledged serverbound in login, and
+        // finish_configuration in configuration. Logging an id without the phase
+        // would be ambiguous exactly when it matters.
         assert_eq!(packet_name("login", 3), "login_compression");
-        assert_eq!(packet_name("configuration", 3), "configuration:3");
+        assert_eq!(packet_name("login-s2c", 3), "login_acknowledged");
+        assert_eq!(packet_name("configuration", 3), "finish_configuration");
+        assert_eq!(
+            packet_name("configuration-s2c", 3),
+            "finish_configuration"
+        );
+    }
+
+    #[test]
+    fn an_unknown_id_still_reports_the_state_it_came_from() {
+        assert_eq!(packet_name("play", 99), "play:99");
     }
 }

@@ -237,9 +237,101 @@ fn login(stream: &mut TcpStream, log: ConnLog) -> std::io::Result<()> {
             );
 
             if id == crate::protocol::login::id::SERVERBOUND_LOGIN_ACKNOWLEDGED {
-                log.note("acknowledged; the client is now waiting for configuration");
-                log.note("configuration is not implemented, closing the connection");
-                return Ok(());
+                log.note("acknowledged; moving to the configuration phase");
+                // The login phase's decoder and encoder have served their purpose; the
+                // configuration phase builds its own because compression state
+                // differs. Rebinding rather than moving them, so neither is
+                // used past the point it is valid.
+                let dec = FrameDecoder::new();
+                let enc = FrameEncoder::new();
+                let _ = (dec, enc);
+                return configure(stream, log);
+            }
+        }
+    }
+}
+
+/// The configuration phase, in the order `startConfiguration` uses upstream.
+///
+/// 1. enabled feature flags
+/// 2. registry data, one packet per registry
+/// 3. finish configuration
+/// 4. wait for the client's own finish
+///
+/// Step 2 is skipped entirely. A 26.3 client carries its own registries and
+/// uses them when the server sends none, so sending them would be work for
+/// nothing until a datapack needs to override one.
+fn configure(stream: &mut TcpStream, log: ConnLog) -> std::io::Result<()> {
+    use crate::protocol::configuration::{
+        write_finish_configuration, write_update_enabled_features,
+    };
+    use crate::protocol::frame::DEFAULT_COMPRESSION_THRESHOLD;
+
+    // Compression is already on and stays on for the rest of the connection.
+    let mut dec = FrameDecoder::new();
+    dec.set_compression(DEFAULT_COMPRESSION_THRESHOLD);
+    let enc = FrameEncoder::compressed(DEFAULT_COMPRESSION_THRESHOLD);
+    let mut scratch = [0u8; 8192];
+
+    let mut out = Vec::new();
+
+    // 1. No feature flags: a client does not require any particular one, and
+    //    sending one it does not know about is worse than sending none.
+    let mut body = Vec::new();
+    write_update_enabled_features(&mut body, &[]);
+    enc.encode(&body, &mut out).map_err(io_err)?;
+    log.out_packet("update_enabled_features", "configuration", body.len());
+
+    // 2. No registry data, on the grounds above.
+
+    // 3. Finish.
+    let mut body = Vec::new();
+    write_finish_configuration(&mut body);
+    enc.encode(&body, &mut out).map_err(io_err)?;
+    log.out_packet("finish_configuration", "configuration", body.len());
+
+    stream.write_all(&out)?;
+    stream.flush()?;
+    log.note("configuration sent, waiting for the client to finish");
+
+    // 4. Wait. The client sends its own finish, and after that the connection
+    //    is in the play state, which is not implemented.
+    loop {
+        let n = stream.read(&mut scratch)?;
+        if n == 0 {
+            log.note("client closed during configuration");
+            return Ok(());
+        }
+        dec.queue(&scratch[..n]);
+
+        while let Some(frame) = dec.next_frame().map_err(io_err)? {
+            let id = packet_id_of(&frame);
+            log.in_packet(
+                &packet_name("configuration", id),
+                "configuration",
+                frame.len(),
+            );
+
+            match id {
+                crate::protocol::configuration::id::SERVERBOUND_FINISH_CONFIGURATION => {
+                    log.note("client finished configuration");
+                    log.note("the play state is not implemented, closing");
+                    return Ok(());
+                }
+                crate::protocol::configuration::id::SERVERBOUND_CLIENT_INFORMATION => {
+                    match crate::protocol::configuration::ClientInformation::read(&frame) {
+                        Ok(info) => log.note(format!(
+                            "client settings: {} view distance {}, main hand {}",
+                            info.language, info.view_distance, info.main_hand
+                        )),
+                        Err(e) => log.error(format!("bad client information: {e}")),
+                    }
+                }
+                crate::protocol::configuration::id::SERVERBOUND_CUSTOM_PAYLOAD => {
+                    // The brand packet the client sends with its settings.
+                    log.note("client payload (brand), ignored");
+                }
+                _ => {}
             }
         }
     }

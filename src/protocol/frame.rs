@@ -193,6 +193,14 @@ impl FrameEncoder {
         Self::default()
     }
 
+    /// An encoder that is already compressing, for a phase reached after the
+    /// threshold was announced earlier on the same connection.
+    pub fn compressed(threshold: i32) -> Self {
+        FrameEncoder {
+            threshold: Some(threshold),
+        }
+    }
+
     pub fn set_compression(&mut self, threshold: i32) {
         self.threshold = Some(threshold);
     }

@@ -5,6 +5,7 @@
 //! second length and their contents are zlib-deflated, which is a wire contract
 //! with the client rather than a local optimisation.
 
+pub mod configuration;
 pub mod frame;
 pub mod handshake;
 pub mod login;

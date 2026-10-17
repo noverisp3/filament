@@ -1,0 +1,12 @@
+//! The wire: packet framing and the primitives every field is built from.
+//!
+//! Minecraft's framing is a length-prefixed frame containing a VarInt packet id
+//! and a body. Once the server sends a compression threshold, frames carry a
+//! second length and their contents are zlib-deflated, which is a wire contract
+//! with the client rather than a local optimisation.
+
+pub mod primitive;
+
+pub use primitive::{
+    BoundedStr, DecodeError, Ident, VarInt, VarLong, DEFAULT_MAX_STRING,
+};

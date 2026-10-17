@@ -422,10 +422,13 @@ pub fn write_chunk_batch_start(out: &mut Vec<u8>) {
 
 /// Writes `ClientboundChunkBatchFinishedPacket`.
 ///
-/// One float: the ticks per second the server intends to run at.
-pub fn write_chunk_batch_finished(out: &mut Vec<u8>, ticks_per_second: f32) {
+/// The field is how many chunks are in the batch that just finished, as a
+/// VarInt. It was a float here for a while, on the assumption that it carried a
+/// tick rate, and the client reported the packet as three bytes longer than it
+/// expected: five bytes sent, two read. Nothing about it is a rate.
+pub fn write_chunk_batch_finished(out: &mut Vec<u8>, batch_size: i32) {
     VarInt(id::CHUNK_BATCH_FINISHED).write(out);
-    out.extend_from_slice(&ticks_per_second.to_be_bytes());
+    VarInt(batch_size).write(out);
 }
 
 #[cfg(test)]
@@ -599,6 +602,24 @@ mod tests {
         write_difficulty(&mut w, 1);
 
         assert_eq!(w, vec![id::CHANGE_DIFFICULTY as u8, 1, 0]);
+    }
+
+    #[test]
+    fn a_chunk_batch_reports_how_many_it_held() {
+        // A VarInt and nothing else. The float this used to be made the packet
+        // three bytes too long: five sent, two read.
+        let mut w = Vec::new();
+        write_chunk_batch_finished(&mut w, 81);
+
+        assert_eq!(w, vec![id::CHUNK_BATCH_FINISHED as u8, 81]);
+        assert_eq!(w.len(), 2, "an id and a one byte count");
+    }
+
+    #[test]
+    fn the_batch_start_is_only_its_id() {
+        let mut w = Vec::new();
+        write_chunk_batch_start(&mut w);
+        assert_eq!(w, vec![id::CHUNK_BATCH_START as u8]);
     }
 
     #[test]

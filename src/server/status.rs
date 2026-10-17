@@ -568,7 +568,8 @@ fn play(
         }
     }
     let mut body = Vec::new();
-    p::write_chunk_batch_finished(&mut body, 20.0);
+    // The count is how many chunks the batch held, which is the number just sent.
+    p::write_chunk_batch_finished(&mut body, sent);
     enc.encode(&body, &mut out).map_err(io_err)?;
 
     log.note(format!("sent {sent} chunks around the spawn"));

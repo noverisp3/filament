@@ -572,7 +572,9 @@ fn serve_status(
                 Err(_) => continue,
             };
 
-            log.in_packet(&packet_name("status", id), "status", body.len());
+            // These are packets the client sent, so the serverbound table, where the
+            // same ids mean the other half of the exchange.
+            log.in_packet(&packet_name("status-s2c", id), "status", body.len());
 
             match id {
                 // Status request: answer with the JSON.

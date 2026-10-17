@@ -90,9 +90,10 @@ installed.
 | Chunks sent to a client | **not started** |
 | Entities, ticking, the tick loop | **not started** |
 
-205 tests. A client can connect, negotiate, and be placed in the world; there
-are no chunks yet, so it waits on the loading screen rather than showing
-anything. Everything is offline and single-threaded per connection.
+217 tests. A client connects, negotiates, is placed in the world and sits on the
+loading screen with no chunks to load. The evidence that the protocol is right is
+in the log: every packet is accepted, and then the client sends `client_tick_end`
+twenty times a second, which is what a waiting client does.
 
 ### Where the protocol data came from
 

@@ -117,8 +117,13 @@ pub fn error(msg: impl AsRef<str>) {
 pub fn packet_name(state: &str, id: i32) -> String {
     match (state, id) {
         ("handshake", 0) => "intention".to_string(),
-        ("status", 0) => "status_request".to_string(),
-        ("status", 1) => "ping_request".to_string(),
+        ("status", 0) => "status_response".to_string(),
+        ("status", 1) => "pong_response".to_string(),
+
+        // Serverbound in status. Same ids as above and a different meaning, which
+        // is why the state carries the direction.
+        ("status-s2c", 0) => "status_request".to_string(),
+        ("status-s2c", 1) => "ping_request".to_string(),
 
         // Serverbound in login. The suffix keeps these apart from the
         // clientbound ids in the same state, which overlap.
@@ -197,12 +202,17 @@ pub fn packet_name(state: &str, id: i32) -> String {
         ("play", 142) => "clear_dialog".to_string(),
 
         // Serverbound in play. Only the ones a connection actually sends
-        // before any chunk arrives.
-        ("play-s2c", 0) => "confirm_teleportation".to_string(),
-        ("play-s2c", 6) => "client_command".to_string(),
-        ("play-s2c", 23) => "keep_alive".to_string(),
-        ("play-s2c", 32) => "player_position".to_string(),
-        ("play-s2c", 38) => "player_loaded".to_string(),
+        // before any chunk arrives. The names come from packets.json, which the
+        // data generator produced from the same jar, and tools/check_names.py
+        // keeps them honest: being wrong about a name sends whoever reads the
+        // log looking for the wrong packet, which is worse than "play:22".
+        ("play-s2c", 0) => "accept_teleportation".to_string(),
+        ("play-s2c", 6) => "chat_ack".to_string(),
+        ("play-s2c", 13) => "client_tick_end".to_string(),
+        ("play-s2c", 22) => "custom_payload".to_string(),
+        ("play-s2c", 23) => "debug_subscription_request".to_string(),
+        ("play-s2c", 32) => "move_player_rot".to_string(),
+        ("play-s2c", 38) => "ping_request".to_string(),
 
         (state, id) => format!("{state}:{id}"),
     }
@@ -308,6 +318,44 @@ mod tests {
     fn an_unknown_id_still_reports_the_state_it_came_from() {
         assert_eq!(packet_name("play", 9999), "play:9999");
         assert_eq!(packet_name("nonsense", 1), "nonsense:1");
+    }
+
+    #[test]
+    fn every_play_name_comes_from_packets_json() {
+        // The seven that were wrong before, all of them serverbound. Being
+        // wrong about a name is not cosmetic: it sends whoever reads the log
+        // looking for the wrong packet. tools/check_names.py checks the whole
+        // table against packets.json; this keeps the interesting ones under test
+        // so a regression fails in cargo rather than needing the script.
+        for (id, expected) in [
+            (0, "accept_teleportation"),
+            (6, "chat_ack"),
+            (13, "client_tick_end"),
+            (22, "custom_payload"),
+            (23, "debug_subscription_request"),
+            (32, "move_player_rot"),
+            (38, "ping_request"),
+        ] {
+            assert_eq!(packet_name("play-s2c", id), expected, "play serverbound {id}");
+        }
+    }
+
+    #[test]
+    fn the_client_tick_packet_is_named_because_it_is_the_pulse() {
+        // A client waiting on chunks sends this once a tick, one byte each, so a
+        // run where it appears sixty times a second is the client reporting that
+        // it is alive and still waiting. That is the signal to send chunks.
+        assert_eq!(packet_name("play-s2c", 13), "client_tick_end");
+    }
+
+    #[test]
+    fn status_has_a_name_in_both_directions() {
+        // Ids 0 and 1 exist on both sides with the other meaning, which is why
+        // the state carries the direction.
+        assert_eq!(packet_name("status-s2c", 0), "status_request");
+        assert_eq!(packet_name("status", 0), "status_response");
+        assert_eq!(packet_name("status-s2c", 1), "ping_request");
+        assert_eq!(packet_name("status", 1), "pong_response");
     }
 
     #[test]

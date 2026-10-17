@@ -1,0 +1,31 @@
+[package]
+name = "minec-server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# `world/` is pure std today, and that is deliberate. Storage, light
+# propagation and meshing are the parts worth being able to unit test without
+# a window, a GPU or a network, and an engine that claims to be multithreaded
+# should not be holding a handle to a render device from its storage layer.
+#
+# `bytemuck` is the one exception, and only for the derive on the vertex
+# struct. That struct is the layout handed to the GPU, and `bytemuck`'s
+# guarantee that the Rust layout matches the bytes is the point: getting that
+# wrong silently corrupts every chunk sent to a player.
+bytemuck = { version = "1.25.2", features = ["derive"] }
+
+# For chunk generation, lighting and meshing off the main thread. Added with
+# the first threaded system rather than on day one, so the first version of
+# this repo can be tested against something that works.
+# rayon = "1.10"
+
+[lib]
+name = "minec_server"
+path = "src/lib.rs"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

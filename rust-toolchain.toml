@@ -1,0 +1,9 @@
+# minec is built with the GNU toolchain on Windows: this machine has no MSVC
+# Build Tools, and the gnu toolchain links against the MinGW-w64 runtime that
+# ships with w64devkit (C:\w64devkit).
+#
+# If Visual Studio Build Tools are ever installed, delete this file and the msvc
+# toolchain will be used instead.
+[toolchain]
+channel = "stable-x86_64-pc-windows-gnu"
+components = ["rustfmt", "clippy"]

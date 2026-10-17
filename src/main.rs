@@ -75,11 +75,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Prints which build this is.
 ///
 /// A server log that cannot say what produced it is a log you have to guess
-/// about, and "it misbehaved" is only actionable once you know whether the
-/// binary matches the repository. The commit, and whether the tree was clean
-/// when it was built, are the two that matter; the profile is next, because a
-/// `dev` build runs at `opt-level = 1` and any timing complaint is answered by
-/// it.
+/// about, and "it misbehaved" only becomes actionable once you know the binary
+/// matches the repository.
+///
+/// Everything is labelled, because this originally put two hashes on two lines
+/// with nothing to say which was which: the project's and the compiler's. They
+/// look the same and they are not the same thing, so the compiler's is named
+/// rather than left to be worked out.
 fn print_build() {
     let sha = env!("FILAMENT_GIT_SHA");
     let dirty = env!("FILAMENT_GIT_DIRTY") == "true";
@@ -89,13 +91,14 @@ fn print_build() {
     let commit = if dirty { format!("{sha}+dirty") } else { sha.to_string() };
 
     log::note(format!(
-        "filament {} ({commit}, {}, {})",
+        "filament {} | {} | {}",
         env!("CARGO_PKG_VERSION"),
         env!("FILAMENT_PROFILE"),
         env!("FILAMENT_TARGET"),
     ));
+    log::note(format!("commit    {commit}"));
     log::note(format!(
-        "built {} with {}",
+        "built     {} by {}",
         env!("FILAMENT_BUILT_AT"),
         env!("FILAMENT_RUSTC"),
     ));

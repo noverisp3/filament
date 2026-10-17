@@ -121,18 +121,35 @@ connections, phases, and errors.
 Timestamps are how long the server has been up, not the wall clock:
 
 ```text
-   0.0s  filament 0.1.0 (7a57d5c+dirty, debug, x86_64-pc-windows-gnu)
-   0.0s  built 2026-10-17T18:06:45Z with rustc 1.99.1 (58cf8f9c3 2026-10-13)
-   0.0s  listening on 127.0.0.1:25565
-   1.4s  [conn 4] profile noverisp3 as 7bb85004-..., sending the profile
-  12.4s  [conn 4] sent 289 chunks around the spawn
-  42.6s  [conn 4] client closed during play
+    0.0s  filament 0.1.0 | debug | x86_64-pc-windows-gnu
+    0.0s  commit    a30d052+dirty
+    0.0s  built     2026-10-17T18:45:55Z (UTC) by rustc 1.99.1 (58cf8f9c3 2026-10-13)
+    0.0s  listening on 127.0.0.1:25565
+    1.4s  [conn 4] profile noverisp3 as 7bb85004-..., sending the profile
+   12.4s  [conn 4] sent 289 chunks around the spawn
+   42.6s  [conn 4] client closed during play
 ```
 
 Epoch milliseconds is thirteen digits of which a reader wants none: the useful
 number is the difference between two lines, and it should not be a subtraction in
-the reader's head. `+dirty` means the binary was built from a working tree with
-uncommitted changes, so it and the repository are not the same thing.
+the reader's head.
+
+Three things in that banner are worth knowing, each of which cost a confusing
+minute to somebody other than the person who wrote it:
+
+- **`+dirty`** means the binary was built from a tree with uncommitted changes,
+  so it and the repository are not the same thing.
+- **The build time is UTC**, labelled as such, while the clock on the wall is
+  local. It is UTC because a build stamp is an instant: printed local, the same
+  commit built in Bangkok and in Berlin would carry different strings.
+- **There are two hashes and only one of them is this project's.** `a30d052` is
+  filament's commit. `58cf8f9c3` is the Rust compiler's own commit, with its
+  release date beside it, and it matters when a bug turns out to be the compiler's.
+
+`build.rs` lists `src`, `Cargo.toml` and itself as its rerun inputs. Any
+`rerun-if-changed` switches Cargo to tracking only the paths listed, so leaving
+the list to the default is not the same as leaving it alone: a banner that
+reports a stale commit is worse than no banner.
 
 Ctrl+C stops the server between connections rather than killing it mid-write. The
 console handler sets a flag and the accept loop notices it at its next poll, which

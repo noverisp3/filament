@@ -126,7 +126,12 @@ fn main() {
     println!("cargo:rustc-env=FILAMENT_RUSTC={}", rustc_version());
 }
 
-/// The compiler that built this, which matters when a bug turns out to be one.
+/// The compiler that built this, and its own commit and release date.
+///
+/// Which matters when a bug turns out to be one in the compiler rather than in
+/// the code. Note that the hash here is the Rust project's, not this one's: a
+/// banner that prints two hashes with nothing to say which is which is a banner
+/// that gets misread.
 fn rustc_version() -> String {
     let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
     let out = Command::new(rustc)

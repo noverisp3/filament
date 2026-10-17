@@ -62,6 +62,20 @@ impl StatusServer {
         loop {
             match self.listener.accept() {
                 Ok((stream, peer)) => {
+                    // The listener is non-blocking so that a Ctrl+C is seen at
+                    // this loop's next poll, and on Windows an accepted socket
+                    // inherits that flag from the listener. Left alone, every
+                    // read on the connection returns "would block" immediately
+                    // and a client that says anything at all is dropped with
+                    // error 10035.
+                    //
+                    // Unix does not inherit it, which is why this is easy to miss
+                    // until a real client connects.
+                    if let Err(e) = stream.set_nonblocking(false) {
+                        log::error(format!("accept failed: {e}"));
+                        continue;
+                    }
+
                     let id = next_connection_id();
                     let status = self.status.clone();
                     let world = self.world.clone();

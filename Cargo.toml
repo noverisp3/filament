@@ -2,6 +2,19 @@
 name = "filament"
 version = "0.1.0"
 edition = "2024"
+description = "A Minecraft server, written from scratch in Rust"
+license = "MIT"
+repository = "https://github.com/noverisp3/filament"
+readme = "README.md"
+keywords = ["minecraft", "server", "protocol"]
+categories = ["game-development", "network-programming"]
+
+# `extracted/` is the data generator's output, eight megabytes of it, and is not
+# read at build time: the tables that are read live in `assets/` as bytes the
+# crate embeds, and `src/generated/` as Rust. `tools/` is the capture scripts
+# that produced them, which belong to the repository rather than to anyone
+# depending on the crate.
+exclude = ["extracted/**", "tools/**"]
 
 # Both a library and a binary. The library is what the tests exercise and what
 # the server logic lives in; the binary is only the argument parsing and the

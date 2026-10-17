@@ -2,6 +2,8 @@
 
 A Minecraft server, written from scratch in Rust.
 
+MIT licensed. See `LICENSE`.
+
 Minecraft's own server ticks chunks, entities and light on a single thread. That
 is the weakness this exists to fix, so everything here is built around one rule:
 

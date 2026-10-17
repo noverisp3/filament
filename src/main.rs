@@ -46,8 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     log::set_verbose(verbose);
-
-    log::set_verbose(verbose);
+    server::shutdown::install();
 
     let status = protocol::handshake::status(
         DEFAULT_DESCRIPTION,
@@ -59,7 +58,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let server = StatusServer::bind(&addr.to_string(), status)?;
 
-    log::note(format!("filament listening on {addr}"));
+    print_build();
+    log::note(format!("listening on {addr}"));
     log::note(format!("protocol {}", server::PROTOCOL_VERSION));
     log::note("max players 20");
     log::note("status, login, configuration and the start of play are implemented");
@@ -70,6 +70,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     server.serve_forever();
     Ok(())
+}
+
+/// Prints which build this is.
+///
+/// A server log that cannot say what produced it is a log you have to guess
+/// about, and "it misbehaved" is only actionable once you know whether the
+/// binary matches the repository. The commit, and whether the tree was clean
+/// when it was built, are the two that matter; the profile is next, because a
+/// `dev` build runs at `opt-level = 1` and any timing complaint is answered by
+/// it.
+fn print_build() {
+    let sha = env!("FILAMENT_GIT_SHA");
+    let dirty = env!("FILAMENT_GIT_DIRTY") == "true";
+    // A dirty tree is said plainly rather than hidden: the binary and the
+    // repository are then not the same thing, which is worth knowing before
+    // chasing a bug in either.
+    let commit = if dirty { format!("{sha}+dirty") } else { sha.to_string() };
+
+    log::note(format!(
+        "filament {} ({commit}, {}, {})",
+        env!("CARGO_PKG_VERSION"),
+        env!("FILAMENT_PROFILE"),
+        env!("FILAMENT_TARGET"),
+    ));
+    log::note(format!(
+        "built {} with {}",
+        env!("FILAMENT_BUILT_AT"),
+        env!("FILAMENT_RUSTC"),
+    ));
 }
 
 /// Reads the command line, returning the address and whether to log packets.

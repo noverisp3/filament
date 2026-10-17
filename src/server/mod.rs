@@ -5,6 +5,7 @@
 //! tick anything, because there is nothing to tick yet.
 
 pub mod log;
+pub mod shutdown;
 pub mod status;
 
 pub use status::{StatusServer, PROTOCOL_VERSION};

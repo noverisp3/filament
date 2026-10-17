@@ -116,6 +116,28 @@ packet twenty times a second, so leaving it on buries the lines that say anythin
 in a wall of one-byte records. Without `--verbose` the log is the lifecycle:
 connections, phases, and errors.
 
+Timestamps are how long the server has been up, not the wall clock:
+
+```text
+   0.0s  filament 0.1.0 (7a57d5c+dirty, debug, x86_64-pc-windows-gnu)
+   0.0s  built 2026-10-17T18:06:45Z with rustc 1.99.1 (58cf8f9c3 2026-10-13)
+   0.0s  listening on 127.0.0.1:25565
+   1.4s  [conn 4] profile noverisp3 as 7bb85004-..., sending the profile
+  12.4s  [conn 4] sent 289 chunks around the spawn
+  42.6s  [conn 4] client closed during play
+```
+
+Epoch milliseconds is thirteen digits of which a reader wants none: the useful
+number is the difference between two lines, and it should not be a subtraction in
+the reader's head. `+dirty` means the binary was built from a working tree with
+uncommitted changes, so it and the repository are not the same thing.
+
+Ctrl+C stops the server between connections rather than killing it mid-write. The
+console handler sets a flag and the accept loop notices it at its next poll, which
+is why the listener is non-blocking. Connections that are still open are cut rather
+than waited for: there is no way yet to ask one to finish, and joining would hang
+for as long as anybody stayed connected.
+
 ### Where the protocol data came from
 
 #### Read every packet's own codec

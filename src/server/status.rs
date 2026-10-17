@@ -37,15 +37,23 @@ impl StatusServer {
         self.listener.local_addr()
     }
 
-    /// Accepts connections until the process ends, each on its own thread.
+    /// Accepts connections until the process is asked to stop, each on its own
+    /// thread.
+    ///
+    /// Non-blocking rather than a plain `incoming()` loop, so a Ctrl+C is seen
+    /// within a poll instead of at the end of the process. The cost is a wakeup
+    /// every `POLL` to find out nothing happened, which is a twentieth of a
+    /// second of work doing nothing.
     pub fn serve_forever(self) {
-        for stream in self.listener.incoming() {
-            match stream {
-                Ok(stream) => {
-                    let peer = stream
-                        .peer_addr()
-                        .map(|a| a.to_string())
-                        .unwrap_or_else(|_| "unknown".to_string());
+        self.listener
+            .set_nonblocking(true)
+            .expect("a listener can be set non-blocking");
+
+        let mut live: Vec<thread::JoinHandle<()>> = Vec::new();
+
+        loop {
+            match self.listener.accept() {
+                Ok((stream, peer)) => {
                     let id = next_connection_id();
                     let status = self.status.clone();
 
@@ -54,19 +62,54 @@ impl StatusServer {
                     // Detached on purpose: a server's whole job is to handle
                     // many people at once, so joining these would serialise the
                     // entire server on whichever connection finished first.
-                    thread::spawn(move || {
+                    //
+                    // The handle is kept rather than dropped anyway, so that
+                    // shutdown can wait for the connections to finish writing
+                    // instead of cutting them off mid-packet.
+                    let handle = thread::spawn(move || {
                         if let Err(e) = handle_connection(stream, status) {
                             log::error(format!("[conn {id}] ended with an error: {e}"));
                         }
                     });
+                    live.push(handle);
+                    live.retain(|h| !h.is_finished());
+                }
+                // Nothing waiting. The normal case, and the reason this loop is
+                // a poll rather than a block.
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if super::shutdown::requested() {
+                        break;
+                    }
+                    thread::sleep(POLL);
                 }
                 Err(e) => {
                     log::error(format!("accept failed: {e}"));
+                    thread::sleep(POLL);
                 }
             }
         }
+
+        // The connections are not waited for. A connection thread runs until its
+        // client goes away, and there is no way yet to tell one to finish, so
+        // joining here would hang for as long as anybody stayed connected, which
+        // is a worse Ctrl+C than the one being fixed. Saying so is better than
+        // appearing to shut down cleanly and then not.
+        if live.is_empty() {
+            log::note("stopped");
+        } else {
+            log::note(format!(
+                "stopped, cutting off {} connection(s) still open",
+                live.len()
+            ));
+        }
     }
 }
+
+/// How long the accept loop waits between looks for a connection.
+///
+/// Short enough that a Ctrl+C feels immediate and long enough that an idle
+/// server is not spinning.
+const POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Answers one connection's handshake and status exchange.
 ///

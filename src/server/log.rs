@@ -11,7 +11,6 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Monotonic per-process connection counter.
 ///
@@ -104,26 +103,78 @@ pub fn out_packet(&self, packet: &str, state: &str, len: usize) {
     }
 }
 
-/// Prints one line with a millisecond timestamp.
+/// Prints one line with a timestamp.
 ///
 /// Goes to stdout rather than a logging framework: there is one stream, it is
 /// ordered, and a dependency here would be for formatting that is two lines.
-/// The timestamp is epoch milliseconds because nothing else in the codebase
-/// wants a clock, and a human reading a log mostly needs ordering, which the
-/// order already gives.
+///
+/// The timestamp is how long the server has been up, not the wall clock. Epoch
+/// milliseconds is thirteen digits of which a reader wants none: to answer "how
+/// long between the chunk batch and the disconnect" the useful number is the
+/// difference between two lines, and making that a subtraction of two large
+/// numbers is work the log should have done. It also lines up by eye with the
+/// gaps between lines, which is what a log is scanned with.
+///
+/// Width is fixed at eight characters so the messages stay in a column, which
+/// matters more than it sounds once there are two thousand of them.
 fn log_line(args: &std::fmt::Arguments<'_>) {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-
     // stdout is locked for the whole call so that two connections logging at the
     // same moment cannot interleave halfway through a line.
     let out = std::io::stdout();
     let mut lock = out.lock();
     use std::io::Write;
-    let _ = writeln!(lock, "{:>13}  {}", millis, args);
+    let _ = writeln!(lock, "{}  {}", elapsed(), args);
 }
+
+/// When the process started, captured once so every line counts from the same
+/// zero.
+fn started() -> std::time::Instant {
+    static STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    *STARTED.get_or_init(std::time::Instant::now)
+}
+
+/// Time since startup, as `  12.4s`, ` 1:02.3` or `1:02:03`.
+///
+/// A tenth of a second is the resolution that matters here: everything the server
+/// does that anyone watches happens inside a second or two, and the last unit
+/// changes to minutes once a run gets long enough that the earlier part of the
+/// log is what gets read.
+fn elapsed() -> String {
+    format_elapsed(started().elapsed())
+}
+
+/// Formats a duration the way the log wants it.
+///
+/// Split out from [`elapsed`] so it can be tested: this is pure formatting, and
+/// a clock in a test is a test that only passes sometimes.
+///
+/// Every branch is padded to the same width at the end rather than aligning the
+/// leading number. The branches are genuinely different lengths, and working out
+/// per branch which field has to be padded by how much is arithmetic that only
+/// pays off in the layout.
+fn format_elapsed(d: std::time::Duration) -> String {
+    let seconds = d.as_secs();
+    let tenths = d.subsec_millis() / 100;
+
+    let text = if seconds < 60 {
+        // Under a minute: seconds and a tenth, because that is the range where
+        // the gap between two lines is the interesting number.
+        format!("{seconds}.{tenths}s")
+    } else if seconds < 3600 {
+        // Past a minute the tenths go, since whole seconds are what get compared.
+        let (m, s) = (seconds / 60, seconds % 60);
+        format!("{m}:{s:02}.{tenths}")
+    } else {
+        // Past an hour there is no room left for a tenth.
+        let (h, m, s) = (seconds / 3600, (seconds % 3600) / 60, seconds % 60);
+        format!("{h}:{m:02}:{s:02}")
+    };
+
+    format!("{text:>WIDTH$}")
+}
+
+/// Width of a timestamp column, chosen to fit the longest of them.
+const WIDTH: usize = 8;
 
 /// A free-form note that is not tied to a connection.
 pub fn note(msg: impl AsRef<str>) {
@@ -291,6 +342,40 @@ impl Default for RateLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_duration_reads_as_the_time_the_server_has_been_up() {
+        let s = |n: u64| format_elapsed(std::time::Duration::from_secs(n));
+
+        // Under a minute it is seconds with a tenth, because that is the range
+        // where the gap between two lines is the interesting number.
+        assert_eq!(s(0), "    0.0s");
+        assert_eq!(s(12), "   12.0s");
+        assert_eq!(
+            format_elapsed(std::time::Duration::from_millis(12_450)),
+            "   12.4s"
+        );
+
+        // Past a minute the tenths go, since whole seconds are what get compared.
+        assert_eq!(s(60), "  1:00.0");
+        assert_eq!(s(1800), " 30:00.0");
+
+        // Past an hour there is no room left for a tenth.
+        assert_eq!(s(3600), " 1:00:00");
+        assert_eq!(s(3725), " 1:02:05");
+    }
+
+    #[test]
+    fn every_timestamp_is_the_same_width_so_the_messages_stay_in_a_column() {
+        let widths: Vec<usize> = [0u64, 5, 45, 59, 60, 600, 3599, 3600, 86_400]
+            .iter()
+            .map(|n| format_elapsed(std::time::Duration::from_secs(*n)).len())
+            .collect();
+        assert!(
+            widths.windows(2).all(|w| w[0] == w[1]),
+            "widths were {widths:?}"
+        );
+    }
 
     #[test]
     fn packet_logging_is_off_until_it_is_asked_for() {

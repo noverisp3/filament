@@ -524,6 +524,12 @@ fn play(
     let mut registry = BlockRegistry::new();
     let palette = terrain::register_terrain(&mut registry);
 
+    // A batch, so the client knows more chunks are coming. The float in the
+    // closing packet is the tick rate the server intends to run at.
+    let mut body = Vec::new();
+    p::write_chunk_batch_start(&mut body);
+    enc.encode(&body, &mut out).map_err(io_err)?;
+
     let mut sent = 0;
     for ring in 0..=crate::protocol::chunk::RADIUS {
         let mut chunks: Vec<(i32, i32)> = Vec::new();
@@ -561,6 +567,10 @@ fn play(
             }
         }
     }
+    let mut body = Vec::new();
+    p::write_chunk_batch_finished(&mut body, 20.0);
+    enc.encode(&body, &mut out).map_err(io_err)?;
+
     log.note(format!("sent {sent} chunks around the spawn"));
 
     stream.write_all(&out)?;
@@ -568,23 +578,65 @@ fn play(
 
     log.note("chunks sent; terrain generated, and it is not persisted");
 
-    // 11. Stay connected. There is nothing to tick, so this only logs what the
-    //     client sends and keeps the socket warm.
+    // 12. Keep the connection alive.
+    //
+    //     The client hangs up after thirty seconds of silence and reads silence
+    //     as "the server has stopped answering". There is no tick loop yet, so the
+    //     only traffic there is to send is this.
+    //
+    //     A read timeout rather than a second thread, so the deadline is checked
+    //     in the same loop that drains packets and there is no writer to lock
+    //     against.
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(1)))?;
+    let mut last_keep_alive = std::time::Instant::now();
+    let mut keep_alive_id: i64 = 1;
+
     loop {
         while let Some(frame) = dec.next_frame().map_err(io_err)? {
             let id = packet_id_of(&frame);
-            log.in_packet(&packet_name("play-s2c", id), "play", frame.len());
+            if super::log::verbose() {
+                log.in_packet(&packet_name("play-s2c", id), "play", frame.len());
+            }
         }
 
-        let n = stream.read(&mut scratch)?;
-        if n == 0 {
-            log.note("client closed during play");
-            return Ok(());
+        if last_keep_alive.elapsed() >= KEEP_ALIVE_EVERY {
+            let mut body = Vec::new();
+            p::write_keep_alive(&mut body, keep_alive_id);
+            let mut wire = Vec::new();
+            enc.encode(&body, &mut wire).map_err(io_err)?;
+            stream.write_all(&wire)?;
+            stream.flush()?;
+
+            keep_alive_id = keep_alive_id.wrapping_add(1).max(1);
+            last_keep_alive = std::time::Instant::now();
+
+            if super::log::verbose() {
+                log.out_packet("keep_alive", "play", body.len());
+            }
+            continue;
         }
-        dec.queue(&scratch[..n]);
+
+        match stream.read(&mut scratch) {
+            Ok(0) => {
+                log.note("client closed during play");
+                return Ok(());
+            }
+            Ok(n) => dec.queue(&scratch[..n]),
+            // The read timeout firing is the normal case. It is what lets the
+            // keep alive deadline be looked at.
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(e) => return Err(e),
+        }
     }
 }
 
+/// How often to send a keep alive.
+///
+/// Fifteen seconds against a thirty second client timeout, so one can be lost
+/// without the connection going.
+const KEEP_ALIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
 /// State ids for the blocks the terrain generator produces.
 ///
 /// Read from the generated table rather than written out, because these are

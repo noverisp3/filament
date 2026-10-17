@@ -34,8 +34,12 @@ pub mod id {
     pub const SET_HELD_SLOT: i32 = 107;
     pub const SET_TIME: i32 = 115;
 
-    // Serverbound, from the same file.
-    pub const SERVERBOUND_KEEP_ALIVE: i32 = 23;
+    // Serverbound, from the same file. The keep alive is 28 and not 23: 23 is
+    // debug_subscription_request, which the id tables agree on and which looked
+    // plausible enough to be worth checking.
+    pub const SERVERBOUND_DEBUG_SUBSCRIPTION: i32 = 23;
+    pub const SERVERBOUND_KEEP_ALIVE: i32 = 28;
+    pub const SERVERBOUND_CLIENT_TICK_END: i32 = 13;
     pub const SERVERBOUND_PLAYER_POSITION: i32 = 32;
     pub const SERVERBOUND_PLAYER_LOADED: i32 = 38;
 }
@@ -694,7 +698,8 @@ mod tests {
         assert_eq!(id::INITIALIZE_BORDER, 44);
         assert_eq!(id::SET_TIME, 115);
         assert_eq!(id::KEEP_ALIVE, 45);
-        assert_eq!(id::SERVERBOUND_KEEP_ALIVE, 23);
+        assert_eq!(id::SERVERBOUND_KEEP_ALIVE, 28);
+        assert_eq!(id::SERVERBOUND_CLIENT_TICK_END, 13);
         assert_eq!(id::SERVERBOUND_PLAYER_POSITION, 32);
     }
 }

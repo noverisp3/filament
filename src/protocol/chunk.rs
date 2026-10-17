@@ -31,9 +31,15 @@ pub const SECTIONS: usize = (HEIGHT / 16) as usize;
 pub const SECTION_VOLUME: usize = (WIDTH * WIDTH * 16) as usize;
 /// Bytes in one light layer for one section: sixteen by sixteen, four bits each.
 pub const LIGHT_BYTES: usize = SECTION_VOLUME / 2;
-/// How many chunks are sent. One is enough to get a client off the loading
-/// screen; the rest of the work is view distance.
-pub const RADIUS: i32 = 1;
+/// How many chunks are sent around the spawn.
+///
+/// A radius of one is nine chunks, which is fifty metres of world: enough to see
+/// ground and walk on it, and not enough to walk out of. The client asked for a
+/// view distance of eight, which is two hundred and eighty-nine chunks, so the
+/// rest of the area is air until more of this is generated.
+///
+/// Raised as the world's generation gets cheaper or generated in advance.
+pub const RADIUS: i32 = 4;
 
 /// The state id of air.
 ///
@@ -577,14 +583,7 @@ mod tests {
         assert_eq!(mask.iter().map(|b| b.count_ones()).sum::<u32>(), SECTIONS as u32);
     }
 
-    #[test]
-    fn no_chunks_are_generated_beyond_the_radius() {
-        // The area the server will actually send, so the count can be asserted.
-        let side = RADIUS * 2 + 1;
-        assert_eq!(side * side, 9);
-    }
-
-    #[test]
+#[test]
     fn a_chunk_is_under_the_frame_limit() {
         // Guards against a mistake turning into a packet the framing rejects.
         let mut w = Vec::new();

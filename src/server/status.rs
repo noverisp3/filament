@@ -549,7 +549,7 @@ fn configure(
 fn play(
     stream: &mut TcpStream,
     mut dec: FrameDecoder,
-    mut enc: FrameEncoder,
+    enc: FrameEncoder,
     log: ConnLog,
     radius: i32,
     session: Session,
@@ -1195,29 +1195,43 @@ fn play(
         let leaving: Vec<(i32, i32)> = sent.difference(&wanted).copied().collect();
 
         if !arriving.is_empty() || !leaving.is_empty() {
-            let mut body = Vec::new();
-            p::write_chunk_batch_start(&mut body);
-            enc.encode(&body, &mut out).map_err(io_err)?;
-
             let mut sorted = arriving.clone();
             sorted.sort_unstable();
 
-            // Asked for and sent if it is here. A chunk the pool has not
-            // finished is simply not in this batch: it is asked for again on
-            // the next pass and goes out then. That leaves the batch's closing
-            // count honest, which matters, because the client uses the pair to
-            // know when the world it has been sent is complete.
-            let mut in_batch = 0;
+            // Take what is actually here *before* opening a batch.
+            //
+            // Opening one first and filling it afterwards means a pass where
+            // the pool has finished nothing writes an empty batch — a start, a
+            // finish saying zero, and a flush — twenty times a second for as
+            // long as the ground takes. And it makes the count a lie: the
+            // closing number is what the client uses to know the world it has
+            // been sent is complete, so "17 chunks arrived" when none did is
+            // worse than saying nothing.
+            let mut ready: Vec<(crate::world::pos::ChunkPos, Vec<u8>)> = Vec::new();
             for (dx, dz) in &sorted {
-                if send_one_chunk(&mut out, &mut enc, &session.world, *dx, *dz)? {
-                    sent.insert((*dx, *dz));
-                    in_batch += 1;
+                let pos = crate::world::pos::ChunkPos { x: *dx, z: *dz };
+                if let Some(body) = session.world.want_chunk(pos) {
+                    ready.push((pos, body));
                 }
             }
 
-            let mut body = Vec::new();
-            p::write_chunk_batch_finished(&mut body, in_batch);
-            enc.encode(&body, &mut out).map_err(io_err)?;
+            if !ready.is_empty() {
+                let mut body = Vec::new();
+                p::write_chunk_batch_start(&mut body);
+                enc.encode(&body, &mut out).map_err(io_err)?;
+
+                for (pos, body) in &ready {
+                    enc.encode(body, &mut out).map_err(io_err)?;
+                    sent.insert((pos.x, pos.z));
+                    if super::log::verbose() {
+                        log.out_packet("level_chunk_with_light", "play", body.len());
+                    }
+                }
+
+                let mut body = Vec::new();
+                p::write_chunk_batch_finished(&mut body, ready.len() as i32);
+                enc.encode(&body, &mut out).map_err(io_err)?;
+            }
 
             // The forgets go after the batch, and each is its own packet. They
             // are the client dropping chunks, so they are not part of a chunk
@@ -1234,15 +1248,18 @@ fn play(
                 session.world.forget(crate::world::pos::ChunkPos { x: *dx, z: *dz });
             }
 
-            stream.write_all(&out)?;
-            stream.flush()?;
+            if !out.is_empty() {
+                stream.write_all(&out)?;
+                stream.flush()?;
+            }
 
-            if !sorted.is_empty() {
-                log.note(format!(
-                    "{} chunks arrived and {} were let go at {player_chunk:?}",
-                    sorted.len(),
-                    dropped.len()
-                ));
+            // Only when something happened. The ring a player is walking into
+            // stays in `arriving` for as long as the pool is working on it, so
+            // logging on the fact of it being wanted rather than on the fact of
+            // it being sent says the same thing every pass for as long as the
+            // ground takes, which is a screenful of noise about nothing.
+            if let Some(line) = chunk_report(sorted.len(), ready.len(), dropped.len()) {
+                log.note(format!("{line} at {player_chunk:?}"));
             }
         } else if !out.is_empty() {
             // The center moved without any chunk following it, which is what
@@ -1303,29 +1320,28 @@ fn wanted_positions(radius: i32) -> Vec<(i32, i32)> {
     out
 }
 
-/// Asks for one chunk and sends it if it is here.
+/// What the chunk-streaming branch of the loop reports, and when.
 ///
-/// Returns whether it went out, and the answer is allowed to be no: a chunk
-/// that has not been built yet comes back later, on a later pass of the loop,
-/// rather than holding this connection up until it exists. The connection's own
-/// socket is not being read while that happens, and that is the whole point —
-/// a player standing still while their terrain generates is a player nobody
-/// watching can see move.
-fn send_one_chunk(
-    out: &mut Vec<u8>,
-    enc: &mut crate::protocol::frame::FrameEncoder,
-    world: &WorldHandle,
-    dx: i32,
-    dz: i32,
-) -> std::io::Result<bool> {
-    use crate::world::pos::ChunkPos;
-
-    let Some(body) = world.want_chunk(ChunkPos { x: dx, z: dz }) else {
-        return Ok(false);
-    };
-    enc.encode(&body, out).map_err(io_err)?;
-
-    Ok(true)
+/// The decision to write a line at all is the thing worth isolating, not the
+/// writing. A chunk the pool has not finished stays in `arriving` for as long
+/// as the pool is working on it, so a loop that logs whenever `arriving` is
+/// non-empty says the same thing on every pass — which is what the console
+/// looked like: the same line, hundreds of times, within a tenth of a second,
+/// each claiming seventeen chunks had arrived when the batch contained none.
+///
+/// Two rules follow, and they are the same rule. Say nothing unless something
+/// happened, and say how many actually went rather than how many were wanted.
+fn chunk_report(wanted: usize, sent_now: usize, dropped: usize) -> Option<String> {
+    if sent_now == 0 && dropped == 0 {
+        return None;
+    }
+    debug_assert!(
+        sent_now <= wanted,
+        "cannot send more than was wanted: {sent_now} of {wanted}"
+    );
+    Some(format!(
+        "{sent_now} chunks arrived and {dropped} were let go"
+    ))
 }
 
 /// How often to send a keep alive.
@@ -1566,6 +1582,34 @@ fn serve_status(
 mod tests {
     use crate::server::ticking::{state_id, to_state_id};
     use super::*;
+
+    #[test]
+    fn a_ring_the_pool_has_not_finished_is_not_reported_over_and_over() {
+        // Seventeen wanted, none built. The loop sees the same seventeen on
+        // every pass, and saying so on every pass is the noise.
+        assert_eq!(
+            chunk_report(17, 0, 0),
+            None,
+            "nothing arrived and nothing left, so there is nothing to say"
+        );
+    }
+
+    #[test]
+    fn the_number_reported_is_what_was_sent_and_not_what_was_wanted() {
+        // "17 chunks arrived" for a batch that contained none is worse than
+        // silence: the closing count is what the client uses to know the world
+        // it has been sent is complete.
+        let line = chunk_report(17, 3, 0).expect("three did go out");
+        assert!(line.starts_with("3 chunks arrived"), "{line}");
+
+        let line = chunk_report(17, 0, 17).expect("seventeen left");
+        assert!(line.starts_with("0 chunks arrived"), "{line}");
+    }
+
+    #[test]
+    fn a_walk_that_changes_nothing_is_not_reported_at_all() {
+        assert_eq!(chunk_report(0, 0, 0), None);
+    }
 
     /// The palette the generator makes, so the hardness table can be keyed on it.
     fn terrain() -> crate::world::terrain::TerrainBlocks {

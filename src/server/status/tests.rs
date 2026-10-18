@@ -46,6 +46,98 @@ fn a_flushed_buffer_puts_nothing_on_the_wire_when_it_is_empty() {
 }
 
 #[test]
+fn crossing_a_boundary_sends_the_new_ground_before_dropping_the_old() {
+    // The fault this guards: a player crossing a chunk boundary had the terrain
+    // they were leaving forgotten on one pass, and the terrain they were walking
+    // onto arrived on a later one, because want_chunk returns None until the
+    // pool has built it. For those two hundred milliseconds the client was
+    // holding neither, which reads as a hitch to the player and as a hitch to
+    // whoever is watching them.
+    //
+    // One ring is kept back, so nothing is forgotten while the replacement is
+    // still being built.
+    let radius = 8;
+    let mut sent: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
+    for (x, z) in chunk_edges((0, 0), radius, &sent).0 {
+        sent.insert((x, z));
+    }
+    assert_eq!(sent.len(), 289, "the opening window is the whole square");
+
+    let (arriving, leaving) = chunk_edges((1, 0), radius, &sent);
+    assert_eq!(arriving.len(), 17, "the new edge comes in");
+    assert!(
+        leaving.is_empty(),
+        "and nothing is taken away yet: {:?}",
+        leaving
+    );
+
+    // Two chunks on, the trailing edge is now two rings out and goes. The
+    // chunks replacing it left a whole chunk boundary ago.
+    for (x, z) in arriving {
+        sent.insert((x, z));
+    }
+    let (arriving, leaving) = chunk_edges((2, 0), radius, &sent);
+    assert_eq!(arriving.len(), 17, "and the next edge follows");
+    assert_eq!(leaving.len(), 17, "the trailing edge is forgotten now");
+    assert!(
+        leaving.iter().all(|&(_, z)| (-8..=8).contains(&z)),
+        "and it is the old column, not something diagonal: {leaving:?}"
+    );
+}
+
+#[test]
+fn far_enough_ahead_only_the_far_edge_is_released() {
+    // What the kept-back ring costs. Walked a full window in one go, the whole
+    // square is new and almost nothing can be released, because the ring behind
+    // them still covers most of what was sent. The point is that nothing is
+    // released that the client still needs, and that a jump this size does not
+    // leave the held set growing without bound.
+    let radius = 8;
+    let mut sent = std::collections::HashSet::new();
+    for (x, z) in chunk_edges((0, 0), radius, &sent).0 {
+        sent.insert((x, z));
+    }
+
+    let (arriving, leaving) = chunk_edges((2 * radius, 0), radius, &sent);
+
+    // Jumped a whole window in one go. Every chunk in the new square is new except
+    // the strip the kept-back ring still covers, so 289 minus the 17 that are
+    // held rather than wanted. That difference is the ring doing its job: those
+    // chunks are still in `sent`, so they are not resent, and they are not
+    // released either.
+    assert_eq!(
+        arriving.len(),
+        (((2 * radius + 1) * (2 * radius + 1)) - (2 * radius + 1)) as usize,
+        "every chunk in the new window except the strip still kept back: {}",
+        arriving.len()
+    );
+    // Jumped a whole window in one go, which is what a teleport looks like to the
+    // chunk logic. Almost everything is released and almost everything is new,
+    // and the point of the assertion is that the held set does not grow without
+    // bound: it lands at a window plus a strip, not at two windows.
+    assert!(
+        !leaving.is_empty(),
+        "the far side of the old window is released: {:?}",
+        leaving
+    );
+
+    let still_held = sent.len() - leaving.len();
+    let held_after = still_held + arriving.len();
+    let window = ((2 * radius + 1) * (2 * radius + 1)) as usize;
+
+    assert!(
+        held_after < window + window / 4,
+        "a jump this size does not leave the world piling up: {} held against a \
+         window of {window}",
+        held_after
+    );
+    assert!(
+        held_after > window,
+        "and it is still a window, not a hole: {held_after}"
+    );
+}
+
+#[test]
 fn a_ring_the_pool_has_not_finished_is_not_reported_over_and_over() {
     // Seventeen wanted, none built. The loop sees the same seventeen on
     // every pass, and saying so on every pass is the noise.

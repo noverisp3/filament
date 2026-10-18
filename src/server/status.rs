@@ -563,6 +563,57 @@ fn flush_buffer<S: Write>(stream: &mut S, out: &mut Vec<u8>) -> std::io::Result<
     Ok(())
 }
 
+// Which chunks a player standing at `player_chunk` has coming, and which ones
+// can be taken off them.
+//
+// Two squares, and the distance between them is the whole point. Chunks within
+// the view radius are wanted: they are what gets sent. Chunks within one ring
+// further out are merely kept, and nothing is forgotten until a chunk is
+// outside that.
+//
+// Using one square for both meant a player crossing a boundary had the
+// terrain under them forgotten before its replacement existed. want_chunk
+// returns None until the terrain pool has built a chunk, so the forget went out
+// on one pass and the replacement arrived on a later one, and in between the
+// client held neither. It looked like a hitch to the player walking and a
+// hitch to whoever was watching them, which is why it was reported as motion
+// rather than as a world fault.
+//
+// Sorting both, so the same walk produces the same bytes in the same order,
+// which is what makes a session reproducible.
+/// A chunk coordinate pair, which is what a chunk is named by throughout.
+type ChunkCoord = (i32, i32);
+
+/// A square of chunk coordinates, used for the windows a player is sent and
+/// for the wider one it is allowed to forget from.
+type ChunkSquare = std::collections::HashSet<ChunkCoord>;
+
+fn chunk_edges(
+    player_chunk: (i32, i32),
+    radius: i32,
+    sent: &ChunkSquare,
+) -> (Vec<ChunkCoord>, Vec<ChunkCoord>) {
+    let square = |r: i32| -> ChunkSquare {
+        let side = (2 * r + 1) as usize;
+        let mut set = std::collections::HashSet::with_capacity(side * side);
+        for dx in -r..=r {
+            for dz in -r..=r {
+                set.insert((player_chunk.0 + dx, player_chunk.1 + dz));
+            }
+        }
+        set
+    };
+
+    let wanted = square(radius);
+    let keep = square(radius + 1);
+
+    let mut arriving: Vec<(i32, i32)> = wanted.difference(sent).copied().collect();
+    let mut leaving: Vec<(i32, i32)> = sent.difference(&keep).copied().collect();
+    arriving.sort_unstable();
+    leaving.sort_unstable();
+    (arriving, leaving)
+}
+
 fn play(
     stream: &mut TcpStream,
     mut dec: FrameDecoder,
@@ -1309,31 +1360,16 @@ fn play(
             center_sent = player_chunk;
         }
 
-        // The set of chunks the client should be holding: a square of the view
-        // radius around the player. The game sends a square too, so this is not
-        // a smaller world than the client expects.
-        //
-        // What was missing was the other half. The set this is compared against
-        // only ever grew, so every chunk the player ever walked past stayed
-        // loaded on both sides and was paid for again on every subsequent
-        // move.
-        let mut wanted = std::collections::HashSet::with_capacity(((2 * radius + 1) * (2 * radius + 1)) as usize);
-        for dx in -radius..=radius {
-            for dz in -radius..=radius {
-                wanted.insert((player_chunk.0 + dx, player_chunk.1 + dz));
-            }
-        }
-
-        // New: wanted but not yet sent. Gone: sent but no longer wanted.
-        //
-        // Sorted, so the same walk produces the same bytes in the same order,
-        // which is what makes a session reproducible.
-        let arriving: Vec<(i32, i32)> = wanted.difference(&sent).copied().collect();
-        let leaving: Vec<(i32, i32)> = sent.difference(&wanted).copied().collect();
+        // Which chunks are coming and which may go: the window is a square of the view
+        // radius, and what may be forgotten is a ring further out than that, so
+        // the ground a player is leaving is still held when the ground they are
+        // walking onto arrives. See chunk_edges, which is where the reason is.
+        let (arriving, leaving) = chunk_edges(player_chunk, radius, &sent);
 
         if !arriving.is_empty() || !leaving.is_empty() {
-            let mut sorted = arriving.clone();
-            sorted.sort_unstable();
+            // Already sorted by chunk_edges, so the same walk produces the same
+            // bytes in the same order.
+            let sorted = arriving;
 
             // Take what is actually here *before* opening a batch.
             //
@@ -1373,8 +1409,11 @@ fn play(
             // The forgets go after the batch, and each is its own packet. They
             // are the client dropping chunks, so they are not part of a chunk
             // batch: the batch pair brackets chunks arriving, not leaving.
-            let mut dropped = leaving.clone();
-            dropped.sort_unstable();
+            //
+            // Sorted already, like the arrivals: chunk_edges put them in order
+            // so this walk is reproducible and so the forget of a chunk follows
+            // the arrival that replaced it on the wire rather than preceding it.
+            let dropped = leaving;
             for (dx, dz) in &dropped {
                 let mut body = Vec::new();
                 p::write_forget_chunk(&mut body, *dx, *dz);

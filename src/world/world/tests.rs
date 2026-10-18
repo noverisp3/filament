@@ -1,0 +1,234 @@
+use super::*;
+use crate::world::chunk::MIN_BLOCK_Y;
+use crate::world::pos::LocalPos;
+
+fn test_world() -> World {
+    World::generate(1)
+}
+
+fn stone(world: &World) -> BlockId {
+    world.registry().id("stone").expect("registered")
+}
+
+fn air(world: &World) -> BlockId {
+    world.registry().id("air").expect("registered")
+}
+
+/// Builds a world with a single known block, for deterministic tests.
+fn world_with_one(radius: i32, chunk: ChunkPos, local: LocalPos) -> (World, BlockId) {
+    let mut world = World::generate(radius);
+    let stone = stone(&world);
+    world
+        .set_block(
+            BlockPos::new(
+                chunk.x * SECTION_DIM + local.x as i32,
+                local.y as i32,
+                chunk.z * SECTION_DIM + local.z as i32,
+            ),
+            stone,
+        )
+        .expect("inside the world");
+    (world, stone)
+}
+
+/// The same world with a three-block pocket around `pos`, so generated
+/// terrain cannot decide whether a cell is free.
+fn pocket_world(pos: BlockPos) -> (World, BlockId, BlockId) {
+    let mut world = World::generate(1);
+    let stone = stone(&world);
+    let air = air(&world);
+
+    // Clear a column so the tests are not fighting the terrain generator.
+    for y in pos.y - 2..=pos.y + 2 {
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                world.set_block_quiet(BlockPos::new(pos.x + dx, y, pos.z + dz), air);
+            }
+        }
+    }
+    world.set_block(pos, stone).expect("inside the world");
+    (world, stone, air)
+}
+
+#[test]
+fn generated_world_has_the_requested_chunks() {
+    let world = test_world();
+    assert_eq!(world.chunk_count(), 9);
+    assert!(world.chunk(ChunkPos::new(1, 1)).is_some());
+    assert!(world.chunk(ChunkPos::new(2, 0)).is_none());
+}
+
+#[test]
+fn chunk_positions_are_deterministic() {
+    let a = World::generate(2).chunk_positions();
+    let b = World::generate(2).chunk_positions();
+    assert_eq!(a, b);
+    assert!(a.windows(2).all(|w| w[0] <= w[1]), "not sorted");
+}
+
+#[test]
+fn a_break_reports_the_section_it_landed_in() {
+    let (mut world, block) =
+        world_with_one(0, ChunkPos::new(0, 0), LocalPos { x: 4, y: 5, z: 6 });
+    let pos = BlockPos::new(4, 5, 6);
+    assert_eq!(world.block(pos), Some(block));
+
+    let edit = world.break_block(pos).expect("should edit");
+    assert_eq!(edit.chunks, vec![ChunkPos::new(0, 0)]);
+    // The edited section is always included. Light reaches further than the
+    // block itself, so the section below can be in the list too; what must
+    // hold is that nothing outside this chunk is touched.
+    assert!(
+        edit.touches(SectionPos::new(0, 0, 0)),
+        "the edited section should be in {:?}",
+        edit.sections
+    );
+    assert!(
+        edit.sections
+            .iter()
+            .all(|section| section.chunk_pos() == ChunkPos::new(0, 0)),
+        "an interior break must stay inside one chunk, got {:?}",
+        edit.sections
+    );
+    assert_eq!(world.block(pos), Some(air(&world)));
+}
+
+#[test]
+fn a_break_on_a_chunk_border_pulls_in_the_neighbouring_chunk() {
+    let (mut world, _block) =
+        world_with_one(1, ChunkPos::new(1, 0), LocalPos { x: 0, y: 5, z: 6 });
+    // x=0 of chunk 1 is world x=16, hard against the border with chunk 0.
+    let pos = BlockPos::new(16, 5, 6);
+
+    let edit = world.break_block(pos).expect("should edit");
+
+    assert!(
+        edit.owns(SectionPos::new(0, 0, 0)),
+        "the neighbour's section is the one whose face appears, so chunk (0,0) \
+         must be rebuilt too, got {:?}",
+        edit.chunks
+    );
+    assert!(edit.owns(SectionPos::new(1, 0, 0)), "and the edited chunk");
+}
+
+#[test]
+fn a_block_on_a_section_boundary_dirties_its_neighbour() {
+    let (mut world, _block) =
+        world_with_one(1, ChunkPos::new(0, 0), LocalPos { x: 0, y: 5, z: 6 });
+    // Placing again at x=0 also touches the section to the -X, which is
+    // the neighbouring chunk's section.
+    let edit = world
+        .set_block(BlockPos::new(0, 5, 6), air(&world))
+        .expect("should edit");
+    assert!(
+        edit.sections.len() >= 2,
+        "a boundary block must dirty the neighbour: {:?}",
+        edit.sections
+    );
+    assert!(edit.touches(SectionPos::new(0, 0, 0)));
+    assert!(
+        edit.touches(SectionPos::new(-1, 0, 0)),
+        "the -X neighbour section should be dirty: {:?}",
+        edit.sections
+    );
+}
+
+#[test]
+fn an_edit_outside_the_world_is_refused() {
+    let mut world = test_world();
+    assert_eq!(world.break_block(BlockPos::new(1000, 0, 0)), None);
+    assert_eq!(
+        world.set_block(BlockPos::new(0, MIN_BLOCK_Y - 1, 0), stone(&world)),
+        None
+    );
+}
+
+#[test]
+fn writing_the_same_block_reports_nothing() {
+    let (mut world, block) =
+        world_with_one(0, ChunkPos::new(0, 0), LocalPos { x: 4, y: 5, z: 6 });
+    assert_eq!(
+        world.set_block(BlockPos::new(4, 5, 6), block),
+        None,
+        "a no-op must not trigger a re-mesh"
+    );
+}
+
+#[test]
+fn neighbours_are_reported_across_chunks_and_vertically() {
+    let world = test_world();
+    let centre = SectionPos::new(0, 0, 0);
+    let neighbors = world.section_neighbors(centre);
+
+    assert!(neighbors.neg_x.is_some(), "chunk -1 should be loaded");
+    assert!(neighbors.pos_x.is_some());
+    assert!(neighbors.pos_y.is_some());
+    assert!(neighbors.neg_y.is_some(), "the world is 24 sections tall");
+
+    // The bottom of the world has nothing below it, and neither does the
+    // chunk beyond the loaded square.
+    let bottom = SectionPos::new(0, MIN_SECTION_Y, 0);
+    assert!(
+        world.section_neighbors(bottom).neg_y.is_none(),
+        "nothing exists below the world's floor"
+    );
+    let far = SectionPos::new(2, 0, 0);
+    assert!(
+        world.section_neighbors(far).pos_x.is_none(),
+        "chunk 2 is outside the loaded square"
+    );
+}
+
+#[test]
+fn a_ray_through_generated_terrain_hits_something() {
+    let world = test_world();
+    // Straight down from high above the surface.
+    let hit = world
+        .raycast([8.5, 200.0, 8.5], [0.0, -1.0, 0.0], 400.0)
+        .expect("terrain should be hit");
+    assert!(hit.block.y < 200);
+    assert_eq!(hit.normal, [0, 1, 0], "entered through the top");
+    assert!(world.is_solid(hit.block));
+}
+
+#[test]
+fn placement_lands_against_the_hit_face_and_refuses_occupied_cells() {
+    let target_block = BlockPos::new(4, 8, 6);
+    let (mut world, stone, _air) = pocket_world(target_block);
+
+    let hit = RayHit {
+        block: target_block,
+        normal: [0, 1, 0],
+    };
+
+    let cell = world.placement_for(&hit).expect("the cell above is empty");
+    assert_eq!(cell, BlockPos::new(4, 9, 6));
+
+    // Against a face whose neighbour is solid, there is nowhere to put it.
+    world
+        .set_block(BlockPos::new(4, 7, 6), stone)
+        .expect("inside the world");
+    let blocked = RayHit {
+        block: target_block,
+        normal: [0, -1, 0],
+    };
+    assert_eq!(world.placement_for(&blocked), None);
+
+    // Unloaded space refuses placement rather than extending the world.
+    let outside = RayHit {
+        block: BlockPos::new(100_000, 0, 0),
+        normal: [1, 0, 0],
+    };
+    assert_eq!(
+        world.placement_for(&outside),
+        None,
+        "placement must not reach outside the loaded world"
+    );
+}
+
+#[test]
+fn unloaded_space_is_not_solid() {
+    let world = test_world();
+    assert!(!world.is_solid(BlockPos::new(100_000, 0, 0)));
+    assert_eq!(world.block(BlockPos::new(100_000, 0, 0)), None);
+}

@@ -1255,14 +1255,15 @@ fn play(
                                 // and a player who digs a hole has the dirt to
                                 // fill it in again.
                                 //
-                                // The block that was there has a name, and that
-                                // name is usually also an item -- grass block is
-                                // `minecraft:grass_block` both ways, and the item
-                                // id is a different number from the block state
-                                // one: dirt is state 10 and item 484. Where there
-                                // is no item of that name the block is simply not
-                                // something that can be held, and nothing is
-                                // given.
+                                // What was there, what is there now, and the
+                                // prediction number the client asked about, and
+                                // what went into the hand that broke it.
+                                //
+                                // The names are the point. A state id on its
+                                // own cannot be read by eye, and a block sent
+                                // as the wrong one is a block that stays solid
+                                // in the client while the server believes it
+                                // is gone.
                                 let terrain = session.world.terrain_blocks();
                                 let name_of = |state: i32| {
                                     terrain
@@ -1272,6 +1273,15 @@ fn play(
                                         })
                                         .unwrap_or_else(|| format!("state {state}"))
                                 };
+
+                                // The block that was there has a name, and that
+                                // name is usually also an item -- grass block is
+                                // `minecraft:grass_block` both ways, and the item
+                                // id is a different number from the block state
+                                // one: dirt is state 10 and item 484. Where there
+                                // is no item of that name the block is simply not
+                                // something that can be held, and nothing is
+                                // given.
                                 if let Some(terrain) = terrain {
                                     let held = crate::server::ticking::state_id_name(was, &terrain);
                                     if let Some(item) =
@@ -1293,24 +1303,6 @@ fn play(
                                         }
                                     }
                                 }
-
-                                // What was there, what is there now, and the
-                                // prediction number the client asked about.
-                                //
-                                // The names are the point. A state id on its
-                                // own cannot be read by eye, and a block sent
-                                // as the wrong one is a block that stays solid
-                                // in the client while the server believes it
-                                // is gone.
-                                let terrain = session.world.terrain_blocks();
-                                let name_of = |state: i32| {
-                                    terrain
-                                        .map(|t| {
-                                            crate::server::ticking::state_id_name(state, &t)
-                                                .to_string()
-                                        })
-                                        .unwrap_or_else(|| format!("state {state}"))
-                                };
                                 log.note(format!(
                                     "broke {bx} {by} {bz}: {} ({was}) -> {} ({now}), \
                                      client prediction sequence {}",

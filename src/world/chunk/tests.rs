@@ -138,3 +138,51 @@ fn compact_shrinks_a_chunk_after_blocks_are_removed() {
         "a chunk back to all air must cost nothing"
     );
 }
+#[test]
+fn a_body_is_written_once_and_kept() {
+    // The whole point of the cache: the world's own thread does not write a
+    // chunk out again for every player that walks into it.
+let (registry, _air, stone) = ids();
+    let _ = &registry;
+    let pos = ChunkPos { x: 0, z: 0 };
+    let mut chunk = Chunk::uniform(pos, stone);
+
+    let expected = chunk.nbytes().to_le_bytes().to_vec();
+    let mut writes = 0;
+    let body = chunk
+        .body(|c| {
+            writes += 1;
+            c.nbytes().to_le_bytes().to_vec()
+        })
+        .to_vec();
+    assert_eq!(writes, 1, "the first ask writes");
+    assert_eq!(body, expected);
+
+    let again = chunk.body(|_| { writes += 1; Vec::new() }).to_vec();
+    assert_eq!(writes, 1, "and the second ask does not");
+    assert_eq!(again, body, "it is the same body");
+}
+
+#[test]
+fn editing_a_chunk_throws_the_body_away() {
+    // The failure this guards is the ghost block coming back by a different
+    // road: a chunk written out, then dug in, then served from the cache with
+    // the dig not in it. The block would be whole on the wire and gone in the
+    // world, which is the fault that took a bisect to find.
+    let (registry, air, stone) = ids();
+    let _ = &registry;
+    let pos = ChunkPos { x: 0, z: 0 };
+    let mut chunk = Chunk::uniform(pos, stone);
+    let block = BlockPos::new(0, 0, 0);
+
+    let before = chunk.body(|c| c.nbytes().to_le_bytes().to_vec()).to_vec();
+    assert!(chunk.body_is_current(), "written");
+
+    assert!(chunk.set_block(block, air), "the edit took");
+    assert!(!chunk.body_is_current(), "and the body is no longer current");
+
+    let after = chunk.body(|c| c.nbytes().to_le_bytes().to_vec()).to_vec();
+    assert_ne!(before, after, "so the next ask writes it again");
+    assert!(chunk.body_is_current());
+}
+

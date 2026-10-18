@@ -22,6 +22,23 @@ pub struct Chunk {
     /// One light record per section, indexed exactly like `sections` so the two
     /// stay in step without a lookup.
     light: Vec<SectionLight>,
+    /// The chunk already written out as the body of a `level_chunk_with_light`,
+    /// or None when it has changed since.
+    ///
+    /// Writing it out costs about eleven milliseconds and reading the world
+    /// costs two tenths, so a player waiting for their opening batch of two
+    /// hundred and eighty-nine chunks was waiting on this and nothing else. It
+    /// was done on the world's own thread because a chunk can be edited after
+    /// it is generated and the body has to show the edit, which meant the copy
+    /// could not simply be made once and left alone.
+    ///
+    /// It can: the body is invalidated whenever a block in the chunk changes,
+    /// which is set_block and nothing else. So the pool builds it while the
+    /// chunk is fresh and nothing on the world's thread has to wait for it, and
+    /// a chunk that has been edited since is written out again when it is next
+    /// asked for -- once, for the one chunk that was dug in, rather than for
+    /// every chunk that was not.
+    serialised: Option<Vec<u8>>,
 }
 
 pub const MIN_SECTION_Y: i32 = MIN_BLOCK_Y / SECTION_DIM;
@@ -43,6 +60,7 @@ impl Chunk {
             pos,
             sections,
             light,
+            serialised: None,
         }
     }
 
@@ -158,9 +176,52 @@ impl Chunk {
         match self.section_mut(pos.section_pos()) {
             Some(section) => {
                 section.set(pos.local_pos(), block);
+                // The body on the wire is a copy of what was here before, and
+                // set_block is the only thing that changes what is here.
+                self.serialised = None;
                 true
             }
             None => false,
+        }
+    }
+
+    /// The body of a `level_chunk_with_light` for this chunk, written once and
+    /// kept until a block in it changes.
+    ///
+    /// `write` is what turns a chunk into bytes; it is passed in rather than
+    /// reached for, so that the world module does not have to know how a chunk
+    /// is written and the two stay separate.
+    pub fn body<F>(&mut self, write: F) -> &[u8]
+    where
+        F: FnOnce(&Self) -> Vec<u8>,
+    {
+        if self.serialised.is_none() {
+            self.serialised = Some(write(self));
+        }
+        self.serialised.as_deref().expect("just written")
+    }
+
+    /// Whether the body on the wire is still current.
+    ///
+    /// Only a test wants this. It is the property the cache exists to keep: a
+    /// chunk that has not been edited keeps its body, and a chunk that has been
+    /// edited does not.
+    pub fn body_is_current(&self) -> bool {
+        self.serialised.is_some()
+    }
+
+    /// Sets the body ahead of the first time it is asked for, so the writing
+    /// happens where the chunk is built rather than where it is sent.
+    ///
+    /// A no-op on a chunk that already has one, and on one that has been edited
+    /// since, because a caller that sets a body on an edited chunk would be
+    /// caching something that does not describe it.
+    pub fn set_body<F>(&mut self, write: F)
+    where
+        F: FnOnce(&Self) -> Vec<u8>,
+    {
+        if self.serialised.is_none() {
+            self.serialised = Some(write(self));
         }
     }
 

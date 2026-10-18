@@ -311,7 +311,25 @@ pub fn spawn() -> WorldHandle {
                         pos
                     };
 
-                    let chunk = crate::world::terrain::generate_chunk(pos, &terrain);
+                    let mut chunk = crate::world::terrain::generate_chunk(pos, &terrain);
+                    // Written out here, where the chunk is already in this
+                    // worker's hands, rather than on the world's own thread when
+                    // it is asked for.
+                    //
+                    // Writing a chunk out is about forty times the cost of
+                    // making one -- eleven milliseconds against a quarter of a
+                    // millisecond -- and it used to be done on the one thread
+                    // that everything else also runs on. Adding workers did
+                    // nothing for a player's wait, because the wait was never in
+                    // the part they were parallelising. Two hundred and
+                    // eighty-nine chunks at eleven milliseconds is the three
+                    // seconds a player spent looking at terrain arrive.
+                    //
+                    // The body is dropped again by set_block, so a chunk that is
+                    // edited after this is written out afresh when it is next
+                    // asked for. That is one chunk, once, rather than every
+                    // chunk for every player.
+                    chunk.set_body(|c| encode_chunk_body(c, &terrain, pos));
                     pending
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
@@ -469,9 +487,12 @@ fn apply(world: &mut World, command: Command, pool: &Pool) {
             let _ = reply.send(body);
         }
         Command::StoredChunk { pos, reply } => {
-            // Only if it is here. Generating is somebody else's job now.
+            // Only if it is here. Generating is somebody else's job now, and so
+            // is writing it out: the body was built with the chunk and is only
+            // rebuilt here if the chunk has been edited since.
             let terrain = *world.terrain_blocks();
-            let body = world.chunk(pos).map(|c| encode_chunk_body(c, &terrain, pos));            let _ = reply.send(body);
+            let body = world.chunk_mut(pos).map(|c| chunk_body_of(c, &terrain, pos).to_vec());
+            let _ = reply.send(body);
         }
 
         Command::BreakBlock { pos, reply } => {
@@ -516,8 +537,13 @@ fn chunk_body(world: &mut World, pos: ChunkPos) -> Vec<u8> {
     world.ensure_chunk(pos);
 
     let terrain = *world.terrain_blocks();
-    let chunk = world.chunk(pos).expect("the chunk was just stored");
-    encode_chunk_body(chunk, &terrain, pos)
+    let chunk = world.chunk_mut(pos).expect("the chunk was just stored");
+    chunk_body_of(chunk, &terrain, pos).to_vec()
+}
+
+/// The body of a chunk packet, written out once and kept until it is edited.
+fn chunk_body_of<'a>(chunk: &'a mut Chunk, terrain: &TerrainBlocks, pos: ChunkPos) -> &'a [u8] {
+    chunk.body(|c| encode_chunk_body(c, terrain, pos))
 }
 
 /// Writes a chunk out as a packet body.

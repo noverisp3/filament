@@ -15,7 +15,8 @@ use crate::protocol::{VarInt, VarLong};
 
 use super::log::{next_connection_id, packet_name, ConnLog};
 use super::log;
-use super::shared::SharedWorld;
+use super::ticking::WorldHandle;
+use super::ticking;
 
 /// The protocol version this server speaks, from the data generator.
 pub const PROTOCOL_VERSION: i32 = 777;
@@ -24,9 +25,9 @@ pub const PROTOCOL_VERSION: i32 = 777;
 pub struct StatusServer {
     listener: TcpListener,
     status: ServerStatus,
-    /// Built once here rather than per connection, which is what makes two
-    /// players share ground. See `server::shared`.
-    world: SharedWorld,
+    /// A way to ask the world for things, not the world itself. It lives on a
+    /// thread of its own; see `server::ticking`.
+    world: WorldHandle,
 }
 
 impl StatusServer {
@@ -36,7 +37,7 @@ impl StatusServer {
         Ok(StatusServer {
             listener,
             status,
-            world: SharedWorld::new(),
+            world: ticking::spawn(),
         })
     }
 
@@ -141,7 +142,7 @@ const POLL: std::time::Duration = std::time::Duration::from_millis(50);
 fn handle_connection(
     mut stream: TcpStream,
     status: ServerStatus,
-    world: SharedWorld,
+    world: WorldHandle,
 ) -> std::io::Result<()> {
     let log = ConnLog::new(
         next_connection_id(),
@@ -214,7 +215,7 @@ Ok(Some(frame)) => {
 /// applies the threshold to whatever arrives *after* the compression packet, so
 /// sending that packet already compressed means the client reads its own
 /// threshold as garbage and disconnects.
-fn login(stream: &mut TcpStream, log: ConnLog, world: SharedWorld) -> std::io::Result<()> {
+fn login(stream: &mut TcpStream, log: ConnLog, world: WorldHandle) -> std::io::Result<()> {
     use crate::protocol::frame::DEFAULT_COMPRESSION_THRESHOLD;
     use crate::protocol::login::{write_login_compression, write_login_finished, Uuid};
 
@@ -340,7 +341,7 @@ fn configure(
     stream: &mut TcpStream,
     log: ConnLog,
     mut dec: FrameDecoder,
-    world: SharedWorld,
+    world: WorldHandle,
 ) -> std::io::Result<()> {
     use crate::protocol::configuration::{
         registry_data_count, registry_data_frames, update_tags_summary,
@@ -501,7 +502,7 @@ fn play(
     mut enc: FrameEncoder,
     log: ConnLog,
     radius: i32,
-    world: SharedWorld,
+    world: WorldHandle,
 ) -> std::io::Result<()> {
     use crate::protocol::play as p;
 
@@ -633,10 +634,14 @@ fn play(
         }
 
         for (dx, dz) in chunks {
-            let sections = world.sections_for_wire(ChunkPos { x: dx, z: dz });
+            // Asked of the thread that owns the world, and waited for. The
+            // generation happens there rather than here, which is the whole
+            // reason the two hundred and eighty-nine of an initial join no
+            // longer block anyone else.
+            let Some(body) = world.chunk(ChunkPos { x: dx, z: dz }) else {
+                return Ok(());
+            };
 
-            let mut body = Vec::new();
-            crate::protocol::chunk::write_chunk_with_states(&mut body, dx, dz, &sections);
             enc.encode(&body, &mut out).map_err(io_err)?;
             sent_count += 1;
             sent.insert((dx, dz));
@@ -715,9 +720,6 @@ fn play(
             // goes down and STOP_DESTROY when the block is gone; only the second
             // changes anything, because the first is a request to start drawing
             // cracks and there is no progress to report without a tick loop.
-            //
-            // Nothing here checks that the player is near the block, which is
-            // the check that keeps a client from editing the world at a distance.
             if id == p::id::SERVERBOUND_PLAYER_ACTION
                 && let Ok(action) = p::PlayerActionPacket::read(&frame)
                 && action.action == p::PlayerAction::StopDestroy
@@ -725,7 +727,23 @@ fn play(
                 let (bx, by, bz) = p::unpack_block_pos(action.pos);
                 let pos = crate::world::pos::BlockPos::new(bx, by, bz);
 
-                if world.break_block(pos).is_some() {
+                // How far the player is from the block, in blocks.
+                //
+                // Without this the server edits anywhere in the world on request
+                // from a client, which is the first hole in it and the cheapest
+                // to close: a client that wants to hollow out a mountain a
+                // kilometre away just says so. It is checked here, where the
+                // player's position is, rather than on the world thread, which
+                // knows nothing about players and should not.
+                let reach = reach_to(&player, pos);
+
+                if reach > MAX_REACH {
+                    if super::log::verbose() {
+                        log.note(format!(
+                            "refused a break at {bx} {by} {bz}, {reach:.1} blocks away"
+                        ));
+                    }
+                } else if world.break_block(pos).flatten().is_some() {
                     edits.push((bx, by, bz));
                     if super::log::verbose() {
                         log.note(format!("broke the block at {bx} {by} {bz}"));
@@ -741,7 +759,7 @@ fn play(
             let mut body = Vec::new();
             for (bx, by, bz) in &edits {
                 let pos = crate::world::pos::BlockPos::new(*bx, *by, *bz);
-                let state = world.state_at(pos).unwrap_or(AIR_STATE);
+                let state = world.block_at(pos).flatten().unwrap_or(AIR_STATE);
                 p::write_block_update(&mut body, *bx, *by, *bz, state);
             }
             let mut wire = Vec::new();
@@ -799,7 +817,9 @@ fn play(
             sorted.sort_unstable();
 
             for (dx, dz) in &sorted {
-                send_one_chunk(&mut out, &mut enc, &world, *dx, *dz)?;
+                if !send_one_chunk(&mut out, &mut enc, &world, *dx, *dz)? {
+                    return Ok(());
+                }
                 sent.insert((*dx, *dz));
             }
 
@@ -879,19 +899,18 @@ fn play(
 fn send_one_chunk(
     out: &mut Vec<u8>,
     enc: &mut crate::protocol::frame::FrameEncoder,
-    world: &SharedWorld,
+    world: &WorldHandle,
     dx: i32,
     dz: i32,
-) -> std::io::Result<()> {
+) -> std::io::Result<bool> {
     use crate::world::pos::ChunkPos;
 
-    let sections = world.sections_for_wire(ChunkPos { x: dx, z: dz });
-
-    let mut body = Vec::new();
-    crate::protocol::chunk::write_chunk_with_states(&mut body, dx, dz, &sections);
+    let Some(body) = world.chunk(ChunkPos { x: dx, z: dz }) else {
+        return Ok(false);
+    };
     enc.encode(&body, out).map_err(io_err)?;
 
-    Ok(())
+    Ok(true)
 }
 
 /// How often to send a keep alive.
@@ -899,6 +918,26 @@ fn send_one_chunk(
 /// Fifteen seconds against a thirty second client timeout, so one can be lost
 /// without the connection going.
 const KEEP_ALIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+/// How far a player may reach to break a block, in blocks.
+///
+/// The game's own limit is 4.5 in survival and 5 in creative, and neither is
+/// negotiated: this is a server saying what it will accept. It is generous past
+/// both, because the number that matters is that it is a number.
+const MAX_REACH: f64 = 6.0;
+
+/// How far the player is from a block, in blocks.
+///
+/// The player's position is the middle of their feet, so the y comparison is
+/// against the middle of the block rather than its base. Without that the
+/// reach shrinks by half a block at every step and the check is tighter near the
+/// ground than above it, which is backwards.
+fn reach_to(player: &crate::protocol::play::Movement, block: crate::world::pos::BlockPos) -> f64 {
+    let dx = player.x - (block.x as f64 + 0.5);
+    let dy = player.y - (block.y as f64 + 0.5);
+    let dz = player.z - (block.z as f64 + 0.5);
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
 /// The game state id for air, used when a block cannot be read.
 ///
 /// A hole in the world, or a chunk the server has not built: either way the
@@ -988,7 +1027,7 @@ fn serve_status(
 }
 #[cfg(test)]
 mod tests {
-    use crate::server::shared::{state_id, to_state_id};
+    use crate::server::ticking::{state_id, to_state_id};
 
     /// Generates a chunk and reads the blocks back out of the wire bytes.
     ///

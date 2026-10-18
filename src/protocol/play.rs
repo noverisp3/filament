@@ -675,45 +675,76 @@ pub const SPAWN: (f64, f64, f64) = (0.5, 64.0, 0.5);
 /// wrong thing and, most likely, refusing to spawn anything at all.
 pub const PLAYER_ENTITY_TYPE: i32 = 159;
 
+/// The actions of `player_info_update`, by their position in the enum.
+///
+/// Named rather than written as bare bit numbers because the numbers are the
+/// whole difficulty of this packet and they are not guessable: the enum has
+/// exactly eight members, so the mask that selects them is **one byte**, and
+/// getting an ordinal wrong does not fail here, it fails on the client, which
+/// then reads a name out of the middle of a uuid.
+mod action {
+    /// A name and the properties of its profile.
+    pub const ADD_PLAYER: u8 = 0;
+    /// A game mode index.
+    pub const UPDATE_GAME_MODE: u8 = 2;
+    /// Whether the player appears in the tab list at all.
+    pub const UPDATE_LISTED: u8 = 3;
+    /// A ping in milliseconds.
+    pub const UPDATE_LATENCY: u8 = 4;
+}
+
 /// Writes a `player_info_update`, the tab list.
 ///
-/// This is the fiddliest packet in the set, and the shape is worth stating
-/// plainly before the code:
+/// The shape, and the part that is easy to get wrong:
 ///
 /// ```text
-/// VarInt   a bit per action, set
-/// VarInt   how many entries follow
+/// 1 byte    a fixed-width bit set, one bit per action
+/// VarInt    how many entries follow
 ///   for each entry:
 ///     16 bytes  the profile's uuid, always
-///     then only the fields of the actions that were set, in the order they
-///              appear in the enum
+///     then only the fields of the actions that were set, in enum order
 /// ```
 ///
-/// The uuid first, unconditionally, is the part that is easy to get wrong. It
-/// is not one of the actions and it is not the entity id: the upstream codec
-/// writes `entry.profileId()` before it walks the actions at all, because the
-/// whole tab list is keyed by uuid and the entity id is something the client
-/// works out for itself. An entity id here is sixteen wrong bytes and the client
-/// disconnects.
+/// The mask is a **fixed-width bit set and not a VarInt**. Upstream writes it
+/// with `writeFixedBitSet`, which emits `ceil(values.length / 8)` raw bytes,
+/// least significant bit first. With eight actions that is one byte, and a
+/// two-byte VarInt where one byte belongs reads the entry count out of the
+/// action bits and the name out of the middle of the uuid.
 ///
-/// Only three actions are set, which is the smallest set that leaves a player a
-/// client can name, play as and show:
+/// Four actions are set, which is the smallest set that leaves a player a
+/// client can name, list, play as and show a ping for:
 ///
-/// - **bit 0, ADD_PLAYER**: a name and the properties of its profile. The
-///   properties map is a count and then that many entries, and an offline
-///   profile owns none.
-/// - **bit 6, UPDATE_GAME_MODE**: a game mode index. Zero is survival.
-/// - **bit 8, UPDATE_LATENCY**: a latency in milliseconds. Zero is fine.
+/// - add player: the name, then the profile's properties. Properties are a
+///   count and that many entries, and an offline profile owns none.
+/// - update game mode: a VarInt, and survival is zero.
+/// - update listed: one boolean. Without this a player is in the tab list's
+///   data and not in the tab list.
+/// - update latency: a VarInt, and zero is fine.
 ///
-/// The rest of the enum exists and is not set: chat sessions, display names,
-/// listed, and the rest. The mask and the fields written after it are written
-/// together in one function precisely so they cannot drift apart.
+/// The rest of the enum — chat, display name, list order, hat — exists and is
+/// not set. Fields are written in enum order, which is why listed comes after
+/// the game mode and not where it would read most naturally.
 pub fn write_player_info_add(out: &mut Vec<u8>, uuid: [u8; 16], name: &str) {
-    // ADD_PLAYER | UPDATE_GAME_MODE | UPDATE_LATENCY
-    let mask = (1 << 0) | (1 << 6) | (1 << 8);
+    use action::*;
+
+    let mut mask = 0u8;
+    for bit in [ADD_PLAYER, UPDATE_GAME_MODE, UPDATE_LISTED, UPDATE_LATENCY] {
+        mask |= 1 << bit;
+    }
 
     VarInt(id::PLAYER_INFO_UPDATE).write(out);
-    VarInt(mask).write(out);
+
+    // Eight actions, so one byte. Asserted rather than assumed: a ninth action
+    // in a future version would make this two bytes and shift everything after
+    // it, which is a crash on the client and not on this side.
+    const ACTIONS: usize = 8;
+    assert_eq!(
+        ACTIONS.div_ceil(8),
+        1,
+        "the action enum changed size and the mask is no longer one byte"
+    );
+    out.push(mask);
+
     VarInt(1).write(out);
 
     // The profile's uuid, before any action field.
@@ -722,13 +753,17 @@ pub fn write_player_info_add(out: &mut Vec<u8>, uuid: [u8; 16], name: &str) {
     // ADD_PLAYER: the name, then the profile's properties, which are none.
     // A string on the wire is its byte length as a VarInt and then its UTF-8.
     // The length is in bytes and not in characters, which matters the moment
-    // somebody has an accent in their name.
+    // somebody has an accent in their name. The client caps it at 48, which is
+    // sixteen characters of three bytes each.
     VarInt(name.len() as i32).write(out);
     out.extend_from_slice(name.as_bytes());
     VarInt(0).write(out);
 
-    // UPDATE_GAME_MODE: survival.
+    // UPDATE_GAME_MODE: survival is zero.
     VarInt(0).write(out);
+
+    // UPDATE_LISTED: true.
+    out.push(1);
 
     // UPDATE_LATENCY: zero.
     VarInt(0).write(out);
@@ -972,16 +1007,23 @@ mod tests {
     }
 
     #[test]
-    fn the_tab_list_entry_says_the_three_things_a_client_needs() {
+    fn the_tab_list_entry_says_the_four_things_a_client_needs() {
         let mut body = Vec::new();
         write_player_info_add(&mut body, [3u8; 16], "Steve");
 
         let mut b = &body[..];
         assert_eq!(take_varint(&mut b), id::PLAYER_INFO_UPDATE);
-        let mask = take_varint(&mut b);
-        assert_eq!(mask & 1, 1, "ADD_PLAYER is set");
-        assert_eq!((mask >> 6) & 1, 1, "UPDATE_GAME_MODE is set");
-        assert_eq!((mask >> 8) & 1, 1, "UPDATE_LATENCY is set");
+
+        // One byte, not a VarInt. Eight actions, so ceil(8/8) is one, and a
+        // VarInt here reads the entry count out of the action bits.
+        let mask = b[0];
+        b = &b[1..];
+        assert_eq!(mask & (1 << 0), 1 << 0, "ADD_PLAYER");
+        assert_eq!(mask & (1 << 2), 1 << 2, "UPDATE_GAME_MODE");
+        assert_eq!(mask & (1 << 3), 1 << 3, "UPDATE_LISTED");
+        assert_eq!(mask & (1 << 4), 1 << 4, "UPDATE_LATENCY");
+        assert_eq!(mask, 0b0001_1101, "and nothing else is set");
+
         assert_eq!(take_varint(&mut b), 1, "one entry");
 
         // The uuid comes first and is sixteen bytes. It is not an action and it
@@ -990,13 +1032,133 @@ mod tests {
         assert_eq!(&b[..16], &[3u8; 16][..], "the profile uuid");
         b = &b[16..];
 
+        // Then the action fields, in enum order.
         assert_eq!(take_varint(&mut b), 5, "the name is five bytes");
         assert_eq!(&b[..5], b"Steve");
         b = &b[5..];
-        assert_eq!(take_varint(&mut b), 0, "and an offline profile owns no properties");
+        assert_eq!(take_varint(&mut b), 0, "an offline profile owns no properties");
         assert_eq!(take_varint(&mut b), 0, "survival");
+        assert_eq!(b[0], 1, "and listed, or the tab list does not show them");
+        b = &b[1..];
         assert_eq!(take_varint(&mut b), 0, "no latency");
         assert!(b.is_empty(), "and nothing else, or the client reads past it");
+    }
+
+    /// Decodes a `player_info_update` the way the game does, and returns how
+    /// many bytes it got through.
+    ///
+    /// Written as a decoder rather than as more assertions on the writer
+    /// because both bugs that reached a client were of the shape "the writer
+    /// produced something well formed and the wrong thing". Checking the bytes
+    /// a writer emits confirms it emitted the bytes its author believed in.
+    /// Running the reader is the only check that agrees with the client.
+    fn decode_player_info_as_client(body: &[u8]) -> usize {
+        let mut b = body;
+        assert_eq!(take_varint(&mut b), id::PLAYER_INFO_UPDATE);
+
+        // readEnumSet: a fixed width bit set of one byte, for eight actions.
+        let mask = b[0];
+        b = &b[1..];
+
+        let entries = take_varint(&mut b) as usize;
+
+        for _ in 0..entries {
+            // The profile uuid, before any action.
+            assert!(b.len() >= 16, "a uuid was expected");
+            b = &b[16..];
+
+            // Then the fields of the set actions, in ordinal order.
+            if mask & (1 << action::ADD_PLAYER) != 0 {
+                let len = take_varint(&mut b) as usize;
+                assert!(b.len() >= len, "a name was expected");
+                std::str::from_utf8(&b[..len]).expect("the name is utf-8");
+                assert!(len <= 48, "the client refuses a longer one: {len}");
+                b = &b[len..];
+
+                let properties = take_varint(&mut b) as usize;
+                for _ in 0..properties {
+                    let klen = take_varint(&mut b) as usize;
+                    b = &b[klen..];
+                    let vlen = take_varint(&mut b) as usize;
+                    b = &b[vlen..];
+                }
+            }
+            if mask & (1 << 1) != 0 {
+                // A nullable chat session: one byte of presence.
+                let present = b[0];
+                b = &b[1..];
+                assert_eq!(present, 0, "an offline player has no chat session");
+            }
+            if mask & (1 << action::UPDATE_GAME_MODE) != 0 {
+                let _ = take_varint(&mut b);
+            }
+            if mask & (1 << action::UPDATE_LISTED) != 0 {
+                b = &b[1..];
+            }
+            if mask & (1 << action::UPDATE_LATENCY) != 0 {
+                let _ = take_varint(&mut b);
+            }
+        }
+
+        body.len() - b.len()
+    }
+
+    #[test]
+    fn the_client_reads_the_tab_list_packet_and_lands_exactly_at_the_end() {
+        for name in ["Steve", "Tiến", "a", "noverisp3"] {
+            let mut body = Vec::new();
+            write_player_info_add(&mut body, [7u8; 16], name);
+            let read = decode_player_info_as_client(&body);
+            assert_eq!(
+                read,
+                body.len(),
+                "the reader stopped {read} bytes in on {name:?}, or ran past the end"
+            );
+        }
+    }
+
+    #[test]
+    fn a_two_byte_mask_is_what_crashed_two_clients() {
+        // Kept as a test rather than a comment because it is the shape of the
+        // mistake: a VarInt bitmask in place of the fixed width bit set shifts
+        // every field after it by a byte, and the first field to notice is the
+        // name, which is read out of the middle of a uuid.
+        let mut body = Vec::new();
+        VarInt(id::PLAYER_INFO_UPDATE).write(&mut body);
+        VarInt((1 << 0) | (1 << 6) | (1 << 8)).write(&mut body); // two bytes
+        VarInt(1).write(&mut body);
+        body.extend_from_slice(&[3u8; 16]);
+        VarInt(5).write(&mut body);
+        body.extend_from_slice(b"Steve");
+
+        let mut b = &body[..];
+        take_varint(&mut b);
+        take_varint(&mut b);
+        take_varint(&mut b);
+        // The count came out of the high byte of the mask.
+        assert_ne!(
+            take_varint(&mut b),
+            1,
+            "which is the entry count, and that is the whole failure"
+        );
+    }
+
+    #[test]
+    fn the_action_ordinals_are_the_ones_the_game_uses() {
+        // Read out of the enum, not inferred. Guessing these is what put a
+        // two-byte VarInt where one byte belongs. The whole enum, so that a
+        // future version adding a ninth is visible here:
+        //
+        //     0 ADD_PLAYER      4 UPDATE_LATENCY
+        //     1 INITIALIZE_CHAT 5 UPDATE_DISPLAY_NAME
+        //     2 UPDATE_GAME_MODE 6 UPDATE_LIST_ORDER
+        //     3 UPDATE_LISTED   7 UPDATE_HAT
+        //
+        assert_eq!(action::ADD_PLAYER, 0);
+        assert_eq!(action::UPDATE_GAME_MODE, 2);
+        assert_eq!(action::UPDATE_LISTED, 3);
+        assert_eq!(action::UPDATE_LATENCY, 4);
+        assert_eq!(8usize.div_ceil(8), 1, "eight actions, so the mask is one byte");
     }
 
     #[test]
@@ -1017,12 +1179,11 @@ mod tests {
         let mut body = Vec::new();
         write_player_info_add(&mut body, [0u8; 16], "Tiến");
         let mut b = &body[..];
-        // Packet id, the action mask and the entry count, then the uuid. The
-        // mask is 321, which is a two byte VarInt, so counting bytes here
-        // rather than fields would be wrong.
-        for _ in 0..3 {
+        // Packet id, the one-byte mask, and the entry count, then the uuid.
+        for _ in 0..2 {
             take_varint(&mut b);
         }
+        b = &b[1..];
         b = &b[16..];
         // Four characters, six bytes of UTF-8.
         assert_eq!(take_varint(&mut b), 6);

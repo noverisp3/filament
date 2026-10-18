@@ -881,7 +881,120 @@ fn the_play_ids_are_the_ones_the_game_uses() {
     assert_eq!(id::SERVERBOUND_KEEP_ALIVE, 28);
     assert_eq!(id::SERVERBOUND_CLIENT_TICK_END, 13);
     assert_eq!(id::MOVE_PLAYER_ROT, 32);
-}
+    }
+
+    /// Checks every id this module names against the game's own report.
+    ///
+    /// The list above pins some numbers by hand, which is how the swing packet
+    /// came to be written with the right shape and the wrong number: two is
+    /// `animate`, a packet with an entity and a byte, and one hundred and
+    /// twenty-three is `swing_animation`. Reading the shape from
+    /// `ClientboundSwingAnimationPacket` and the number from the packet called
+    /// `animate` produces something that decodes as the other one and leaves
+    /// the client two bytes short of the end.
+    ///
+    /// So the expected values here are not written by hand at all. They come
+    /// out of the data generator's report, the same file that produced every
+    /// other number in this module, and a constant that is renamed or given the
+    /// wrong number fails rather than costing somebody a crash report.
+    #[test]
+    fn every_id_here_is_the_one_the_generator_reports() {
+        let report = include_str!("../../../extracted/packets.json");
+
+        // Scoped to one phase, because a name is not unique across the file.
+        // `keep_alive` is 4 in an earlier phase and 45 in play, and searching
+        // the whole report finds the first one.
+        let play = report.find("\"play\":").expect("the report has a play phase");
+        let cb = report[play..]
+            .find("\"clientbound\":")
+            .map(|i| play + i)
+            .expect("play has a clientbound half");
+        let sb = report[play..]
+            .find("\"serverbound\":")
+            .map(|i| play + i)
+            .expect("play has a serverbound half");
+        let status = report[sb..]
+            .find("\"status\":")
+            .map(|i| sb + i)
+            .unwrap_or(report.len());
+        let halves: [(bool, &str); 2] = [(true, &report[cb..sb]), (false, &report[sb..status])];
+
+        // (our constant, the name the generator knows it by, clientbound)
+        let cases: &[(i32, &str, bool)] = &[
+            (id::BLOCK_UPDATE, "block_update", true),
+            (id::BLOCK_DESTRUCTION, "block_destruction", true),
+            (id::ADD_ENTITY, "add_entity", true),
+            (id::REMOVE_ENTITIES, "remove_entities", true),
+            (id::SWING_ANIMATION, "swing_animation", true),
+            (id::ROTATE_HEAD, "rotate_head", true),
+            (id::MOVE_ENTITY_POS_ROT, "move_entity_pos_rot", true),
+            (id::LEVEL_EVENT, "level_event", true),
+            (id::SET_ENTITY_DATA, "set_entity_data", true),
+            (id::PLAYER_INFO_UPDATE, "player_info_update", true),
+            (id::PLAYER_INFO_REMOVE, "player_info_remove", true),
+            (id::FORGET_LEVEL_CHUNK, "forget_level_chunk", true),
+            (id::LOGIN, "login", true),
+            (id::PLAYER_POSITION, "player_position", true),
+            (id::GAME_EVENT, "game_event", true),
+            (id::CHANGE_DIFFICULTY, "change_difficulty", true),
+            (id::SET_CHUNK_CACHE_CENTER, "set_chunk_cache_center", true),
+            (id::SET_DEFAULT_SPAWN, "set_default_spawn_position", true),
+            (id::INITIALIZE_BORDER, "initialize_border", true),
+            (id::SET_TIME, "set_time", true),
+            (id::KEEP_ALIVE, "keep_alive", true),
+            (id::LEVEL_CHUNK_WITH_LIGHT, "level_chunk_with_light", true),
+            (id::CHUNK_BATCH_START, "chunk_batch_start", true),
+            (id::CHUNK_BATCH_FINISHED, "chunk_batch_finished", true),
+            (id::CHUNKS_BIOMES, "chunks_biomes", true),
+            (id::PLAYER_ABILITIES, "player_abilities", true),
+            (id::SERVERBOUND_KEEP_ALIVE, "keep_alive", false),
+            (id::SERVERBOUND_PLAYER_INPUT, "player_input", false),
+            (id::SERVERBOUND_PUNCH, "punch", false),
+            (id::SERVERBOUND_PLAYER_ACTION, "player_action", false),
+            (id::SERVERBOUND_USE_ITEM_ON, "use_item_on", false),
+            (id::SERVERBOUND_CLIENT_TICK_END, "client_tick_end", false),
+            (id::SERVERBOUND_PLAYER_LOADED, "player_loaded", false),
+            (id::MOVE_PLAYER_POS, "move_player_pos", false),
+            (id::MOVE_PLAYER_POS_ROT, "move_player_pos_rot", false),
+            (id::MOVE_PLAYER_ROT, "move_player_rot", false),
+            (id::MOVE_PLAYER_STATUS_ONLY, "move_player_status_only", false),
+            (id::SERVERBOUND_DEBUG_SUBSCRIPTION, "debug_subscription_request", false),
+        ];
+
+        for (ours, name, clientbound) in cases {
+            let phase = if *clientbound { "clientbound" } else { "serverbound" };
+            let half = halves
+                .iter()
+                .find(|(is_cb, _)| *is_cb == *clientbound)
+                .map(|(_, text)| *text)
+                .expect("both halves are there");
+
+            let needle = format!("\"minecraft:{name}\":");
+            let at = half
+                .find(&needle)
+                .unwrap_or_else(|| panic!("play {phase} {name} is not in the report at all"));
+
+            // Only up to the end of this entry. Looking a fixed distance ahead
+            // runs into the next packet and reads that one's id.
+            let rest = &half[at..];
+            let entry = &rest[..rest.find('}').unwrap_or(rest.len())];
+
+            let key = entry.find("\"protocol_id\"").unwrap_or_else(|| {
+                panic!("play {phase} {name} is in the report but has no protocol id")
+            });
+            let digits: String = entry[key..]
+                .chars()
+                .skip_while(|c| !c.is_ascii_digit())
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+
+            assert_eq!(
+                digits.parse::<i32>().unwrap_or(-1),
+                *ours,
+                "play {phase} {name}: the report says {digits}, this module says {ours}"
+            );
+        }
+    }
 
 /// One movement packet, hand built the way the client builds them.
 fn movement_packet(id: i32, body: &[u8]) -> Vec<u8> {

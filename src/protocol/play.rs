@@ -59,8 +59,15 @@ pub mod id {
 
     // The clientbound packet that tells the client one block changed.
     pub const BLOCK_UPDATE: i32 = 8;
-    // A hand going through a swing, and a punch landing.
-    pub const SWING_ANIMATION: i32 = 2;
+    // A hand going through a swing.
+    //
+    // 123, and not 2. Two is `animate`, a different packet that happens to
+    // sound related: it carries an entity and a single byte. Reading the shape
+    // from `ClientboundSwingAnimationPacket` and the number from the packet
+    // called `animate` produces a packet that decodes as the other one and
+    // leaves the client two bytes short of the end, which is how this was
+    // found.
+    pub const SWING_ANIMATION: i32 = 123;
     // The entity's metadata, which is how a pose — and so a crouch — travels.
     pub const SET_ENTITY_DATA: i32 = 101;
     // Which keys are down. One byte of bit flags and nothing else.

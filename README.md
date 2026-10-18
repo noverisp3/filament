@@ -113,11 +113,20 @@ filament --verbose      # and log every packet
 filament --addr 0.0.0.0:25565
 ```
 
-Loopback by default on purpose. A server that is not finished should not be
-reachable from the network by accident.
+Every interface by default. The startup log says where that is:
 
-`--addr 0.0.0.0:25565` is the switch, and the startup log then says what to hand
-out:
+```text
+filament                # 0.0.0.0:25565
+filament --verbose      # and log every packet
+filament --addr 127.0.0.1:25565   # only this machine
+```
+
+This used to be loopback, on the grounds that an unfinished server should not be
+reachable by accident. That reasoning was wrong in practice: binding to loopback
+is invisible. The server is running, the socket exists, and nothing reports a
+problem until somebody asks why the friend on the same wifi cannot connect.
+Reachable by default and loudly, with the address printed, is easier to reason
+about than hidden by default and silent about it.
 
 ```text
 0.0s  listening on 0.0.0.0:25565
@@ -129,10 +138,11 @@ That middle line is the machine's own answer rather than a question for the
 user: it binds a UDP socket, connects it to a documentation address so the
 kernel picks a route, and reads back the local end. Nothing is sent.
 
-The warning is not ceremony. Login is offline, so there is no authentication and
-the UUID is derived from whatever name the client sends. Anyone who reaches the
-port can join as any name, including yours. On a network you control that is a
-testing convenience; do not point it at the open internet.
+The warning is not ceremony, and it is printed at the moment the decision is
+made rather than left in documentation nobody reads. Login is offline, so there
+is no authentication and the UUID is derived from whatever name the client sends.
+Anyone who reaches the port can join as any name, including yours, and including
+one that is already taken — two clients with the same name get the same UUID.
 
 **On Windows the firewall will usually block this first.** It needs a rule for
 the port, and the rule has to allow private networks rather than public ones:

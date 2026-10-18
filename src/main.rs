@@ -14,7 +14,18 @@ use server::StatusServer;
 use server::log;
 
 /// Where to listen unless told otherwise.
-const DEFAULT_ADDR: &str = "127.0.0.1:25565";
+///
+/// Every interface, not loopback. This was the other way round and was changed
+/// because binding to loopback is the kind of decision that is invisible until
+/// somebody asks why the friend on the same wifi cannot connect: the server is
+/// running, the port is open in the sense that a socket exists, and nothing
+/// says no because nothing is being asked. The startup log prints the address
+/// either way, so the cost of being visible by default is that the address
+/// gets read by whoever starts the server.
+///
+/// Pass `--addr 127.0.0.1:25565` for the old behaviour, and that is the only
+/// thing the flag is for now.
+const DEFAULT_ADDR: &str = "0.0.0.0:25565";
 
 /// Shown in the multiplayer browser.
 const DEFAULT_DESCRIPTION: &str = "filament";
@@ -28,10 +39,12 @@ usage:
   --verbose, -v   log every packet, in and out
                   off by default: a client waiting on chunks sends an empty
                   packet twenty times a second, which buries everything else
-  --addr ADDR     what to listen on, default 127.0.0.1:25565
+  --addr ADDR     what to listen on, default 0.0.0.0:25565
 
-Loopback by default on purpose. A server that is not finished should not be
-reachable from the network by accident.";
+Every interface by default, so anyone on the network can join. There is no
+sign-in: login is offline and the UUID comes from the name the client sends,
+so anyone who reaches the port can take any name, including one that is
+already in use. Use --addr 127.0.0.1:25565 to keep it to this machine.";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parsing first and printing here rather than returning the error, because a

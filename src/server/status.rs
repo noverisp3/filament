@@ -935,19 +935,32 @@ fn play(
         // second: a repeated block update is invisible because it says the same
         // thing, and a repeated level event is a burst of particles that does
         // not stop until the player who caused it leaves.
+        //
+        // And they go to different places, which is not a detail. The block
+        // update tells the client what is there now, and goes to everyone
+        // including the player, who needs it because their own guess may have
+        // been wrong. The level event is the dust and the sound of the break
+        // happening, and the player's own client has already played both when
+        // it predicted the block going: the game excludes them, and sending it
+        // to them gives everyone watching a single break and the player who did
+        // it two.
         if !edits.is_empty() || !effects.is_empty() {
-            let outgoing: Vec<Vec<u8>> = std::mem::take(&mut edits)
-                .into_iter()
-                .chain(std::mem::take(&mut effects))
-                .collect();
+            let outgoing = std::mem::take(&mut edits);
+            let effects = std::mem::take(&mut effects);
 
             let mut framed = Vec::new();
             for body in &outgoing {
                 session.wire.send_others(player_id, body.clone());
                 enc.encode(body, &mut framed).map_err(io_err)?;
             }
-            stream.write_all(&framed)?;
-            stream.flush()?;
+            if !framed.is_empty() {
+                stream.write_all(&framed)?;
+                stream.flush()?;
+            }
+
+            for body in &effects {
+                session.wire.send_others(player_id, body.clone());
+            }
         }
 
         // Anything the other players have told us, drained in the same loop that
@@ -1358,6 +1371,51 @@ mod tests {
     /// The quickest block the generator makes, standing in for an arbitrary
     /// break time in the crack tests.
     const DIRT_BREAK: std::time::Duration = std::time::Duration::from_millis(750);
+
+    #[test]
+    fn the_dust_goes_to_everyone_but_the_one_who_broke_it() {
+        // The game excludes the breaker:
+        //
+        //     broadcast(source instanceof Player player ? player : null, ...)
+        //
+        // Their own client already played the dust and the sound when it
+        // predicted the block going, so telling them as well makes a single
+        // break look like two. The block update is the opposite case and does go
+        // to them: it says what is there now, and their guess may be wrong.
+        let wire = crate::server::broadcast::Broadcast::new();
+        let breaker = wire.register("breaker");
+        let watcher = wire.register("watcher");
+
+        let mut update = Vec::new();
+        crate::protocol::play::write_block_update(&mut update, 1, 2, 3, 0);
+        let mut dust = Vec::new();
+        crate::protocol::play::write_level_event(
+            &mut dust,
+            crate::protocol::play::BLOCK_DESTROYED,
+            (1, 2, 3),
+            9,
+            false,
+        );
+
+        // The update: everyone.
+        wire.send_others(breaker.id, update);
+        // The dust: everyone but the breaker, which send_others already is.
+        wire.send_others(breaker.id, dust);
+
+        assert!(
+            watcher.inbox.try_recv().is_ok(),
+            "the watcher sees the block go"
+        );
+        assert!(
+            watcher.inbox.try_recv().is_ok(),
+            "and sees the dust"
+        );
+        assert!(
+            breaker.inbox.try_recv().is_err(),
+            "and the player who broke it is told neither, because their client \
+             already drew both"
+        );
+    }
 
     #[test]
     fn a_sent_edit_is_not_sent_again_on_the_next_pass() {

@@ -1289,28 +1289,32 @@ fn play(
                                     let held = crate::server::ticking::state_id_name(was);
                                     match crate::server::ticking::held_item(was) {
                                         Some(item) => {
-                                            // Into the slot that already holds this
-                                            // item, or the first free one, so twenty
-                                            // blocks in a row stack rather than
-                                            // filling the hotbar a slot at a time.
-                                            let slot =
-                                                (0..item::slots::COUNT).find(|&s| {
-                                                    inventory.get(s).is_none_or(
-                                                        |held| held.item == item as i32,
-                                                    )
-                                                });
-                                            if let Some(slot) = slot {
-                                                inventory
-                                                    .add(ItemStack::new(item as i32, 1));
-                                                slots.push((slot, inventory.get(slot)));
+                                            // `add` says which slots it used. The
+                                            // client is told about those and no
+                                            // others, because a slot reported
+                                            // changed that did not is a slot the
+                                            // client redraws for nothing, and a
+                                            // real change left unreported is a
+                                            // hotbar that never fills.
+                                            let used =
+                                                inventory.add(ItemStack::new(item as i32, 1));
+                                            let named = used.first().copied();
+                                            for slot in &used {
+                                                slots.push((*slot, inventory.get(*slot)));
+                                            }
+                                            if used.is_empty() {
                                                 log.note(format!(
-                                                    "{held} went into slot {slot}"
+                                                    "{held} has nowhere to go and is lost"
+                                                ));
+                                            } else {
+                                                log.note(format!(
+                                                    "{held} went into slot {}",
+                                                    named.unwrap_or_default()
                                                 ));
                                             }
                                         }
                                         // A block with no item of that name is
-                                        // simply not something that can be held,
-                                        // and neither is a full hotbar.
+                                        // simply not something that can be held.
                                         None => log.note(format!(
                                             "{held} has no item of that name"
                                         )),
@@ -1529,10 +1533,19 @@ fn play(
             // been sent is complete, so "17 chunks arrived" when none did is
             // worse than saying nothing.
             let mut ready: Vec<(crate::world::pos::ChunkPos, Vec<u8>)> = Vec::new();
+            // What this batch has already taken. `sent` is no use for this: it
+            // is only updated once the batch has been written, so during the tail
+            // wait below it still says none of these have gone. Counting a chunk
+            // twice means the batch claims more chunks than it was asked for --
+            // which is how "17 chunks arrived" arrived as twenty-four, and the
+            // same ground went on the wire twice.
+            let mut taken: std::collections::HashSet<crate::world::pos::ChunkPos> =
+                std::collections::HashSet::new();
             let mut waiting = false;
             for (dx, dz) in &sorted {
                 let pos = crate::world::pos::ChunkPos { x: *dx, z: *dz };
                 if let Some(body) = session.world.want_chunk(pos) {
+                    taken.insert(pos);
                     ready.push((pos, body));
                 } else {
                     waiting = true;
@@ -1557,11 +1570,14 @@ fn play(
                     let mut outstanding = false;
                     for (dx, dz) in &sorted {
                         let pos = crate::world::pos::ChunkPos { x: *dx, z: *dz };
-                        if sent.contains(&(pos.x, pos.z)) {
+                        if !still_wanted(pos, &sent, &taken) {
                             continue;
                         }
                         match session.world.want_chunk(pos) {
-                            Some(body) => ready.push((pos, body)),
+                            Some(body) => {
+                                taken.insert(pos);
+                                ready.push((pos, body));
+                            }
                             None => outstanding = true,
                         }
                     }
@@ -1678,6 +1694,21 @@ fn wanted_positions(radius: i32) -> Vec<(i32, i32)> {
         }
     }
     out
+}
+
+/// Whether a chunk still needs going into the batch being built.
+///
+/// Three things count as already handled: on the wire, taken by this batch
+/// earlier in the pass, or taken by this batch's tail wait. Missing the last
+/// one is what let the tail wait collect chunks the first loop had already
+/// collected, so the same ground went out twice and the batch counted more
+/// chunks than it was ever asked for.
+fn still_wanted(
+    pos: crate::world::pos::ChunkPos,
+    sent: &std::collections::HashSet<(i32, i32)>,
+    taken: &std::collections::HashSet<crate::world::pos::ChunkPos>,
+) -> bool {
+    !sent.contains(&(pos.x, pos.z)) && !taken.contains(&pos)
 }
 
 /// What the chunk-streaming branch of the loop reports, and when.

@@ -139,6 +139,78 @@ fn a_block_broken_twice_stacks_rather_than_filling_two_slots() {
 }
 
 #[test]
+fn adding_a_block_names_the_slot_it_went_into_and_no_other() {
+    // This is what the client is told about. A caller that worked it out for
+    // itself by scanning for the same item ran a second copy of the rules and
+    // the two disagreed: the scan answered slot 0 -- the crafting output, which
+    // `add` never writes -- while `add` used the hotbar. The client was told
+    // slot 0 had changed when it had not, and the hotbar stayed empty. So the
+    // slot comes from `add` and there is nowhere else to get it.
+    let mut inv = Inventory::empty();
+    let used = inv.add(ItemStack::new(613, 1));
+
+    assert_eq!(
+        used,
+        vec![slots::HOTBAR_START],
+        "one block, one slot, and it is the hotbar"
+    );
+    assert_eq!(
+        inv.get(slots::HOTBAR_START).map(|s| s.count),
+        Some(1),
+        "and that slot really does hold it"
+    );
+
+    // Merging into what is already there names the slot it merged into, once.
+    let again = inv.add(ItemStack::new(613, 1));
+    assert_eq!(again, vec![slots::HOTBAR_START]);
+    assert_eq!(inv.get(slots::HOTBAR_START).unwrap().count, 2);
+    assert_eq!(again.len(), 1, "one slot changed, so one slot is reported");
+
+    // A different item goes to its own slot rather than over the first.
+    let other = inv.add(ItemStack::new(484, 1));
+    assert_eq!(other, vec![slots::HOTBAR_START + 1]);
+    assert_ne!(other[0], slots::HOTBAR_START);
+
+    // A stack too big for one slot names every slot it landed in.
+    let mut inv = Inventory::empty();
+    let split = inv.add(ItemStack::new(1370, 250));
+    assert_eq!(
+        split.len(),
+        3,
+        "250 is 99 + 99 + 52, and all three are named"
+    );
+    assert!(split.windows(2).all(|w| w[0] != w[1]), "and none named twice");
+    for slot in &split {
+        assert!(
+            (slots::HOTBAR_START..slots::HOTBAR_END).contains(slot),
+            "slot {slot} is in the hotbar"
+        );
+        assert!(inv.get(*slot).is_some(), "and really holds stone");
+    }
+}
+
+#[test]
+fn adding_what_fits_nowhere_names_no_slot_at_all() {
+    // A full hotbar with nothing to merge into. There is nowhere to put it and
+    // nowhere to report, which is different from reporting a slot that did not
+    // change -- so the caller can say the block was lost rather than believing
+    // it went somewhere.
+    let mut inv = Inventory::empty();
+    inv.add(ItemStack::new(1370, 990));
+
+    assert_eq!(
+        inv.add(ItemStack::new(613, 1)),
+        Vec::<usize>::new(),
+        "a different item with a full hotbar goes nowhere"
+    );
+    assert_eq!(
+        inv.add(ItemStack::new(613, 1)),
+        Vec::<usize>::new(),
+        "and stays true on the next attempt"
+    );
+}
+
+#[test]
 fn a_stacked_hotbar_splits_across_the_nine_slots() {
     // The other half of it: merging fills one slot, and the rest has to go
     // somewhere. It goes to the hotbar, which is the part of the window the

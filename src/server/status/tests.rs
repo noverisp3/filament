@@ -277,6 +277,92 @@ fn a_walk_that_changes_nothing_is_not_reported_at_all() {
     assert_eq!(chunk_report(0, 0, 0), None);
 }
 
+#[test]
+fn a_chunk_already_taken_by_this_batch_is_not_taken_again() {
+    // The tail wait re-reads the same batch of positions the first loop just
+    // went through, and `sent` is no help -- it is only written once the batch
+    // has gone out, so it still says none of them have. What stops the second
+    // pass collecting them again is the batch's own record of what it has.
+    let pos = crate::world::pos::ChunkPos { x: -1, z: 0 };
+    let mut sent = std::collections::HashSet::new();
+    let mut taken = std::collections::HashSet::new();
+
+    assert!(still_wanted(pos, &sent, &taken), "to begin with");
+
+    taken.insert(pos);
+    assert!(
+        !still_wanted(pos, &sent, &taken),
+        "once this batch has it, the tail wait must leave it alone"
+    );
+
+    // And the other way round: already on the wire.
+    let taken = std::collections::HashSet::new();
+    sent.insert((pos.x, pos.z));
+    assert!(!still_wanted(pos, &sent, &taken), "already sent is not resent");
+
+    // A neighbouring chunk nobody has touched still qualifies.
+    let fresh = crate::world::pos::ChunkPos { x: -1, z: -1 };
+    assert!(still_wanted(fresh, &sent, &taken), "a fresh one does");
+}
+
+#[test]
+fn a_tail_wait_collects_each_chunk_once_whatever_order_the_pool_finishes_in() {
+    // The shape that panicked. A pass of seventeen positions where seven are
+    // already built and ten are still going: the first loop takes the seven,
+    // then the tail wait walks the same seventeen again and, having no way to
+    // tell, takes the same seven a second time. The batch claims twenty-four
+    // chunks out of seventeen asked for, and the same ground goes on the wire
+    // twice.
+    let sorted: Vec<(i32, i32)> = (0..17).map(|i| (i, 0)).collect();
+    let mut built: std::collections::HashSet<(i32, i32)> =
+        (0..7).map(|i| (i, 0)).collect();
+
+    let sent = std::collections::HashSet::new();
+    let mut taken = std::collections::HashSet::new();
+    let mut ready: Vec<(i32, i32)> = Vec::new();
+
+    // First loop: take whatever is ready.
+    for (x, z) in &sorted {
+        let pos = crate::world::pos::ChunkPos { x: *x, z: *z };
+        if built.contains(&(pos.x, pos.z)) {
+            taken.insert(pos);
+            ready.push((pos.x, pos.z));
+        }
+    }
+    let after_first = ready.len();
+    assert_eq!(after_first, 7);
+
+    // Tail wait: the pool finishes the rest while we wait, and this loop walks
+    // the same seventeen.
+    let mut passes = 0;
+    while ready.len() < sorted.len() && passes < 4 {
+        passes += 1;
+        built.extend((0..17).map(|i| (i, 0)).collect::<std::collections::HashSet<_>>());
+        for (x, z) in &sorted {
+            let pos = crate::world::pos::ChunkPos { x: *x, z: *z };
+            if !still_wanted(pos, &sent, &taken) {
+                continue;
+            }
+            if built.contains(&(pos.x, pos.z)) {
+                taken.insert(pos);
+                ready.push((pos.x, pos.z));
+            }
+        }
+    }
+
+    assert_eq!(
+        ready.len(),
+        sorted.len(),
+        "seventeen positions, seventeen chunks, and no chunk twice"
+    );
+    let unique: std::collections::HashSet<_> = ready.iter().collect();
+    assert_eq!(unique.len(), ready.len(), "every one of them distinct");
+    assert!(
+        chunk_report(sorted.len(), ready.len(), 0).is_some(),
+        "and the report is within what was asked for"
+    );
+}
+
 /// The palette the generator makes, so the hardness table can be keyed on it.
 fn terrain() -> crate::world::terrain::TerrainBlocks {
     crate::world::terrain::register_terrain(&mut crate::world::block::BlockRegistry::new())

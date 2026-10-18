@@ -181,12 +181,19 @@ impl Inventory {
     ///
     /// Merging into what is already there is what the game does and what stops
     /// a hotbar filling up one slot at a time when a player breaks twenty
-/// blocks. What does not fit is dropped: nothing in this server has anywhere to
+    /// blocks. What does not fit is dropped: nothing in this server has anywhere to
     /// put a dropped stack, and inventing somewhere to put it would be deciding
     /// what happens on overflow before it can happen.
-    pub fn add(&mut self, mut stack: ItemStack) {
+    ///
+    /// Returns every slot it changed, so the caller can be told about exactly
+    /// those. A caller that worked this out for itself by scanning for the same
+    /// item would be running a second, quieter copy of the rules below, and the
+    /// two drift -- which is what happened: the scan answered slot 0, `add` used
+    /// the hotbar, and the client was told slot 0 had changed, which it had not.
+    pub fn add(&mut self, mut stack: ItemStack) -> Vec<usize> {
+        let mut changed = Vec::new();
         if stack.is_empty() {
-            return;
+            return changed;
         }
         for slot in 0..slots::COUNT {
             if let Some(held) = self.slots[slot]
@@ -196,8 +203,9 @@ impl Inventory {
                 let room = MAX_STACK - held.count;
                 let moved = room.min(stack.count);
                 self.slots[slot] = Some(ItemStack::new(held.item, held.count + moved));
+                changed.push(slot);
                 if moved == stack.count {
-                    return;
+                    return changed;
                 }
                 stack.count -= moved;
             }
@@ -206,14 +214,17 @@ impl Inventory {
             if self.slots[slot].is_none() {
                 let taken = stack.count.min(MAX_STACK);
                 self.slots[slot] = Some(ItemStack::new(stack.item, taken));
+                changed.push(slot);
                 stack.count -= taken;
                 if stack.count <= 0 {
-                    return;
+                    return changed;
                 }
             }
         }
         // Anything still here has nowhere to go. See the note on `add`.
+        changed
     }
+
 
     pub fn slots(&self) -> &[Option<ItemStack>] {
         &self.slots

@@ -899,3 +899,43 @@ fn names_come_back_for_the_log() {
     join(&wire, "notrealyet_");
     assert_eq!(wire.names(), vec!["noverisp3", "notrealyet_"]);
 }
+
+#[test]
+fn the_log_reads_a_block_update_back_off_the_wire() {
+    // The log decodes the bytes rather than being handed a description, so that
+    // what it prints is what the far end will actually receive. A writer that
+    // builds the wrong packet still produces a right-looking line otherwise,
+    // and the log would agree with the bug instead of showing it.
+    let mut body = Vec::new();
+    crate::protocol::play::write_block_update(&mut body, 10, 64, -3, 0);
+
+    let line = super::describe_block_packet(&body).expect("a block update is described");
+    assert!(
+        line.contains("block_update at 10 64 -3"),
+        "position survives the round trip: {line}"
+    );
+    assert!(line.contains("state 0"), "air is state 0: {line}");
+    assert!(
+        line.contains("0 left over"),
+        "nothing trailing after the state, or the client reads past it: {line}"
+    );
+}
+
+#[test]
+fn the_log_reads_an_ack_back_off_the_wire() {
+    let mut body = Vec::new();
+    crate::protocol::play::write_block_changed_ack(&mut body, 17);
+
+    let line = super::describe_block_packet(&body).expect("an ack is described");
+    assert!(line.contains("sequence 17"), "the number is echoed: {line}");
+}
+
+#[test]
+fn the_log_ignores_packets_it_has_nothing_to_say_about() {
+    // Otherwise the log fills with a line per chunk per player and stops being
+    // readable at the moment it is needed.
+    let mut body = Vec::new();
+    crate::protocol::play::write_keep_alive(&mut body, 3);
+
+    assert!(super::describe_block_packet(&body).is_none());
+}

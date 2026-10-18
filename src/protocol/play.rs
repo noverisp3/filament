@@ -98,6 +98,22 @@ pub mod id {
     pub const LEVEL_EVENT: i32 = 47;
     // The clientbound packet that tells the client to drop a chunk.
     pub const FORGET_LEVEL_CHUNK: i32 = 38;
+    // How many chunks the client should keep, in each direction.
+    pub const SET_CHUNK_CACHE_RADIUS: i32 = 97;
+}
+
+/// Writes `set_chunk_cache_radius`, telling the client how far the world goes.
+///
+/// Without it the client is never told how many chunks to hold, and falls back
+/// to a radius of its own that has nothing to do with what this server sends.
+/// It then keeps chunks that were never streamed and drops ones that were, and
+/// which of the two it does depends on the radius it happens to assume rather
+/// than the one the world is actually built to.
+///
+/// One VarInt, read straight back out of the packet by the client.
+pub fn write_chunk_cache_radius(out: &mut Vec<u8>, radius: i32) {
+    VarInt(id::SET_CHUNK_CACHE_RADIUS).write(out);
+    VarInt(radius).write(out);
 }
 
 /// Writes `ClientboundLoginPacket`.
@@ -427,6 +443,17 @@ pub struct PlayerActionPacket {
     pub pos: i64,
     /// Which face was clicked, 0 to 5. Unused for now.
     pub direction: u8,
+    /// The client's own prediction number for this action.
+    ///
+    /// The last field on the wire, and the one that was being dropped: a
+    /// player that breaks a block has already applied the change locally and is
+    /// waiting to be told it was right. It tags its guess with a number it owns,
+    /// and the server has to hand that number back for the guess to be settled
+    /// and the shape the block used to have to be thrown away.
+    ///
+    /// Without it the block is drawn gone and stays solid, and a player stands
+    /// on air.
+    pub sequence: i32,
 }
 
 impl PlayerActionPacket {
@@ -453,10 +480,15 @@ impl PlayerActionPacket {
         let pos = read_i64(&mut r)?;
         let direction = read_u8(&mut r)?;
 
+        // The client's prediction number, last on the wire. It was being
+        // dropped, and dropping it is what left a broken block drawn but solid.
+        let (sequence, _) = VarInt::read(&mut r)?;
+
         Ok(Self {
             action,
             pos,
             direction,
+            sequence: sequence.0,
         })
     }
 }
@@ -1113,6 +1145,11 @@ pub fn write_level_event(
     global: bool,
 ) {
     VarInt(id::LEVEL_EVENT).write(out);
+    // The event and the data are plain four-byte ints here, not VarInts.
+    //
+    // Every other number in the play packets is a VarInt, which is what makes
+    // this one worth a note. It is read with `readInt` and written with
+    // `writeInt`, and a test that once "proved" the opposite was wrong.
     out.extend_from_slice(&event.to_be_bytes());
     out.extend_from_slice(&pack_block_pos(pos.0, pos.1, pos.2).to_be_bytes());
     out.extend_from_slice(&data.to_be_bytes());

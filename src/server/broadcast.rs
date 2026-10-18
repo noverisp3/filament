@@ -555,6 +555,28 @@ impl Broadcast {
     /// it does with its own encoder since compression is per connection.
     pub fn send_others(&self, except: u64, body: Vec<u8>) {
         let sinks = self.sinks.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Who actually gets this, named.
+        //
+        // For the block packets this is the whole question: a block the breaker
+        // sees go and a second player still standing in it means either this
+        // loop never reached them or what they were sent did not decode. The
+        // two are indistinguishable from the breaker's side of the world, so the
+        // names go in the log where the difference is visible.
+        if let Some(what) = describe_block_packet(&body) {
+            let who: Vec<&str> = sinks
+                .iter()
+                .filter(|s| s.id != except)
+                .map(|s| s.name.as_str())
+                .collect();
+            crate::server::log::note(format!(
+                "broadcast packet {} ({} bytes) to [{}]",
+                what,
+                body.len(),
+                if who.is_empty() { "nobody".into() } else { who.join(", ") }
+            ));
+        }
+
         for sink in sinks.iter().filter(|s| s.id != except) {
             // A send that fails means the player has gone; their sink is
             // removed when their connection unwinds, and one failed send is not
@@ -574,6 +596,70 @@ impl Broadcast {
     pub fn names(&self) -> Vec<String> {
         let sinks = self.sinks.lock().unwrap_or_else(|e| e.into_inner());
         sinks.iter().map(|s| s.name.clone()).collect()
+    }
+}
+
+/// A readable line for a block packet, decoded back off the wire.
+///
+/// `None` for anything else, so that only the packets whose delivery is in
+/// question end up in the log and the log stays readable during a break.
+///
+/// Reading the bytes back rather than being handed a description is the point:
+/// a writer that builds the wrong packet still produces a right-looking line
+/// here, and the log would then agree with the bug instead of showing it. What
+/// is printed is what the other end will actually be handed.
+pub(crate) fn describe_block_packet(body: &[u8]) -> Option<String> {
+    use crate::protocol::{VarInt, play::id};
+
+    let mut r = body;
+    let (packet, _) = VarInt::read(&mut r).ok()?;
+
+    // A position is eight bytes and is never a VarInt, so it has to be stepped
+    // over rather than read: leaving it in place would have the next field read
+    // out of the low end of the position instead.
+    let position = |r: &[u8]| -> Option<(i32, i32, i32)> {
+        let packed = i64::from_be_bytes(r.get(0..8)?.try_into().ok()?);
+        Some(crate::protocol::play::unpack_block_pos(packed))
+    };
+
+    match packet.0 {
+        id::BLOCK_UPDATE => {
+            let (x, y, z) = position(r)?;
+            r = r.get(8..)?;
+            let (state, _) = VarInt::read(&mut r).ok()?;
+
+            // The leftover count is printed because it is the check that matters:
+            // a byte stranded after the state is a byte the client reads as the
+            // next field of a packet it has already been given the end of.
+            Some(format!(
+                "block_update at {x} {y} {z} state {state} ({} bytes, {} left over)",
+                body.len(),
+                r.len()
+            ))
+        }
+        id::BLOCK_CHANGED_ACK => {
+            let (sequence, _) = VarInt::read(&mut r).ok()?;
+            Some(format!("block_changed_ack sequence {sequence}"))
+        }
+id::LEVEL_EVENT => {
+            // A plain four-byte int, not a VarInt. Reading it as a VarInt stops
+            // at the first byte, which reports event 0 and a position seven
+            // bytes out of step: a level_event at 8004 0 0 for a block broken
+            // at 0 -7 1. A log that reads a packet wrongly sends whoever is
+            // looking for the fault looking at the log instead.
+            let event = i32::from_be_bytes(r.get(0..4)?.try_into().ok()?);
+            let (x, y, z) = position(r.get(4..)?)?;
+            Some(format!("level_event {event} at {x} {y} {z}"))
+        }
+        id::BLOCK_DESTRUCTION => {
+            let entity = VarInt::read(&mut r).ok()?.0;
+            let (x, y, z) = position(r)?;
+            let stage = *r.get(9)?;
+            Some(format!(
+                "block_destruction entity {entity} at {x} {y} {z} stage {stage}"
+            ))
+        }
+        _ => None,
     }
 }
 

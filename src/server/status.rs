@@ -666,8 +666,13 @@ fn play(
 
     // 8 is the world clock, which is not written yet. See play::set_time.
 
-    // 9. Where chunks are centred. Until this arrives the client has nowhere to
-    //    ask for them.
+    // 9. How far the world goes, then where it is centred. Until the radius
+    //    arrives the client is guessing, and until the centre arrives it has
+    //    nowhere to ask for chunks.
+    let mut body = Vec::new();
+    p::write_chunk_cache_radius(&mut body, radius);
+    send(&mut out, &body, "set_chunk_cache_radius", &log)?;
+
     let mut body = Vec::new();
     p::write_chunk_cache_center(&mut body, 0, 0);
     send(&mut out, &body, "set_chunk_cache_center", &log)?;
@@ -924,13 +929,6 @@ fn play(
     // of it looking like nothing happened.
     let mut last_stage: Option<i8> = None;
 
-    // How many block changes this connection has been told are final.
-    //
-    // Per connection rather than per world, because it is a counter the client
-    // reads as going up and not as meaning anything, and two players being told
-    // the same sequence numbers is not a thing worth avoiding.
-    let mut block_sequence: i32 = 0;
-
     // Where the player is, updated by the movement packets. The spawn is where
     // the teleport above put it.
     let mut player = spawn;
@@ -954,6 +952,13 @@ fn play(
     // The dust and noise a break makes, as whole packets, kept apart from the
     // edits because they are separate packets rather than part of the same one.
     let mut effects: Vec<Vec<u8>> = Vec::new();
+
+    // The acknowledgements that settle a change the client has already guessed.
+    //
+    // Kept apart from the edits because they go to one person and not to
+    // everybody: the guess being settled is the one belonging to the player who
+    // made it, and the other players had no guess to settle.
+    let mut acks: Vec<Vec<u8>> = Vec::new();
 
     loop {
         while let Some(frame) = dec.next_frame().map_err(io_err)? {
@@ -1111,25 +1116,54 @@ fn play(
                                 p::write_block_update(&mut body, bx, by, bz, now);
                                 edits.push(body);
 
+                                // What was there, what is there now, and the
+                                // prediction number the client asked about.
+                                //
+                                // The names are the point. A state id on its
+                                // own cannot be read by eye, and a block sent
+                                // as the wrong one is a block that stays solid
+                                // in the client while the server believes it
+                                // is gone.
+                                let terrain = session.world.terrain_blocks();
+                                let name_of = |state: i32| {
+                                    terrain
+                                        .map(|t| {
+                                            crate::server::ticking::state_id_name(state, &t)
+                                                .to_string()
+                                        })
+                                        .unwrap_or_else(|| format!("state {state}"))
+                                };
+                                log.note(format!(
+                                    "broke {bx} {by} {bz}: {} ({was}) -> {} ({now}), \
+                                     client prediction sequence {}",
+                                    name_of(was),
+                                    name_of(now),
+                                    action.sequence
+                                ));
+
                                 // And that the change is settled.
                                 //
                                 // The block is drawn gone the moment the update
                                 // arrives, but the shape it used to have is
-                                // kept until it is acknowledged, and until then
-                                // it is invisible and still solid: a player
-                                // stands on air and walks into a wall that is
-                                // not drawn. It only comes right when the
-                                // chunk is sent again from the server, which
-                                // is why it looked like the world was only
-                                // right after reconnecting.
+                                // kept until the guess that removed it is
+                                // confirmed, and until then it is invisible
+                                // and still solid: a player stands on air and
+                                // walks into a wall that is not drawn. It only
+                                // comes right when the chunk is sent again from
+                                // the server, which is why it looked like the
+                                // world was only right after reconnecting.
                                 //
-                                // The sequence counts the changes this
-                                // connection has been told are final, so it
-                                // goes up and never repeats.
-                                block_sequence += 1;
+                                // The number to confirm it with is the one the
+                                // player sent with their action. It is their
+                                // prediction number and not one of ours: the
+                                // client ends its predictions up to that
+                                // number and no other, so a number of our own
+                                // would settle nothing, and a number of ours
+                                // that happened to be too large would settle
+                                // guesses that had not been made yet.
                                 let mut ack = Vec::new();
-                                p::write_block_changed_ack(&mut ack, block_sequence);
-                                edits.push(ack);
+                                p::write_block_changed_ack(&mut ack, action.sequence);
+                                acks.push(ack);
 
                                 // The dust and the sound. Without this a block
                                 // is simply deleted rather than broken, which
@@ -1206,14 +1240,32 @@ fn play(
         // it predicted the block going: the game excludes them, and sending it
         // to them gives everyone watching a single break and the player who did
         // it two.
-        if !edits.is_empty() || !effects.is_empty() {
+        if !edits.is_empty() || !effects.is_empty() || !acks.is_empty() {
             let outgoing = std::mem::take(&mut edits);
             let effects = std::mem::take(&mut effects);
+            let acks = std::mem::take(&mut acks);
 
             let mut framed = Vec::new();
             for body in &outgoing {
                 session.wire.send_others(player_id, body.clone());
                 enc.encode(body, &mut framed).map_err(io_err)?;
+            }
+            // The acknowledgements go to nobody else. The guess they settle
+            // belongs to the player who made it.
+            for body in &acks {
+                enc.encode(body, &mut framed).map_err(io_err)?;
+            }
+            // What this player is about to be handed, named.
+            //
+            // The broadcast log says what went out to the others. It says
+            // nothing about the player who broke the block, whose copy is
+            // written here instead, and that copy is the one that settles the
+            // guess. A block drawn gone and still solid is what a missing or
+            // out-of-order line here looks like, so it is written down.
+            for body in outgoing.iter().chain(acks.iter()) {
+                if let Some(what) = super::broadcast::describe_block_packet(body) {
+                    log.note(format!("to the breaker: {what}"));
+                }
             }
             if !framed.is_empty() {
                 stream.write_all(&framed)?;

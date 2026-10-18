@@ -945,6 +945,85 @@ fn the_play_ids_are_the_ones_the_game_uses() {
     }
 
     #[test]
+    fn a_player_action_carries_the_clients_own_prediction_number() {
+        // The last field on the wire, and the one that was being dropped.
+        //
+        // A player that breaks a block has already applied the change locally
+        // and is waiting to be told it was right. It tags the guess with a
+        // number it owns, and the server hands that number back. Reading it as
+        // something else, or not reading it at all, leaves the block drawn and
+        // solid at the same time.
+        let mut frame = Vec::new();
+        VarInt(id::SERVERBOUND_PLAYER_ACTION).write(&mut frame);
+        VarInt(3).write(&mut frame); // stop destroy
+        frame.extend_from_slice(&0i64.to_be_bytes()); // the position
+        frame.push(0); // the face
+        VarInt(17).write(&mut frame); // the prediction number
+
+        let action = PlayerActionPacket::read(&frame).expect("it is a player action");
+        assert_eq!(action.action, PlayerAction::StopDestroy);
+        assert_eq!(
+            action.sequence, 17,
+            "and the number the client tagged its guess with"
+        );
+    }
+
+    #[test]
+    fn the_acknowledgement_uses_the_number_the_client_sent() {
+        // Not one of our own. The client ends its predictions up to the number
+        // it is given, so a number of ours settles nothing, and a number of
+        // ours that happened to be larger would settle guesses that had not
+        // been made yet.
+        let mut body = Vec::new();
+        write_block_changed_ack(&mut body, 17);
+
+        let mut b = &body[..];
+        assert_eq!(take_varint(&mut b), id::BLOCK_CHANGED_ACK);
+        assert_eq!(take_varint(&mut b), 17, "the client's own number, unchanged");
+        assert!(b.is_empty());
+    }
+
+    #[test]
+    fn a_level_event_carries_its_numbers_as_plain_ints() {
+        // Not VarInts, which is what makes this packet worth a test of its own:
+        // every other number in these packets is a VarInt, and `readInt` here
+        // reads four bytes and stops.
+        //
+        // A log that decoded this packet as a VarInt reported event 0 at
+        // position 8004 0 0 for a block broken at 0 -7 1, which read like a
+        // fault in the server and was a fault in the log instead.
+        let mut body = Vec::new();
+        write_level_event(&mut body, BLOCK_DESTROYED, (0, -7, 1), 9, false);
+
+        let mut b = &body[..];
+        assert_eq!(take_varint(&mut b), id::LEVEL_EVENT);
+
+        assert_eq!(
+            i32::from_be_bytes(b[..4].try_into().unwrap()),
+            BLOCK_DESTROYED,
+            "the event as a plain int"
+        );
+        b = &b[4..];
+
+        let pos = i64::from_be_bytes(b[..8].try_into().unwrap());
+        assert_eq!(
+            unpack_block_pos(pos),
+            (0, -7, 1),
+            "and the position is read from the byte after all four of it"
+        );
+        b = &b[8..];
+
+        assert_eq!(
+            i32::from_be_bytes(b[..4].try_into().unwrap()),
+            9,
+            "the data is a plain int too"
+        );
+        assert_eq!(b[4], 0, "global false is a boolean");
+        b = &b[5..];
+        assert!(b.is_empty(), "nothing left over: {b:?}");
+    }
+
+    #[test]
     fn every_id_here_is_the_one_the_generator_reports() {
         let report = include_str!("../../../extracted/packets.json");
 

@@ -558,6 +558,29 @@ pub fn hardness_of(block: BlockId, terrain: &TerrainBlocks) -> Option<f32> {
     crate::generated::hardness_of(to_state_name(block, terrain))
 }
 
+/// The game's name for a state id, for the log.
+///
+/// The reverse of [`state_id`], and needed because a state id on its own is not
+/// readable by eye: a log line saying a block became state 17 says nothing
+/// about whether 17 is air, and the whole question when a block stays solid is
+/// whether the id that went out was the one meant for air.
+pub fn state_id_name(state: i32, terrain: &TerrainBlocks) -> &'static str {
+    let _ = terrain;
+    // The generated table is a flat list of blocks, each owning a range of
+    // state ids, so the name is the block whose range covers this id. Unknown
+    // ids are reported rather than hidden: they would be a bug, and a log that
+    // quietly said "air" for one would hide it.
+    if state < 0 {
+        return "<negative>";
+    }
+    for block in crate::generated::BLOCKS {
+        if block.states.iter().any(|s| s.id as i32 == state) {
+            return block.name;
+        }
+    }
+    "<unknown>"
+}
+
 /// Reads a block's state id out of the generated table.
 ///
 /// Looked up rather than written out, because these are indices into thirty-five

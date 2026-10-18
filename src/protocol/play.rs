@@ -854,6 +854,67 @@ pub fn write_rotate_head(out: &mut Vec<u8>, entity_id: i32, yaw: f32) {
     out.push(angle_byte(yaw));
 }
 
+/// How finely a movement delta is measured: one part in 4096 of a block.
+///
+/// From the game's own codec, which rounds on the way out and divides on the
+/// way back in. That is finer than a block, so a slow walk is a delta of a few
+/// hundred rather than of zero.
+const DELTA_SCALE: f64 = 4096.0;
+
+/// Writes a `move_entity_pos_rot`: somebody moved.
+///
+/// **A delta, not a position.** Each client is told how far the body moved since
+/// that client last heard about it, which is why the server has to remember what
+/// each observer was last told separately — two players watching the same walk
+/// have been told different amounts of it.
+///
+/// The shape:
+///
+/// ```text
+/// VarInt   the entity id
+/// VarInt   properties: bit 0 is on the ground, the rest is a step count
+/// short    dx, dy, dz   when the step count is zero
+/// byte     yaw
+/// byte     pitch
+/// ```
+///
+/// The step count is packed into the same VarInt as the ground flag, which is
+/// why it is shifted left by one when written. A count of zero means the simple
+/// form: three shorts and nothing else. A stepped movement instead carries,
+/// per step, a tick count and three shorts, and this server never sends one:
+/// stepping is for smoothing a client's interpolation across a teleport or a
+/// long jump, and a player walking between two positions does not need it.
+///
+/// The deltas are shorts, so a single move is capped at 32 blocks. Walking
+/// further than that in one tick is not something a player does, and the
+/// alternative — a teleport packet, which the client animates as one — is the
+/// right tool for it rather than a clamped delta.
+pub fn write_move_entity_pos_rot(
+    out: &mut Vec<u8>,
+    entity_id: i32,
+    delta: (f64, f64, f64),
+    yaw: f32,
+    pitch: f32,
+    on_ground: bool,
+) {
+    VarInt(id::MOVE_ENTITY_POS_ROT).write(out);
+    VarInt(entity_id).write(out);
+
+    // No steps, and the ground flag in the low bit.
+    VarInt(if on_ground { 1 } else { 0 }).write(out);
+
+    for axis in [delta.0, delta.1, delta.2] {
+        let scaled = (axis * DELTA_SCALE).round();
+        // Clamped rather than wrapped. A wrapped delta is a player teleported
+        // in the opposite direction, which is worse than not moving at all.
+        let clamped = scaled.clamp(i16::MIN as f64, i16::MAX as f64) as i16;
+        out.extend_from_slice(&clamped.to_be_bytes());
+    }
+
+    out.push(angle_byte(yaw));
+    out.push(angle_byte(pitch));
+}
+
 /// One angle in the byte the protocol uses for it: 1/256 of a turn.
 ///
 /// Two and a quarter degrees a step, so a face is not very precise. It is what

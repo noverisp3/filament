@@ -757,6 +757,17 @@ fn play(
             other.pitch,
         );
         send(&mut out, &entity_packet, "add_entity", &log)?;
+
+        // This is where a delta's zero point gets set. Without it the first
+        // movement of that player has nothing to be measured from and is
+        // dropped, so they would stand still until they moved a second time.
+        session.wire.note_told(
+            player_id,
+            other.id,
+            other.pos,
+            other.yaw,
+            other.pitch,
+        );
     }
 
     let player_name = registration.name.clone();
@@ -782,6 +793,18 @@ fn play(
             player_pitch,
         );
         session.wire.send_others(player_id, entity_packet);
+
+        // Same as above, the other way round: every player already here now
+        // has this one at a known place, which is where their first delta is
+        // measured from.
+        for other in &others {
+            if other.id != player_id {
+                session
+                    .wire
+                    .note_told(other.id, player_id, p::SPAWN, player_yaw, player_pitch);
+            }
+        }
+
         log.note(format!("announced to the {} already here", others.len() - 1));
     }
 
@@ -866,11 +889,29 @@ fn play(
                     | p::id::MOVE_PLAYER_ROT
                     | p::id::MOVE_PLAYER_STATUS_ONLY
             ) && let Ok(moved) = p::ClientMovement::read(&frame)
-                && let (Some(x), Some(y), Some(z)) = (moved.x, moved.y, moved.z)
             {
-                player.x = x;
-                player.y = y;
-                player.z = z;
+                // The rotation is carried even on the packets that do not have
+                // a position, because a client turning on the spot is still
+                // turning and the people watching should see it.
+                if let Some(yaw) = moved.yaw {
+                    player.yaw = yaw;
+                }
+                if let Some(pitch) = moved.pitch {
+                    player.pitch = pitch;
+                }
+
+                if let (Some(x), Some(y), Some(z)) = (moved.x, moved.y, moved.z) {
+                    player.x = x;
+                    player.y = y;
+                    player.z = z;
+                    session.wire.update_pose(player_id, (x, y, z), player.yaw, player.pitch);
+                    session.wire.send_movement(player_id, true);
+                } else {
+                    // Turned without moving: the pose still moved, so anybody
+                    // told about it needs telling again.
+                    session.wire.update_pose(player_id, (player.x, player.y, player.z), player.yaw, player.pitch);
+                    session.wire.send_movement(player_id, true);
+                }
             }
 
             // Breaking a block.

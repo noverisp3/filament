@@ -38,6 +38,16 @@
 use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
+/// How finely a movement is measured, and how far away a player can be and
+/// still be worth telling about.
+///
+/// The scale is the game's, from `VecDeltaCodec`; see
+/// [`crate::protocol::play::write_move_entity_pos_rot`]. The range is the one
+/// the game itself uses when it broadcasts a level event to the players near
+/// something happening, which makes it a reasonable stand-in for "near enough
+/// to see a person walk".
+const DELTA_SCALE: f64 = 4096.0;
+
 /// One player's queue, and enough about them for somebody else to be told they
 /// are here.
 struct Sink {
@@ -55,6 +65,27 @@ struct Sink {
     /// nowhere to be asked: the thread that learns a player moved is not the
     /// thread that needs to tell anyone, and the one that needs to tell anyone
     /// does not know it happened until the queue says so.
+    pos: (f64, f64, f64),
+    yaw: f32,
+    pitch: f32,
+    /// What this connection has been told about every other player, and where
+    /// it was told they were.
+    ///
+    /// Per observer, and that is the whole point. A movement is sent as a
+    /// distance rather than a place, so the server cannot keep one copy of
+    /// "where they are": it has to keep one copy per pair, because a client
+    /// joining halfway through somebody's walk has been told a different
+    /// starting point than one that was there from the start. Keeping the
+    /// player's real position here and sending that instead would sidestep the
+    /// problem, and the game does not do it because a client that is sent
+    /// absolute positions instead of deltas interpolates differently and
+    /// rubber-bands on a lossy link.
+    seen: std::collections::HashMap<u64, Seen>,
+}
+
+/// What one connection was last told about one other player.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Seen {
     pos: (f64, f64, f64),
     yaw: f32,
     pitch: f32,
@@ -159,6 +190,7 @@ impl Broadcast {
             pos,
             yaw: 0.0,
             pitch: 0.0,
+            seen: std::collections::HashMap::new(),
         });
 
         Registration {
@@ -189,6 +221,130 @@ impl Broadcast {
                 pitch: s.pitch,
             })
             .collect()
+    }
+
+    /// Records that one connection has been told where another player is.
+    ///
+    /// Called whenever an `add_entity` goes out, because that packet is where a
+    /// delta's zero point is set. A movement sent before this has no baseline
+    /// to be measured from, and the options are to skip it â€” which leaves the
+    /// player standing still until they next move â€” or to guess.
+    pub fn note_told(&self, observer: u64, subject: u64, pos: (f64, f64, f64), yaw: f32, pitch: f32) {
+        let mut sinks = self.sinks.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(sink) = sinks.iter_mut().find(|s| s.id == observer) {
+            sink.seen.insert(subject, Seen { pos, yaw, pitch });
+        }
+    }
+
+    /// Records a player's new position and facing, so a later arrival is told
+    /// where they actually are rather than where they logged on.
+    pub fn update_pose(&self, id: u64, pos: (f64, f64, f64), yaw: f32, pitch: f32) {
+        let mut sinks = self.sinks.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(sink) = sinks.iter_mut().find(|s| s.id == id) {
+            sink.pos = pos;
+            sink.yaw = yaw;
+            sink.pitch = pitch;
+        }
+    }
+
+    /// Tells everyone who is watching that `id` moved.
+    ///
+    /// One packet per observer, each measuring the movement from what *that*
+    /// observer was last told, which is what makes a relative delta work at
+    /// all when players arrive at different times.
+    ///
+    /// Skips three kinds of observer, and each skip is a different reason:
+    ///
+    /// - one that has never been told this player exists, because it has no
+    ///   baseline and a delta from nowhere is not a position;
+    /// - one that is too far away to see them, at the same sixty-four blocks
+    ///   the game uses for its own nearby broadcasts;
+    /// - one that has not been told anything new, where the movement rounds to
+    ///   no delta and the facing has not turned. A player standing still sends
+    ///   twenty identical packets a second otherwise, each of which every other
+    ///   client decodes and discards.
+    pub fn send_movement(&self, id: u64, on_ground: bool) {
+        const RANGE: f64 = 64.0;
+
+        let mut sinks = self.sinks.lock().unwrap_or_else(|e| e.into_inner());
+        // Copied out rather than borrowed: the loop below mutates the very
+        // sinks it is reading, and a borrow of one while another is written
+        // needs the lock held twice over.
+        let Some(subject) = sinks
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| (s.entity_id, s.pos, s.yaw, s.pitch))
+        else {
+            return;
+        };
+        let (subject_entity_id, subject_pos, subject_yaw, subject_pitch) = subject;
+
+        let mut bodies = Vec::new();
+        for sink in sinks.iter_mut() {
+            if sink.id == id {
+                continue;
+            }
+            let Some(previous) = sink.seen.get(&id).copied() else {
+                continue;
+            };
+
+            // How far this observer is from the player, which is not the same
+            // thing as how far the player moved. A player crossing the room in
+            // one step is a short movement and a long distance.
+            let ex = subject_pos.0 - sink.pos.0;
+            let ey = subject_pos.1 - sink.pos.1;
+            let ez = subject_pos.2 - sink.pos.2;
+            if ex * ex + ey * ey + ez * ez > RANGE * RANGE {
+                // Too far to see. Their baseline is left alone, so walking back
+                // into range sends one big delta rather than a series of small
+                // ones, which is right: they were not watching.
+                continue;
+            }
+
+            let dx = subject_pos.0 - previous.pos.0;
+            let dy = subject_pos.1 - previous.pos.1;
+            let dz = subject_pos.2 - previous.pos.2;
+
+            // What the client will actually see, after it rounds to 1/4096. A
+            // movement that rounds away has nothing to say and is not worth a
+            // packet, and the test has to be on the rounded value because that
+            // is the value the client ends up with.
+            let moved = [(dx, dy, dz)]
+                .iter()
+                .any(|a| (a.0 * DELTA_SCALE).round() != 0.0);
+            let turned = subject_yaw != previous.yaw || subject_pitch != previous.pitch;
+            if !moved && !turned {
+                continue;
+            }
+
+            let mut body = Vec::new();
+            crate::protocol::play::write_move_entity_pos_rot(
+                &mut body,
+                subject_entity_id,
+                (dx, dy, dz),
+                subject_yaw,
+                subject_pitch,
+                on_ground,
+            );
+            bodies.push(body);
+
+            sink.seen.insert(
+                id,
+                Seen {
+                    pos: subject_pos,
+                    yaw: subject_yaw,
+                    pitch: subject_pitch,
+                },
+            );
+        }
+
+        for body in bodies {
+            for sink in sinks.iter() {
+                if sink.id != id {
+                    let _ = sink.out.send(body.clone());
+                }
+            }
+        }
     }
 
     /// Removes a player. Their queue is dropped, which ends their connection's
@@ -230,8 +386,8 @@ impl Broadcast {
 /// Announces that a player has gone, when their connection ends however it ends.
 ///
 /// A guard rather than a call at the end of the connection, because the
-/// connection has a great many ways out — a clean return, a read error, a write
-/// that failed, an early return when the world would not answer — and a line of
+/// connection has a great many ways out â€” a clean return, a read error, a write
+/// that failed, an early return when the world would not answer â€” and a line of
 /// cleanup written at the bottom of a function is reached by none of the others.
 /// A value that is dropped is reached by all of them, including the ones nobody
 /// writes down.
@@ -298,6 +454,29 @@ mod tests {
     /// what they are actually about.
     fn join(wire: &Broadcast, name: &str) -> Registration {
         wire.register(name, [0u8; 16], 1, crate::protocol::play::SPAWN)
+    }
+
+    /// Reads the x delta out of a `move_entity_pos_rot` body.
+    fn read_delta_x(body: &[u8]) -> f64 {
+        let mut b = body;
+        assert_eq!(
+            crate::protocol::play::id::MOVE_ENTITY_POS_ROT as u8,
+            b[0],
+            "the packet is a movement"
+        );
+        b = &b[1..];
+        // The entity id and the properties.
+        b = skip_varints(b);
+        b = skip_varints(b);
+        let dx = i16::from_be_bytes([b[0], b[1]]);
+        f64::from(dx) / DELTA_SCALE
+    }
+
+    fn skip_varints(mut b: &[u8]) -> &[u8] {
+        while b[0] & 0x80 != 0 {
+            b = &b[1..];
+        }
+        &b[1..]
     }
 
     #[test]
@@ -401,6 +580,147 @@ mod tests {
             crate::protocol::play::id::BLOCK_UPDATE as u8,
             "and the first byte is still the packet id"
         );
+    }
+
+    #[test]
+    fn two_observers_who_joined_at_different_times_get_different_deltas() {
+        // The reason "seen" is per observer and the reason the wire carries a
+        // delta rather than a position.
+        //
+        // The watcher has been told the mover is at 0,0,0 and is sent a move to
+        // 1,0,0, so its delta is one block. The latecomer is only now being
+        // told where the mover is — at 1,0,0 — and then is sent the same move
+        // to 2,0,0, so its delta is one block too.
+        //
+        // A server that kept one copy of "where the mover is" would send the
+        // second observer a delta of two, and that observer would jump.
+        let wire = Broadcast::new();
+        let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
+        let watcher = wire.register("watcher", [2u8; 16], 2, (0.0, 64.0, 0.0));
+        let late = wire.register("late", [3u8; 16], 3, (0.0, 64.0, 0.0));
+
+        wire.note_told(watcher.id, mover.id, (0.0, 64.0, 0.0), 0.0, 0.0);
+
+        // First move: only the watcher was told about the mover.
+        wire.update_pose(mover.id, (1.0, 64.0, 0.0), 0.0, 0.0);
+        wire.send_movement(mover.id, true);
+        let first = watcher.inbox.try_recv().expect("the watcher was told");
+        assert_eq!(read_delta_x(&first), 1.0, "one block from where it was told");
+
+        // The latecomer arrives and is given the mover's current position.
+        wire.note_told(late.id, mover.id, (1.0, 64.0, 0.0), 0.0, 0.0);
+
+        // Second move.
+        wire.update_pose(mover.id, (2.0, 64.0, 0.0), 0.0, 0.0);
+        wire.send_movement(mover.id, true);
+
+        let to_watcher = watcher.inbox.try_recv().expect("the watcher again");
+        let to_late = late.inbox.try_recv().expect("the latecomer too");
+        assert_eq!(
+            read_delta_x(&to_watcher),
+            1.0,
+            "the watcher is told the move from where it last was"
+        );
+        assert_eq!(
+            read_delta_x(&to_late),
+            1.0,
+            "and so is the latecomer, from where it was introduced"
+        );
+        // Both packets address the mover and both say one block, so they come
+        // out identical here. That is the point: each was measured from what
+        // that observer knew, and the observers happen to agree. Had the server
+        // kept one copy of the mover's position, one of these would have been a
+        // two block jump.
+        assert_eq!(to_watcher, to_late);
+    }
+
+    #[test]
+    fn a_player_standing_still_sends_nothing() {
+        let wire = Broadcast::new();
+        let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
+        let watcher = wire.register("watcher", [2u8; 16], 2, (0.0, 64.0, 0.0));
+        wire.note_told(watcher.id, mover.id, (0.0, 64.0, 0.0), 0.0, 0.0);
+
+        for _ in 0..20 {
+            wire.send_movement(mover.id, true);
+        }
+        assert!(
+            watcher.inbox.try_recv().is_err(),
+            "twenty identical movements a second is twenty packets a second \
+             that every client decodes and throws away"
+        );
+    }
+
+    #[test]
+    fn a_movement_too_small_to_see_is_not_sent() {
+        // The client rounds to 1/4096, so anything under half of that arrives
+        // as zero. The test has to be on the rounded value, because that is
+        // what the client ends up holding.
+        let wire = Broadcast::new();
+        let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
+        let watcher = wire.register("watcher", [2u8; 16], 2, (0.0, 64.0, 0.0));
+        wire.note_told(watcher.id, mover.id, (0.0, 64.0, 0.0), 0.0, 0.0);
+
+        // A quarter of a step, which rounds away to nothing.
+        wire.update_pose(mover.id, (0.0 + 1.0 / 16384.0, 64.0, 0.0), 0.0, 0.0);
+        wire.send_movement(mover.id, true);
+        assert!(watcher.inbox.try_recv().is_err(), "a quarter of a step");
+
+        // Half a step, which rounds up to one and is worth sending.
+        wire.update_pose(mover.id, (1.0 / 8192.0, 64.0, 0.0), 0.0, 0.0);
+        wire.send_movement(mover.id, true);
+        assert_eq!(
+            read_delta_x(&watcher.inbox.try_recv().unwrap()),
+            1.0 / 4096.0,
+            "which arrives as exactly one step"
+        );
+
+        // And a real movement.
+        wire.update_pose(mover.id, (0.5, 64.0, 0.0), 0.0, 0.0);
+        wire.send_movement(mover.id, true);
+        assert_eq!(read_delta_x(&watcher.inbox.try_recv().unwrap()), 0.5);
+    }
+
+    #[test]
+    fn a_movement_is_not_sent_to_somebody_who_has_never_heard_of_the_player() {
+        let wire = Broadcast::new();
+        let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
+        let stranger = wire.register("stranger", [2u8; 16], 2, (0.0, 64.0, 0.0));
+
+        wire.update_pose(mover.id, (5.0, 64.0, 0.0), 0.0, 0.0);
+        wire.send_movement(mover.id, true);
+
+        assert!(
+            stranger.inbox.try_recv().is_err(),
+            "a delta from nowhere is not a position"
+        );
+    }
+
+    #[test]
+    fn a_movement_is_not_sent_across_the_room() {
+        let wire = Broadcast::new();
+        let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
+        let far = wire.register("far", [2u8; 16], 2, (1000.0, 64.0, 0.0));
+        wire.note_told(far.id, mover.id, (0.0, 64.0, 0.0), 0.0, 0.0);
+
+        wire.update_pose(mover.id, (1.0, 64.0, 0.0), 0.0, 0.0);
+        wire.send_movement(mover.id, true);
+        assert!(far.inbox.try_recv().is_err(), "a kilometre is past seeing");
+    }
+
+    #[test]
+    fn turning_in_place_is_worth_a_packet() {
+        let wire = Broadcast::new();
+        let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
+        let watcher = wire.register("watcher", [2u8; 16], 2, (0.0, 64.0, 0.0));
+        wire.note_told(watcher.id, mover.id, (0.0, 64.0, 0.0), 0.0, 0.0);
+
+        wire.update_pose(mover.id, (0.0, 64.0, 0.0), 90.0, 0.0);
+        wire.send_movement(mover.id, true);
+
+        let body = watcher.inbox.try_recv().expect("a turn is news");
+        // Two VarInts, then six bytes of delta, then the two angles.
+        assert_eq!(body[9], 64, "yaw east");
     }
 
     #[test]

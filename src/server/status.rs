@@ -7,6 +7,7 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::Arc;
 use std::thread;
 
 use crate::protocol::frame::{FrameDecoder, FrameEncoder, FrameError};
@@ -15,6 +16,7 @@ use crate::protocol::{VarInt, VarLong};
 
 use super::log::{next_connection_id, packet_name, ConnLog};
 use super::log;
+use super::broadcast::{Broadcast, Session};
 use super::ticking::WorldHandle;
 use super::ticking;
 
@@ -28,6 +30,8 @@ pub struct StatusServer {
     /// A way to ask the world for things, not the world itself. It lives on a
     /// thread of its own; see `server::ticking`.
     world: WorldHandle,
+    /// Who is connected, and the means to tell them something.
+    wire: Arc<Broadcast>,
 }
 
 impl StatusServer {
@@ -38,6 +42,7 @@ impl StatusServer {
             listener,
             status,
             world: ticking::spawn(),
+            wire: Arc::new(Broadcast::new()),
         })
     }
 
@@ -79,7 +84,10 @@ impl StatusServer {
 
                     let id = next_connection_id();
                     let status = self.status.clone();
-                    let world = self.world.clone();
+                    let session = Session {
+                        world: Arc::new(self.world.clone()),
+                        wire: self.wire.clone(),
+                    };
 
                     log::note(format!("[conn {id}] accepted from {peer}"));
 
@@ -91,7 +99,7 @@ impl StatusServer {
                     // shutdown can wait for the connections to finish writing
                     // instead of cutting them off mid-packet.
                     let handle = thread::spawn(move || {
-                        if let Err(e) = handle_connection(stream, status, world) {
+                        if let Err(e) = handle_connection(stream, status, session) {
                             log::error(format!("[conn {id}] ended with an error: {e}"));
                         }
                     });
@@ -142,7 +150,7 @@ const POLL: std::time::Duration = std::time::Duration::from_millis(50);
 fn handle_connection(
     mut stream: TcpStream,
     status: ServerStatus,
-    world: WorldHandle,
+    session: Session,
 ) -> std::io::Result<()> {
     let log = ConnLog::new(
         next_connection_id(),
@@ -204,7 +212,7 @@ Ok(Some(frame)) => {
 
     match intention.intent {
         ClientIntent::Status => serve_status(&mut stream, dec, enc, status, log),
-        ClientIntent::Login => login(&mut stream, log, dec, world),
+        ClientIntent::Login => login(&mut stream, log, dec, session),
         ClientIntent::Transfer => {
             log.note("transfer is not implemented");
             Ok(())
@@ -227,7 +235,7 @@ fn login(
     stream: &mut TcpStream,
     log: ConnLog,
     mut dec: FrameDecoder,
-    world: WorldHandle,
+    session: Session,
 ) -> std::io::Result<()> {
     use crate::protocol::frame::DEFAULT_COMPRESSION_THRESHOLD;
     use crate::protocol::login::{write_login_compression, write_login_finished, Uuid};
@@ -273,6 +281,17 @@ fn login(
 
     let profile_id = Uuid::offline_for(&name);
     let session_id = Uuid::offline_for("filament-session");
+
+    // From here the player is somebody to tell things to. Registered before the
+    // profile goes out so that a push arriving in the same moment as the
+    // profile is queued rather than lost, and taken back down when the
+    // connection ends however it ends.
+    let registration = session.wire.register(&name);
+    let player_id = registration.id;
+    log.note(format!(
+        "player {name:?} is player {player_id}, {} in total",
+        session.wire.player_count()
+    ));
 
     // 1. Announce compression, still uncompressed.
     let mut out = Vec::new();
@@ -321,7 +340,7 @@ fn login(
                 // and more importantly it still holds any bytes that arrived
                 // behind the acknowledgement. Starting a fresh decoder dropped
                 // them, and the first configuration packets went missing.
-                return configure(stream, log, dec, world);
+                return configure(stream, log, dec, session, registration);
             }
         }
 
@@ -353,7 +372,8 @@ fn configure(
     stream: &mut TcpStream,
     log: ConnLog,
     mut dec: FrameDecoder,
-    world: WorldHandle,
+    session: Session,
+    registration: super::broadcast::Registration,
 ) -> std::io::Result<()> {
     use crate::protocol::configuration::{
         registry_data_count, registry_data_frames, update_tags_summary,
@@ -458,7 +478,7 @@ fn configure(
             match id {
                 crate::protocol::configuration::id::SERVERBOUND_FINISH_CONFIGURATION => {
                     log.note("client finished configuration");
-                    return play(stream, dec, enc, log, view_distance, world);
+                    return play(stream, dec, enc, log, view_distance, session, registration);
                 }
                 crate::protocol::configuration::id::SERVERBOUND_CLIENT_INFORMATION => {
                     match crate::protocol::configuration::ClientInformation::read(&frame) {
@@ -514,10 +534,12 @@ fn play(
     mut enc: FrameEncoder,
     log: ConnLog,
     radius: i32,
-    world: WorldHandle,
+    session: Session,
+    registration: super::broadcast::Registration,
 ) -> std::io::Result<()> {
     use crate::protocol::play as p;
 
+    let player_id = registration.id;
     let log = log.phase("play");
 
     // Compression carries over from the configuration phase; both sides keep
@@ -650,7 +672,7 @@ fn play(
             // generation happens there rather than here, which is the whole
             // reason the two hundred and eighty-nine of an initial join no
             // longer block anyone else.
-            let Some(body) = world.chunk(ChunkPos { x: dx, z: dz }) else {
+            let Some(body) = session.world.chunk(ChunkPos { x: dx, z: dz }) else {
                 return Ok(());
             };
 
@@ -755,7 +777,7 @@ fn play(
                             "refused a break at {bx} {by} {bz}, {reach:.1} blocks away"
                         ));
                     }
-                } else if world.break_block(pos).flatten().is_some() {
+                } else if session.world.break_block(pos).flatten().is_some() {
                     edits.push((bx, by, bz));
                     if super::log::verbose() {
                         log.note(format!("broke the block at {bx} {by} {bz}"));
@@ -764,19 +786,46 @@ fn play(
             }
         }
 
-        // Tell the client about each edit. Without this the change exists on the
-        // server and nowhere else: the client keeps drawing the block it was
-        // sent and never learns it is gone.
+        // Tell the client about each edit, and everybody else too.
+        //
+        // Without the first half the change exists on the server and nowhere
+        // else: the client keeps drawing the block it was sent and never learns
+        // it is gone. Without the second half the other player keeps drawing it
+        // as well, until they walk away and back and the chunk is sent again.
+        //
+        // The body is built once and framed twice over: once here with this
+        // connection's encoder, and once in each other connection, with theirs.
+        // Compression is per connection, so a framed packet cannot be shared.
         if !edits.is_empty() {
             let mut body = Vec::new();
             for (bx, by, bz) in &edits {
                 let pos = crate::world::pos::BlockPos::new(*bx, *by, *bz);
-                let state = world.block_at(pos).flatten().unwrap_or(AIR_STATE);
+                let state = session.world.block_at(pos).flatten().unwrap_or(AIR_STATE);
                 p::write_block_update(&mut body, *bx, *by, *bz, state);
             }
-            let mut wire = Vec::new();
-            enc.encode(&body, &mut wire).map_err(io_err)?;
-            stream.write_all(&wire)?;
+
+            if body.len() > 1 {
+                let others = body[1..].to_vec();
+                session.wire.send_others(player_id, others);
+            }
+
+            let mut framed = Vec::new();
+            enc.encode(&body, &mut framed).map_err(io_err)?;
+            stream.write_all(&framed)?;
+            stream.flush()?;
+        }
+
+        // Anything the other players have told us, drained in the same loop that
+        // drains the socket. No thread other than this one ever writes to this
+        // stream, which is why it is a queue rather than a shared writer.
+        let mut pushed = Vec::new();
+        while let Ok(body) = registration.inbox.try_recv() {
+            let mut framed = Vec::new();
+            enc.encode(&body, &mut framed).map_err(io_err)?;
+            pushed.extend_from_slice(&framed);
+        }
+        if !pushed.is_empty() {
+            stream.write_all(&pushed)?;
             stream.flush()?;
         }
 
@@ -829,7 +878,7 @@ fn play(
             sorted.sort_unstable();
 
             for (dx, dz) in &sorted {
-                if !send_one_chunk(&mut out, &mut enc, &world, *dx, *dz)? {
+                if !send_one_chunk(&mut out, &mut enc, &session.world, *dx, *dz)? {
                     return Ok(());
                 }
                 sent.insert((*dx, *dz));
@@ -851,7 +900,7 @@ fn play(
                 enc.encode(&body, &mut wire).map_err(io_err)?;
                 out.extend_from_slice(&wire);
                 sent.remove(&(*dx, *dz));
-                world.forget(crate::world::pos::ChunkPos { x: *dx, z: *dz });
+                session.world.forget(crate::world::pos::ChunkPos { x: *dx, z: *dz });
             }
 
             stream.write_all(&out)?;

@@ -4,6 +4,7 @@
 //! login, the configuration phase and the start of play. What it does not do is
 //! tick anything, because there is nothing to tick yet.
 
+pub mod broadcast;
 pub mod log;
 pub mod shutdown;
 pub mod status;

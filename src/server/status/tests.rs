@@ -46,6 +46,49 @@ fn a_flushed_buffer_puts_nothing_on_the_wire_when_it_is_empty() {
 }
 
 #[test]
+fn a_player_closing_their_game_is_not_a_server_error() {
+    // It arrives as an error, so it has to be told apart from one. Otherwise a
+    // player closing a window prints ERROR, and the next person to read the log
+    // goes looking for a fault that is not there.
+    for code in [53, 54, 60, 997] {
+        let e = std::io::Error::from_raw_os_error(code);
+        assert!(
+            client_went_away(&e),
+            "{code} is the peer going away, not the server failing: {e}"
+        );
+    }
+
+    for kind in [
+        std::io::ErrorKind::ConnectionReset,
+        std::io::ErrorKind::ConnectionAborted,
+        std::io::ErrorKind::BrokenPipe,
+    ] {
+        assert!(
+            client_went_away(&std::io::Error::from(kind)),
+            "{kind:?} is the peer going away too"
+        );
+    }
+}
+
+#[test]
+fn a_real_failure_is_still_an_error() {
+    // The other half, and the one that matters: this must not swallow the
+    // faults that are ours. A protocol violation or a bad write is not the
+    // client leaving, and reporting it as a clean departure would lose the only
+    // evidence that anything went wrong.
+    for kind in [
+        std::io::ErrorKind::InvalidData,
+        std::io::ErrorKind::UnexpectedEof,
+        std::io::ErrorKind::PermissionDenied,
+    ] {
+        assert!(
+            !client_went_away(&std::io::Error::from(kind)),
+            "{kind:?} is ours and must stay an ERROR"
+        );
+    }
+}
+
+#[test]
 fn crossing_a_boundary_sends_the_new_ground_before_dropping_the_old() {
     // The fault this guards: a player crossing a chunk boundary had the terrain
     // they were leaving forgotten on one pass, and the terrain they were walking

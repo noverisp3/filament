@@ -100,7 +100,11 @@ impl StatusServer {
                     // instead of cutting them off mid-packet.
                     let handle = thread::spawn(move || {
                         if let Err(e) = handle_connection(stream, status, session) {
-                            log::error(format!("[conn {id}] ended with an error: {e}"));
+                            if client_went_away(&e) {
+                                log::note(format!("[conn {id}] client went away: {e}"));
+                            } else {
+                                log::error(format!("[conn {id}] ended with an error: {e}"));
+                            }
                         }
                     });
                     live.push(handle);
@@ -147,6 +151,36 @@ const POLL: std::time::Duration = std::time::Duration::from_millis(50);
 ///
 /// Deliberately does not implement login: the point here is to be visible in
 /// the multiplayer browser, which the client reaches only after status.
+/// Whether an error means the client went away, rather than the server failing.
+///
+/// A player closing the game is not a fault, and it is reported by whatever
+/// the socket happened to be doing at the time. On Windows a window closed
+/// mid-transfer leaves an overlapped read outstanding, and the next one on that
+/// socket reports ERROR_IO_PENDING, which is os error 997. A connection reset
+/// is 10054, an abort is 10053, and a timed out connection is 10060; the
+/// portable kinds cover the same ground elsewhere.
+///
+/// It matters that this is answered before the connection is reported as
+/// broken. The cleanup has already run by the time the error reaches here, so
+/// an ERROR line for a player who closed their own game is a false alarm, and a
+/// false alarm costs the time of whoever reads the log next.
+fn client_went_away(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+
+    if matches!(
+        e.kind(),
+        ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted | ErrorKind::BrokenPipe
+    ) {
+        return true;
+    }
+
+    // Windows reports these by number. ERROR_IO_PENDING is the surprising one:
+    // it is not a failure at all, it is the leftover of a read that was
+    // cancelled by its timeout, and it only becomes an error because the
+    // connection was already going down.
+    matches!(e.raw_os_error(), Some(53 | 54 | 60 | 997))
+}
+
 fn handle_connection(
     mut stream: TcpStream,
     status: ServerStatus,

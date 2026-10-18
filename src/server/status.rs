@@ -804,10 +804,12 @@ fn play(
                 p::write_block_update(&mut body, *bx, *by, *bz, state);
             }
 
-            if body.len() > 1 {
-                let others = body[1..].to_vec();
-                session.wire.send_others(player_id, others);
-            }
+            // The body goes out whole. The packet id is part of it, because
+            // framing adds a length and nothing else: a body sent without the id
+            // arrives as a packet whose id is the first byte of the position,
+            // which is 8 here, and id 8 is bundle_delimiter, whose body is
+            // nothing. The client then reports the eight bytes it did not expect.
+            session.wire.send_others(player_id, body.clone());
 
             let mut framed = Vec::new();
             enc.encode(&body, &mut framed).map_err(io_err)?;

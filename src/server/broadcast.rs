@@ -196,6 +196,36 @@ mod tests {
     }
 
     #[test]
+    fn a_push_carries_the_packet_id_and_the_body_together() {
+        // A pushed body is handed to the receiver's own encoder, which adds a
+        // length and nothing else. So the id has to be inside it. Sending the
+        // body without the id makes the packet arrive with the first byte of
+        // whatever field follows as its id, which for a block update is a byte
+        // of the position: id 8, which is bundle_delimiter, a packet with no
+        // body at all, and the client reports the position as eight bytes it
+        // did not expect.
+        let wire = Broadcast::new();
+        let mine = wire.register("digger");
+        let theirs = wire.register("watcher");
+
+        let mut body = Vec::new();
+        crate::protocol::play::write_block_update(&mut body, 1, 2, 3, 4);
+        wire.send_others(mine.id, body.clone());
+
+        let received = theirs.inbox.try_recv().expect("the watcher was told");
+        assert_eq!(
+            received,
+            body,
+            "what goes in is what comes out, byte for byte"
+        );
+        assert_eq!(
+            received[0],
+            crate::protocol::play::id::BLOCK_UPDATE as u8,
+            "and the first byte is still the packet id"
+        );
+    }
+
+    #[test]
     fn nobody_listening_is_not_a_problem() {
         let wire = Broadcast::new();
         wire.send_others(0, b"into the void".to_vec());

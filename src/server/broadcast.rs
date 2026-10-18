@@ -273,11 +273,11 @@ impl Broadcast {
         let Some(subject) = sinks
             .iter()
             .find(|s| s.id == id)
-            .map(|s| (s.entity_id, s.pos, s.yaw, s.pitch))
+            .map(|s| (s.entity_id, s.pos, s.yaw, s.pitch, s.uuid))
         else {
             return;
         };
-        let (subject_entity_id, subject_pos, subject_yaw, subject_pitch) = subject;
+        let (subject_entity_id, subject_pos, subject_yaw, subject_pitch, subject_uuid) = subject;
 
         let mut deliveries: Vec<(u64, Vec<u8>)> = Vec::new();
         for sink in sinks.iter_mut() {
@@ -305,20 +305,24 @@ impl Broadcast {
             let dy = subject_pos.1 - previous.pos.1;
             let dz = subject_pos.2 - previous.pos.2;
 
-            // What the client will actually see, after it rounds to 1/4096. A
-            // movement that rounds away has nothing to say and is not worth a
-            // packet, and the test has to be on the rounded value because that
-            // is the value the client ends up with.
-            let moved = [(dx, dy, dz)]
+            // What the client will actually see, after it rounds to 1/4096. All
+            // three axes: a movement of only one of them is still a movement.
+            //
+            // This used to be written as `[(dx, dy, dz)].iter().any(|a| a.0 …)`,
+            // which is an array of one tuple rather than three values, so it
+            // tested dx and nothing else. Walking and turning worked and
+            // falling and jumping did not, and the axis that failed was the
+            // one nobody was looking at while walking about on flat ground.
+            let moved = [dx, dy, dz]
                 .iter()
-                .any(|a| (a.0 * DELTA_SCALE).round() != 0.0);
+                .any(|axis| (axis * DELTA_SCALE).round() != 0.0);
             let turned = subject_yaw != previous.yaw || subject_pitch != previous.pitch;
             if !moved && !turned {
                 continue;
             }
 
             let mut body = Vec::new();
-            crate::protocol::play::write_move_entity_pos_rot(
+            let wrote = crate::protocol::play::write_move_entity_pos_rot(
                 &mut body,
                 subject_entity_id,
                 (dx, dy, dz),
@@ -326,6 +330,30 @@ impl Broadcast {
                 subject_pitch,
                 on_ground,
             );
+
+            if !wrote {
+                // Too far to be a delta, so say where they are instead. Putting
+                // the body down again is the honest answer: it carries an
+                // absolute position, so the client has nothing to add to
+                // anything it was told before.
+                //
+                // This is what a player who fell on arrival used to need, and
+                // did not get. Their fall was forty blocks of delta against a
+                // range of eight, so it was clamped, so the body came down
+                // eight blocks a packet, and once the fall was over there were
+                // no more y deltas to send and the body hung there for good.
+                body.clear();
+                crate::protocol::play::write_add_entity(
+                    &mut body,
+                    subject_entity_id,
+                    subject_uuid,
+                    crate::protocol::play::PLAYER_ENTITY_TYPE,
+                    subject_pos,
+                    subject_yaw,
+                    subject_pitch,
+                );
+            }
+
             deliveries.push((sink.id, body));
 
             sink.seen.insert(
@@ -455,7 +483,7 @@ mod tests {
     /// four arguments at each call keeps the tests about the queue, which is
     /// what they are actually about.
     fn join(wire: &Broadcast, name: &str) -> Registration {
-        wire.register(name, [0u8; 16], 1, crate::protocol::play::SPAWN)
+        wire.register(name, [0u8; 16], 1, crate::world::terrain::spawn_point())
     }
 
     /// Reads the x delta out of a `move_entity_pos_rot` body.
@@ -772,6 +800,63 @@ mod tests {
         let body = watcher.inbox.try_recv().expect("a turn is news");
         // Two VarInts, then six bytes of delta, then the two angles.
         assert_eq!(body[9], 64, "yaw east");
+    }
+
+    #[test]
+    fn a_movement_on_one_axis_only_is_still_a_movement() {
+        // Three axes, and the check that decides whether to send has to look at
+        // all of them. It once looked at the first one only, which is why
+        // walking worked, falling did not, and neither was noticed on flat
+        // ground.
+        for (name, to) in [
+            ("across x", (3.0, 64.0, 0.0)),
+            ("up and down y", (0.0, 70.0, 0.0)),
+            ("along z", (0.0, 64.0, -3.0)),
+            ("diagonally", (3.0, 67.0, -3.0)),
+        ] {
+            let wire = Broadcast::new();
+            let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
+            let watcher = wire.register("watcher", [2u8; 16], 2, (0.0, 64.0, 0.0));
+            wire.note_told(watcher.id, mover.id, (0.0, 64.0, 0.0), 0.0, 0.0);
+
+            wire.update_pose(mover.id, to, 0.0, 0.0);
+            wire.send_movement(mover.id, true);
+
+            assert!(
+                watcher.inbox.try_recv().is_ok(),
+                "moving {} is worth a packet",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn a_move_that_cannot_be_a_delta_arrives_as_a_position() {
+        // The self-healing path: a player who fell, or was teleported, or was
+        // simply too far, is put down again rather than nudged. This is what a
+        // player arriving used to need and did not get.
+        let wire = Broadcast::new();
+        let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
+        let watcher = wire.register("watcher", [2u8; 16], 2, (0.0, 64.0, 0.0));
+        wire.note_told(watcher.id, mover.id, (0.0, 64.0, 0.0), 0.0, 0.0);
+
+        // A fall of forty blocks, which no short can carry.
+        wire.update_pose(mover.id, (0.0, 24.0, 0.0), 0.0, 0.0);
+        wire.send_movement(mover.id, false);
+
+        let body = watcher
+            .inbox
+            .try_recv()
+            .expect("something was sent, even though it could not be a delta");
+        assert_eq!(
+            body[0],
+            crate::protocol::play::id::ADD_ENTITY as u8,
+            "so it is an add_entity, carrying the position outright"
+        );
+        assert!(
+            watcher.inbox.try_recv().is_err(),
+            "once"
+        );
     }
 
     #[test]

@@ -657,15 +657,6 @@ pub fn write_block_destruction(out: &mut Vec<u8>, breaker: i32, pos: (i32, i32, 
     out.push(stage as u8);
 }
 
-/// Where a player stands on arrival: the middle of a block at the surface, so
-/// inside it rather than on a seam between four.
-///
-/// Written as a constant because two places need to agree on it and neither can
-/// check the other: this connection puts the player here, and the connections of
-/// everybody else are told the player is here. If the two disagreed the player
-/// would appear somewhere they did not arrive.
-pub const SPAWN: (f64, f64, f64) = (0.5, 64.0, 0.5);
-
 /// The entity type id for a player, in the registry the client was sent.
 ///
 /// Read out of the data generator's report, where the entry carries an explicit
@@ -861,12 +852,28 @@ pub fn write_rotate_head(out: &mut Vec<u8>, entity_id: i32, yaw: f32) {
 /// hundred rather than of zero.
 const DELTA_SCALE: f64 = 4096.0;
 
+/// The largest movement a delta can express, in blocks.
+///
+/// Three shorts at 1/4096 of a block a unit: 32767 of them is a little under
+/// eight blocks. Anything past that does not fit in the packet, and it is the
+/// number that decides when a movement has to be sent as a position instead.
+pub const MAX_DELTA_BLOCKS: f64 = 32767.0 / DELTA_SCALE;
+
 /// Writes a `move_entity_pos_rot`: somebody moved.
 ///
 /// **A delta, not a position.** Each client is told how far the body moved since
 /// that client last heard about it, which is why the server has to remember what
 /// each observer was last told separately — two players watching the same walk
 /// have been told different amounts of it.
+///
+/// Returns false without writing anything when the movement is too large to be
+/// a delta, which is the case for anything past about eight blocks. The caller
+/// has to send the position outright instead. Clamping is not an option: it
+/// moves the body a plausible-looking amount that is simply wrong, and a body
+/// that is slightly wrong keeps being slightly wrong, because every later delta
+/// is measured from where the client thinks it is. A body that fell on arrival
+/// descends eight blocks per packet instead of forty and then stops, which is
+/// exactly what it did.
 ///
 /// The shape:
 ///
@@ -884,11 +891,6 @@ const DELTA_SCALE: f64 = 4096.0;
 /// per step, a tick count and three shorts, and this server never sends one:
 /// stepping is for smoothing a client's interpolation across a teleport or a
 /// long jump, and a player walking between two positions does not need it.
-///
-/// The deltas are shorts, so a single move is capped at 32 blocks. Walking
-/// further than that in one tick is not something a player does, and the
-/// alternative — a teleport packet, which the client animates as one — is the
-/// right tool for it rather than a clamped delta.
 pub fn write_move_entity_pos_rot(
     out: &mut Vec<u8>,
     entity_id: i32,
@@ -896,7 +898,14 @@ pub fn write_move_entity_pos_rot(
     yaw: f32,
     pitch: f32,
     on_ground: bool,
-) {
+) -> bool {
+    if [delta.0, delta.1, delta.2]
+        .iter()
+        .any(|a| a.abs() > MAX_DELTA_BLOCKS)
+    {
+        return false;
+    }
+
     VarInt(id::MOVE_ENTITY_POS_ROT).write(out);
     VarInt(entity_id).write(out);
 
@@ -904,15 +913,13 @@ pub fn write_move_entity_pos_rot(
     VarInt(if on_ground { 1 } else { 0 }).write(out);
 
     for axis in [delta.0, delta.1, delta.2] {
-        let scaled = (axis * DELTA_SCALE).round();
-        // Clamped rather than wrapped. A wrapped delta is a player teleported
-        // in the opposite direction, which is worse than not moving at all.
-        let clamped = scaled.clamp(i16::MIN as f64, i16::MAX as f64) as i16;
-        out.extend_from_slice(&clamped.to_be_bytes());
+        let scaled = (axis * DELTA_SCALE).round() as i16;
+        out.extend_from_slice(&scaled.to_be_bytes());
     }
 
     out.push(angle_byte(yaw));
     out.push(angle_byte(pitch));
+    true
 }
 
 /// One angle in the byte the protocol uses for it: 1/256 of a turn.
@@ -1211,6 +1218,58 @@ mod tests {
             1,
             "which is the entry count, and that is the whole failure"
         );
+    }
+
+    #[test]
+    fn a_delta_too_big_to_carry_is_refused_rather_than_truncated() {
+        // Three shorts at 1/4096 a block is a little under eight blocks. Past
+        // that the movement cannot be expressed, and writing a clamped one
+        // would be worse than writing none: the body would move a plausible
+        // wrong amount and stay there, because every later delta is measured
+        // from where the client now thinks it is.
+        let mut body = Vec::new();
+        assert!(
+            write_move_entity_pos_rot(&mut body, 1, (0.0, 0.0, 0.0), 0.0, 0.0, true),
+            "a movement that fits is written"
+        );
+        let before = body.len();
+        assert!(
+            !write_move_entity_pos_rot(&mut body, 1, (0.0, -40.0, 0.0), 0.0, 0.0, true),
+            "and a forty block fall is not, which is what a player arriving \
+             from forty blocks up used to send"
+        );
+        assert_eq!(
+            body.len(),
+            before,
+            "half a packet is worse than none: the client would read the missing \
+             entity id out of whatever followed"
+        );
+    }
+
+    #[test]
+    fn the_largest_delta_a_short_can_carry_is_about_eight_blocks() {
+        // Three shorts of 1/4096 a block. Not a round eight, because the shorts
+        // stop one short of it, and the number is the threshold that decides
+        // when a movement has to be sent as a position instead.
+        let computed = 32767.0 / DELTA_SCALE;
+        assert!(
+            (computed - MAX_DELTA_BLOCKS).abs() < f64::EPSILON,
+            "got {computed} against {MAX_DELTA_BLOCKS}"
+        );
+        assert!(
+            computed > 7.9 && computed < 8.0,
+            "and it really is just under eight"
+        );
+    }
+
+    #[test]
+    fn a_player_spawns_on_the_ground_and_not_forty_blocks_above_it() {
+        // The old constant was 64.0 and this terrain's surface is -16..24, so
+        // every player fell on arrival.
+        let (x, y, z) = crate::world::terrain::spawn_point();
+        let surface = crate::world::terrain::surface_y(x, z);
+        assert_eq!(y, surface as f64 + 1.0, "feet are one above the top solid block");
+        assert!(surface < 64, "and nowhere near where the old constant put them");
     }
 
     #[test]

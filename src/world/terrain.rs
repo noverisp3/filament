@@ -80,6 +80,33 @@ pub fn height_at(world_x: f64, world_z: f64) -> u32 {
     (combined * 40.0) as u32 + 48
 }
 
+/// The topmost solid block in a column, which is the block a player stands on.
+///
+/// Not a height above sea level and not a position: the *top solid* y. A
+/// player's feet go one above this, because this block occupies the space from
+/// this y up to the next one.
+pub fn surface_y(world_x: f64, world_z: f64) -> i32 {
+    MIN_BLOCK_Y + height_at(world_x, world_z) as i32
+}
+
+/// Where a player stands on arrival, in world coordinates.
+///
+/// Feet, which is one above the top solid block, and in the middle of a block
+/// rather than on the seam between four. This is the same number the client is
+/// told and the same number the other players are told this player is at; if
+/// those three disagreed the player would arrive in one place and be seen in
+/// another, which is a bug that looks like a rendering fault.
+///
+/// It used to be a constant at y=64, which is forty to eighty blocks above the
+/// ground this terrain actually produces. Players fell on arrival, and the fall
+/// was the second bug rather than the first: see the delta range in
+/// [`crate::server::broadcast`].
+pub fn spawn_point() -> (f64, f64, f64) {
+    const X: f64 = 0.5;
+    const Z: f64 = 0.5;
+    (X, surface_y(X, Z) as f64 + 1.0, Z)
+}
+
 /// Grass on top, a few blocks of dirt, stone below that.
 fn block_for_depth(blocks: &TerrainBlocks, y: i32, surface: i32) -> BlockId {
     match surface - y {

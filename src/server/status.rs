@@ -296,7 +296,7 @@ fn login(
         &name,
         profile_id.bytes(),
         entity_id,
-        crate::protocol::play::SPAWN,
+        crate::world::terrain::spawn_point(),
     );
     let player_id = registration.id;
     log.note(format!(
@@ -615,15 +615,16 @@ fn play(
     p::write_set_held_slot(&mut body, 0);
     send(&mut out, &body, "set_held_slot", &log)?;
 
-    // 5. The spawn. Halfway between block corners, so the player is inside a
-    //    block rather than on a seam, and above the sea level the login says.
-    let spawn = p::Movement::default();
-    debug_assert_eq!(
-        (spawn.x, spawn.y, spawn.z),
-        p::SPAWN,
-        "the position packet and the position other players are told about \
-         must be the same one"
-    );
+    // 5. The spawn, on the actual surface of the terrain rather than at a
+    //    fixed height. See `terrain::spawn_point`: the old constant was forty
+    //    to eighty blocks in the air over this terrain, so every player fell on
+    //    arrival, and the fall is what broke the other players' view of them.
+    let spawn = p::Movement {
+        x: crate::world::terrain::spawn_point().0,
+        y: crate::world::terrain::spawn_point().1,
+        z: crate::world::terrain::spawn_point().2,
+        ..p::Movement::default()
+    };
     let mut body = Vec::new();
     p::write_player_position(&mut body, 1, &spawn);
     send(&mut out, &body, "player_position", &log)?;
@@ -774,6 +775,7 @@ fn play(
     let player_uuid = registration.uuid;
     let player_yaw = spawn.yaw;
     let player_pitch = spawn.pitch;
+    let player_spawn = (spawn.x, spawn.y, spawn.z);
 
     if !others.iter().any(|o| o.id != player_id) {
         log.note("first player on the server; nobody to be introduced to");
@@ -788,7 +790,7 @@ fn play(
             entity_id,
             player_uuid,
             p::PLAYER_ENTITY_TYPE,
-            p::SPAWN,
+            player_spawn,
             player_yaw,
             player_pitch,
         );
@@ -801,7 +803,7 @@ fn play(
             if other.id != player_id {
                 session
                     .wire
-                    .note_told(other.id, player_id, p::SPAWN, player_yaw, player_pitch);
+                    .note_told(other.id, player_id, player_spawn, player_yaw, player_pitch);
             }
         }
 
@@ -1513,8 +1515,8 @@ mod tests {
         // break look like two. The block update is the opposite case and does go
         // to them: it says what is there now, and their guess may be wrong.
         let wire = crate::server::broadcast::Broadcast::new();
-        let breaker = wire.register("breaker", [1u8; 16], 1, crate::protocol::play::SPAWN);
-        let watcher = wire.register("watcher", [2u8; 16], 2, crate::protocol::play::SPAWN);
+        let breaker = wire.register("breaker", [1u8; 16], 1, crate::world::terrain::spawn_point());
+        let watcher = wire.register("watcher", [2u8; 16], 2, crate::world::terrain::spawn_point());
 
         let mut update = Vec::new();
         crate::protocol::play::write_block_update(&mut update, 1, 2, 3, 0);

@@ -56,8 +56,8 @@ pub enum ContainerInput {
 }
 
 impl ContainerInput {
-    fn from_byte(byte: u8) -> Self {
-        match byte {
+    fn from_id(id: i32) -> Self {
+        match id {
             0 => Self::Pickup,
             1 => Self::QuickMove,
             2 => Self::Swap,
@@ -65,7 +65,7 @@ impl ContainerInput {
             4 => Self::Throw,
             5 => Self::QuickCraft,
             6 => Self::PickupAll,
-            other => Self::Unknown(other),
+            other => Self::Unknown(other.clamp(0, u8::MAX as i32) as u8),
         }
     }
 
@@ -124,7 +124,13 @@ impl ContainerClickPacket {
         let state_id = read_varint(&mut body)?;
         let slot = read_short(&mut body)?;
         let button = read_byte(&mut body)?;
-        let input = ContainerInput::from_byte(read_byte(&mut body)?);
+        // A VarInt, not a byte. `ContainerInput.STREAM_CODEC` is
+        // `ByteBufCodecs.idMapper`, which reads and writes a VarInt. Every id
+        // the game has is under 128 so it happens to occupy one byte either way,
+        // which makes the difference invisible until the first id that does not
+        // -- and it is worth reading the way it is written rather than the way
+        // that happens to work today.
+        let input = ContainerInput::from_id(read_varint(&mut body)?);
 
         let count = read_count(&mut body, MAX_CHANGED)?;
         let mut changed = Vec::with_capacity(count.min(64) as usize);
@@ -225,6 +231,15 @@ fn read_byte(body: &mut &[u8]) -> Result<u8, DecodeError> {
     Ok(byte)
 }
 
+/// A `Short` as the game writes one.
+///
+/// Big endian. `FriendlyByteBuf.writeShort` calls netty's `writeShort`, which
+/// is big endian, and the `ShortLE` variants are the separate little-endian ones
+/// -- so a slot read little-endian is a different number, usually out of range,
+/// and the click that follows it is read from the wrong place. This file was the
+/// only one in the crate reading them the other way round, which is exactly how
+/// a lone wrong endianness survives: nothing local looks odd, the packet simply
+/// stops making sense three fields later.
 fn read_short(body: &mut &[u8]) -> Result<i16, DecodeError> {
     if body.len() < 2 {
         return Err(DecodeError::UnexpectedEof {
@@ -234,7 +249,7 @@ fn read_short(body: &mut &[u8]) -> Result<i16, DecodeError> {
     }
     let (head, rest) = body.split_at(2);
     *body = rest;
-    Ok(i16::from_le_bytes([head[0], head[1]]))
+    Ok(i16::from_be_bytes([head[0], head[1]]))
 }
 
 fn skip(body: &mut &[u8], n: usize) -> Result<(), DecodeError> {

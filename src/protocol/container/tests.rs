@@ -8,7 +8,7 @@ fn varint(n: i32) -> Vec<u8> {
 }
 
 fn short(n: i16) -> Vec<u8> {
-    n.to_le_bytes().to_vec()
+    n.to_be_bytes().to_vec()
 }
 
 /// One `HashedStack`: present, an item, a count, and the two empty component
@@ -41,7 +41,7 @@ fn click_bytes(
     out.extend(varint(state_id));
     out.extend(short(slot));
     out.push(button);
-    out.push(match input {
+    out.extend(varint(match input {
         ContainerInput::Pickup => 0,
         ContainerInput::QuickMove => 1,
         ContainerInput::Swap => 2,
@@ -49,8 +49,8 @@ fn click_bytes(
         ContainerInput::Throw => 4,
         ContainerInput::QuickCraft => 5,
         ContainerInput::PickupAll => 6,
-        ContainerInput::Unknown(_) => unreachable!(),
-    });
+        ContainerInput::Unknown(other) => other as i32,
+    }));
     out.extend(varint(changed.len() as i32));
     for (slot, stack) in changed {
         out.extend(short(*slot));
@@ -217,9 +217,36 @@ fn a_click_truncated_mid_field_is_refused() {
 }
 
 #[test]
+fn a_short_is_read_the_way_the_game_writes_one() {
+    // Big endian, because `FriendlyByteBuf.writeShort` is netty's `writeShort`
+    // and netty has separate `ShortLE` methods for the other order. Read the
+    // other way round, a slot is a different number -- 36 becomes 9216 -- and
+    // every field after it is read from the wrong place, which is what the log
+    // showed: a click that would not read, three fields in.
+    assert_eq!(36i16.to_be_bytes(), [0x00, 0x24]);
+    assert_eq!(read_set_carried_item(&[0x00, 0x24]).expect("reads"), 36);
+    assert_eq!(
+        read_set_carried_item(&36i16.to_le_bytes()),
+        Ok(9216),
+        "and read little-endian it is a different number entirely"
+    );
+    assert_ne!(read_set_carried_item(&[0x00, 0x24]).expect("reads"), 9216);
+}
+
+#[test]
+fn a_click_with_a_real_hotbar_slot_reads_the_slot_it_names() {
+    // The whole shape, with the slot at the offset a click puts it, so a wrong
+    // endianness here cannot pass on the field alone.
+    let bytes = click_bytes(0, 1, 36, 0, ContainerInput::Pickup, &[], None);
+    let slot_at = 1 + 1; // containerId, stateId
+    assert_eq!(&bytes[slot_at..slot_at + 2], &[0x00, 0x24], "36 is 0x0024");
+    assert_eq!(ContainerClickPacket::read(&bytes).expect("reads").slot, 36);
+}
+
+#[test]
 fn the_selected_hotbar_slot_is_one_short() {
-    assert_eq!(read_set_carried_item(&36i16.to_le_bytes()).expect("reads"), 36);
-    assert_eq!(read_set_carried_item(&44i16.to_le_bytes()).expect("reads"), 44);
+    assert_eq!(read_set_carried_item(&36i16.to_be_bytes()).expect("reads"), 36);
+    assert_eq!(read_set_carried_item(&44i16.to_be_bytes()).expect("reads"), 44);
     assert!(read_set_carried_item(&[0]).is_err(), "and a byte is not a slot");
     assert!(read_set_carried_item(&[]).is_err(), "nor is nothing");
 }

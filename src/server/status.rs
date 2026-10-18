@@ -1281,7 +1281,22 @@ fn play(
                         ));
                     }
                     Ok(_) => {}
-                    Err(e) => log.error(format!("a click would not read: {e}")),
+                    Err(e) => {
+                        // The bytes as well as the complaint. A parser that is
+                        // wrong says where it stopped and nothing about what it
+                        // was looking at, which is how a short read the wrong
+                        // way round stayed a mystery for a whole session.
+                        let shown = frame
+                            .iter()
+                            .take(24)
+                            .map(|b| format!("{b:02x}"))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        log.error(format!(
+                            "a click would not read: {e}; {} bytes: {shown}",
+                            frame.len()
+                        ));
+                    }
                 }
             }
 

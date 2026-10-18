@@ -12,7 +12,8 @@ use std::thread;
 
 use crate::protocol::frame::{FrameDecoder, FrameEncoder, FrameError};
 use crate::protocol::handshake::{ClientIntent, ClientIntention, ServerStatus, status_response_body};
-use crate::protocol::item::{self, Inventory, ItemStack};
+use crate::protocol::item::{self, slots, Inventory, ItemStack};
+use crate::protocol::container as c;
 use crate::protocol::{VarInt, VarLong};
 
 use super::log::{next_connection_id, packet_name, ConnLog};
@@ -1064,6 +1065,19 @@ fn play(
     // what one player is carrying is not on anyone else's screen.
     let mut slots: Vec<(usize, Option<ItemStack>)> = Vec::new();
 
+    // What is on the cursor: the stack a player picked up but has not put down.
+    //
+    // It lives nowhere in the window, so it is the one thing that can be held
+    // without the server's slot numbering knowing, and it is what nearly every
+    // click changes. A server that did not keep it would answer the second click
+    // of a drag as though the first had never happened.
+    let mut carried: Option<ItemStack> = None;
+
+    // Which of the nine is selected. The client sends this every time the wheel
+    // turns, and it is the only way the server finds out which block a right
+    // click is about to place.
+    let mut held_slot: u16 = slots::HOTBAR_START as u16;
+
     // The cache center the client was last told about. The client keeps chunks
     // only within the view distance of this point, so it has to move with the
     // player: left at the spawn forever, the world renders as a fixed window
@@ -1162,7 +1176,117 @@ fn play(
                 }
             }
 
+            // Which of the nine is selected.
+            //
+            // One short, and the only way the server ever hears which hotbar slot
+            // the player is on -- the client keeps it to itself otherwise, and
+            // puts the right hand's block down without the server knowing which
+            // block that was.
+            if id == p::id::SERVERBOUND_SET_CARRIED_ITEM
+                && let Ok(slot) = crate::protocol::container::read_set_carried_item(&frame)
+            {
+                // Nine windows slots, 36 to 44. Anything else is not a hotbar
+                // slot whatever it claims to be, and is not adopted as one.
+                if (slots::HOTBAR_START..slots::HOTBAR_END).contains(&(slot as usize))
+                    && slot != held_slot
+                {
+                    held_slot = slot;
+                    let held = inventory
+                        .get(slot as usize)
+                        .map_or("nothing".into(), |s| {
+                            format!(
+                                "{} x{}",
+                                crate::generated::item_name(s.item as u32).unwrap_or("?"),
+                                s.count
+                            )
+                        });
+                    log.note(format!("holding slot {slot}: {held}"));
+                }
+            }
+
+            // A click in the player's own window.
+            //
+            // The client does not describe the click, it reports the result of
+            // it: every slot that changed goes back with its new contents, along
+            // with whatever is left on the cursor. So this server never has to
+            // understand a drag to know what a drag did.
+            //
+            // It does not mean the client gets the last word. Vanilla reads
+            // those reported slots as a guess and compares:
+            //
+            // ```java
+            // this.player.containerMenu.suppressRemoteUpdates();
+            // this.player.containerMenu.clicked(slotIndex, buttonNum, containerInput, player);
+            // for (Entry<HashedStack> e : fastIterable(packet.changedSlots())) {
+            //     this.player.containerMenu.setRemoteSlotUnsafe(e.getIntKey(), e.getValue());
+            // }
+            // this.player.containerMenu.setRemoteCarried(packet.carriedItem());
+            // this.player.containerMenu.resumeRemoteUpdates();
+            // ```
+            //
+            // and then sends its own value wherever the two disagree. So the
+            // server computes the click, the player is only corrected where the
+            // two copies differ, and the server stays the authority -- which is
+            // what stops a hotbar the server no longer agrees with.
+            if id == p::id::SERVERBOUND_CONTAINER_CLICK {
+                match crate::protocol::container::ContainerClickPacket::read(&frame) {
+                    Ok(packet) if packet.container_id == slots::CONTAINER_ID => {
+                        let got = c::click(
+                            &mut inventory,
+                            &mut carried,
+                            packet.slot,
+                            packet.button,
+                            packet.input,
+                        );
+
+                        // The answer, plus wherever the client's own guess was
+                        // wrong. Reporting a slot the client already has right
+                        // is a packet per click for no change; leaving one the
+                        // client has wrong is a window that stops matching.
+                        let corrections =
+                            corrections_needed(&got, &packet.changed);
+                        slots.extend(corrections.iter().copied());
+
+                        match got {
+                            Some(got) => {
+                                if got.carried != packet.carried {
+                                    // The cursor is not a slot, so it cannot be
+                                    // corrected by naming one. Saying so in the
+                                    // log is the honest answer for now.
+                                    log.note(format!(
+                                        "cursor is {}, the client thought {}",
+                                        describe(carried),
+                                        describe(packet.carried)
+                                    ));
+                                }
+                                if let Some(dropped) = got.dropped {
+                                    log.note(format!(
+                                        "dropped {} x{} -- there are no item entities yet",
+                                        crate::generated::item_name(dropped.item as u32)
+                                            .unwrap_or("?"),
+                                        dropped.count
+                                    ));
+                                }
+                            }
+                            None => log.note(format!(
+                                "refused {:?} on slot {}",
+                                packet.input, packet.slot
+                            )),
+                        }
+                    }
+                    Ok(packet) if packet.container_id != slots::CONTAINER_ID => {
+                        log.note(format!(
+                            "a click on window {}, which is not this player's",
+                            packet.container_id
+                        ));
+                    }
+                    Ok(_) => {}
+                    Err(e) => log.error(format!("a click would not read: {e}")),
+                }
+            }
+
             // Breaking a block.
+
             //
             // Three actions, and they do three different things. START is the
             // button going down: the crack starts, and the others are told it
@@ -1694,6 +1818,54 @@ fn wanted_positions(radius: i32) -> Vec<(i32, i32)> {
         }
     }
     out
+}
+
+/// Which slots the server has to send back, and why only those.
+///
+/// Vanilla compares the client's guess against its own and sends a slot only
+/// where the two differ (`AbstractContainerMenu.synchronizeSlotToRemote`):
+///
+/// ```java
+/// RemoteSlot remoteExpected = this.remoteSlots.get(i);
+/// if (!remoteExpected.matches(current)) {
+///     remoteExpected.force(current);
+///     this.synchronizer.sendSlotChange(this, i, currentCopy.get());
+/// }
+/// ```
+///
+/// So a click the player got right is silent, and a click the player got wrong
+/// is corrected rather than argued with -- the client keeps the last word on
+/// what it draws, the server keeps it on what is true.
+fn corrections_needed(
+    got: &Option<c::Click>,
+    reported: &[(i16, Option<ItemStack>)],
+) -> Vec<(usize, Option<ItemStack>)> {
+    let Some(got) = got else { return Vec::new() };
+    got.changed
+        .iter()
+        .filter(|(slot, stack)| {
+            // A slot the client did not mention at all has not been guessed at,
+            // so it is told rather than trusted.
+            reported
+                .iter()
+                .find(|(s, _)| *s as usize == *slot)
+                .is_none_or(|(_, claimed)| claimed != stack)
+        })
+        .copied()
+        .collect()
+}
+
+/// A stack in words, for the log.
+fn describe(stack: Option<ItemStack>) -> String {
+    stack
+        .map(|s| {
+            format!(
+                "{} x{}",
+                crate::generated::item_name(s.item as u32).unwrap_or("?"),
+                s.count
+            )
+        })
+        .unwrap_or_else(|| "nothing".into())
 }
 
 /// Whether a chunk still needs going into the batch being built.

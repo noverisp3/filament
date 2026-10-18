@@ -17,8 +17,13 @@
 //! claim to.
 //!
 //! Ids come from the same report the block states do, `extracted/registries.json`,
-//! where `minecraft:item` is index 484 for dirt and 613 for grass. They are not
-//! block state ids and not the same numbers.
+//! where `minecraft:item` gives dirt 55 and grass block 54. They are not block
+//! state ids and not the same numbers -- dirt is block state 10.
+//!
+//! Nor are they the entries' places in that report: it is keyed by identifier,
+//! so it arrives alphabetically and its 613th line is light grey stained glass,
+//! which is also item 613. The number an item goes by is the entry's own
+//! `protocol_id`.
 
 
 /// A stack of one item type.

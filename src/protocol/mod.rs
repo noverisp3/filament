@@ -13,6 +13,7 @@ pub mod configuration;
 pub mod frame;
 pub mod handshake;
 pub mod item;
+pub mod container;
 pub mod login;
 pub mod play;
 pub mod primitive;

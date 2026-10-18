@@ -363,6 +363,90 @@ fn a_tail_wait_collects_each_chunk_once_whatever_order_the_pool_finishes_in() {
     );
 }
 
+#[test]
+fn a_click_the_player_got_right_costs_no_packets() {
+    // Vanilla sends a slot only where the client's guess and the server's answer
+    // differ. Sending it anyway would be a packet per click for a redraw the
+    // client has already done.
+    let mut inv = Inventory::empty();
+    inv.set(slots::HOTBAR_START, Some(ItemStack::new(55, 20)));
+    let mut carried = None;
+    let got = c::click(&mut inv, &mut carried, slots::HOTBAR_START as i16, 0, c::ContainerInput::Pickup);
+
+    let reported = vec![(slots::HOTBAR_START as i16, None)];
+    assert_eq!(
+        corrections_needed(&got, &reported),
+        Vec::new(),
+        "the client already has this right"
+    );
+    assert_eq!(carried, Some(ItemStack::new(55, 20)));
+}
+
+#[test]
+fn a_click_the_player_got_wrong_is_corrected() {
+    // The server stays the authority. A player cannot decide what is in a slot;
+    // it can only be told.
+    let mut inv = Inventory::empty();
+    inv.set(slots::HOTBAR_START, Some(ItemStack::new(55, 20)));
+    let mut carried = None;
+    let got = c::click(&mut inv, &mut carried, slots::HOTBAR_START as i16, 0, c::ContainerInput::Pickup);
+
+    // The client thinks the slot still holds the stack it just picked up.
+    let wrong = vec![(slots::HOTBAR_START as i16, Some(ItemStack::new(55, 20)))];
+    assert_eq!(
+        corrections_needed(&got, &wrong),
+        vec![(slots::HOTBAR_START, None)],
+        "the slot is sent back empty, as it is"
+    );
+}
+
+#[test]
+fn a_click_that_reports_a_slot_the_server_did_not_touch_is_still_told() {
+    // The client sent a guess for a slot the server's answer says nothing about.
+    // Trusting it would let a player put whatever they liked in a slot.
+    let mut inv = Inventory::empty();
+    inv.set(12, Some(ItemStack::new(55, 5)));
+    let mut carried = None;
+    let got = c::click(&mut inv, &mut carried, 12, 0, c::ContainerInput::Swap);
+
+    // The client claims the hotbar slot holds a stack of stone.
+    let claims = vec![(36i16, Some(ItemStack::new(1, 64)))];
+    let fixes = corrections_needed(&got, &claims);
+
+    // The number key moved the dirt up to the hotbar and left slot 12 empty, so
+    // those are what goes back -- and what the client claimed is ignored.
+    assert_eq!(
+        fixes,
+        vec![(36, Some(ItemStack::new(55, 5))), (12, None)],
+        "the server's answer wins over the client's guess"
+    );
+    assert_eq!(inv.get(36), Some(ItemStack::new(55, 5)), "the dirt went up");
+    assert_eq!(inv.get(12), None, "and the slot it left is empty");
+}
+
+#[test]
+fn a_click_that_was_refused_corrects_nothing() {
+    // Nothing was computed, so there is no answer to disagree with -- and the
+    // client's guess is not adopted either. The slot keeps whatever it had.
+    let mut inv = Inventory::empty();
+    let mut carried = None;
+    let got = c::click(&mut inv, &mut carried, 0, 0, c::ContainerInput::Pickup);
+    assert!(got.is_none(), "the crafting slot has nothing behind it");
+    let claims = vec![(0i16, Some(ItemStack::new(1, 64)))];
+    assert_eq!(corrections_needed(&got, &claims), Vec::new());
+    assert_eq!(inv.get(0), None, "and the server invented nothing");
+}
+
+#[test]
+fn a_stack_is_described_in_words_for_the_log() {
+    assert_eq!(describe(None), "nothing");
+    assert_eq!(describe(Some(ItemStack::new(55, 20))), "minecraft:dirt x20");
+    assert_eq!(
+        describe(Some(ItemStack::new(54, 1))),
+        "minecraft:grass_block x1"
+    );
+}
+
 /// The palette the generator makes, so the hardness table can be keyed on it.
 fn terrain() -> crate::world::terrain::TerrainBlocks {
     crate::world::terrain::register_terrain(&mut crate::world::block::BlockRegistry::new())

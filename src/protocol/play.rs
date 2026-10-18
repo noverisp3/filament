@@ -91,6 +91,13 @@ pub mod id {
     pub const BLOCK_DESTRUCTION: i32 = 5;
     // Putting another player into this client's world.
     pub const ADD_ENTITY: i32 = 1;
+    // A click in the window the player is holding. The client reports the result
+    // of the click rather than describing it, so this is how the server finds
+    // out that a player moved something.
+    pub const SERVERBOUND_CONTAINER_CLICK: i32 = 18;
+    // Which of the nine hotbar slots is selected: one short, and the only time
+    // the server hears which item the player is holding.
+    pub const SERVERBOUND_SET_CARRIED_ITEM: i32 = 54;
     // Taking them out of it again.
     pub const REMOVE_ENTITIES: i32 = 78;
     // Which way they are looking.

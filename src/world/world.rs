@@ -43,6 +43,22 @@ pub struct World {
     registry: BlockRegistry,
     terrain: TerrainBlocks,
     chunks: HashMap<ChunkPos, Chunk>,
+    /// What has been changed, and where, separately from the chunks themselves.
+    ///
+    /// A chunk is thrown away the moment the last player walks away from it and
+    /// rebuilt from the noise when somebody comes back, so an edit that lives
+    /// only in the chunk is gone by then. The report from the field was a hole
+    /// that filled itself back in: both players watched a block go, and walking
+    /// back to it found it solid again.
+    ///
+    /// The edits are kept out here, keyed by chunk, and replayed onto a chunk as
+    /// it arrives. The journal outlives the chunk, so the chunk can be as
+    /// disposable as it likes.
+    ///
+    /// It grows with what players have done and not with what they have walked
+    /// past, which is the thing that matters: a server nobody edited has an
+    /// empty one no matter how far anyone travelled.
+    edits: HashMap<ChunkPos, Vec<(BlockPos, BlockId)>>,
 }
 
 impl Clone for World {
@@ -54,6 +70,7 @@ impl Clone for World {
             registry: self.registry.clone(),
             terrain: self.terrain,
             chunks: self.chunks.clone(),
+            edits: self.edits.clone(),
         }
     }
 }
@@ -72,6 +89,7 @@ impl World {
             registry,
             terrain,
             chunks: HashMap::new(),
+            edits: HashMap::new(),
         }
     }
 
@@ -90,11 +108,11 @@ impl World {
             return true;
         }
         let chunk = generate_chunk(pos, &self.terrain);
-        self.chunks.insert(pos, chunk);
+        self.store_chunk(pos, chunk);
         false
     }
 
-    /// Stores a chunk that was generated somewhere else.
+    /// Stores a chunk that was generated somewhere else, or right here.
     ///
     /// The point of the method is that generating and storing are separate
     /// jobs. Generating is a pure function of the position and the palette, so
@@ -102,8 +120,40 @@ impl World {
     /// insert that has to happen on the thread that owns the map. Splitting them
     /// is what lets a connection ask for a chunk without waiting for the
     /// world's thread to have finished building it.
+    ///
+    /// It is also the one place a chunk enters the world, so it is the one place
+    /// that has to remember what was done to the last one. `ensure_chunk` used
+    /// to insert straight into the map, which meant the generator's chunk came
+    /// back without the edits and a hole filled itself in whenever the slow
+    /// path was the one that rebuilt it.
     pub fn store_chunk(&mut self, pos: ChunkPos, chunk: Chunk) {
+        let mut chunk = chunk;
+        // Replay whatever was done here before. Without this the chunk comes
+        // back as the noise made it and a hole is a hole again.
+        if let Some(edits) = self.edits.get(&pos) {
+            for (at, block) in edits {
+                chunk.set_block(*at, *block);
+            }
+        }
         self.chunks.insert(pos, chunk);
+    }
+
+    /// What has been changed in each chunk, and how much.
+    ///
+    /// This is the whole of what a server needs to keep to have a world that
+    /// survives its players walking away from it. It is exposed because it is
+    /// the part that would be written to disk, and because a test needs to see
+    /// that an edit was remembered rather than only that it was applied.
+    pub fn edits(&self) -> impl Iterator<Item = (ChunkPos, usize)> + '_ {
+        self.edits
+            .iter()
+            .map(|(pos, edits)| (*pos, edits.len()))
+            .filter(|(_, n)| *n > 0)
+    }
+
+    /// How many edits are remembered, over every chunk.
+    pub fn edit_count(&self) -> usize {
+        self.edits.values().map(|e| e.len()).sum()
     }
 
     /// Drops a chunk and its edits.
@@ -135,6 +185,7 @@ impl World {
             registry,
             terrain,
             chunks,
+            edits: HashMap::new(),
         }
     }
 
@@ -321,6 +372,16 @@ impl World {
             .collect();
         chunks.sort_by_key(|chunk| (chunk.x, chunk.z));
         chunks.dedup();
+
+        // Remembered outside the chunk, which is the whole point: the chunk is
+        // thrown away when the last player walks away from it and this is not.
+        // Recorded after the write has been accepted, so a refused edit is not
+        // remembered as though it had happened.
+        let journal = self.edits.entry(chunk_pos).or_default();
+        match journal.iter_mut().find(|(at, _)| *at == pos) {
+            Some(entry) => entry.1 = block,
+            None => journal.push((pos, block)),
+        }
 
         Some(BlockEdit { chunks, sections })
     }

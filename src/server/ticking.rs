@@ -93,6 +93,10 @@ pub enum Command {
     TerrainBlocks { reply: Sender<TerrainBlocks> },
     /// How many chunks the world is holding.
     ChunkCount { reply: Sender<usize> },
+    /// Every remembered block edit, by the chunk it was made in.
+    Edits {
+        reply: Sender<Vec<(ChunkPos, usize)>>,
+    },
 }
 
 /// What a connection holds: a way to ask, not a world.
@@ -211,6 +215,20 @@ impl WorldHandle {
     /// How many chunks the world holds, for the log and for tests.
     pub fn chunk_count(&self) -> Option<usize> {
         self.ask(|reply| Command::ChunkCount { reply })
+    }
+
+    /// How many block edits are remembered, and which chunks hold them.
+    ///
+    /// This is the whole of what a server needs to keep to have a world that
+    /// outlives its chunks. It is asked for rather than held here because the
+    /// edits live on the thread that owns the world.
+    pub fn edits(&self) -> Option<Vec<(ChunkPos, usize)>> {
+        self.ask(|reply| Command::Edits { reply })
+    }
+
+    /// The number of remembered edits, over every chunk.
+    pub fn edit_count(&self) -> Option<usize> {
+        self.edits().map(|list| list.iter().map(|(_, n)| n).sum())
     }
 }
 
@@ -449,6 +467,9 @@ fn apply(world: &mut World, command: Command, pool: &Pool) {
 
         Command::ChunkCount { reply } => {
             let _ = reply.send(world.chunk_count());
+        }
+        Command::Edits { reply } => {
+            let _ = reply.send(world.edits().collect());
         }
     }
 }

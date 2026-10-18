@@ -108,8 +108,120 @@ fn orphan_after_shutdown() -> Option<usize> {
     handle.chunk_count()
 }
 
-#[test]
-fn asking_for_a_chunk_that_is_not_there_returns_at_once() {
+    #[test]
+    fn a_broken_block_is_still_broken_after_the_chunk_is_thrown_away_and_rebuilt() {
+        // The report from the field was a hole that fills itself back in: both
+        // players watch a block go, and walking back to it finds it solid
+        // again. The visible half of that is a block update and works. This is
+        // the other half -- the chunk being written out again afterwards.
+        //
+        // A chunk is thrown away when the last player walks away from it and
+        // rebuilt from the noise when somebody comes back, so an edit kept only
+        // in the chunk is gone by then. Which is exactly what happened.
+        let handle = spawn();
+        let pos = ChunkPos { x: 0, z: 0 };
+
+        let at = |y: i32| BlockPos::new(8, y, 8);
+        let before = handle.chunk(pos).expect("the chunk builds");
+
+        // The topmost block that is not air, asked of the world that owns it.
+        let air = World::empty().terrain_blocks().air;
+        let mut surface = None;
+        for y in (crate::world::chunk::MIN_BLOCK_Y..200).rev() {
+            if handle
+                .world_block(at(y))
+                .flatten()
+                .is_some_and(|b| b != air)
+            {
+                surface = Some(y);
+                break;
+            }
+        }
+        let surface = surface.expect("there is ground to break");
+
+        let broken = handle
+            .break_block(at(surface))
+            .expect("a chunk was there")
+            .expect("something was there to break");
+        assert_eq!(broken, crate::protocol::chunk::AIR_STATE_ID, "left as air");
+
+        let hole = handle.chunk(pos).expect("still there");
+        assert_ne!(hole, before, "and the chunk shows it while it is loaded");
+
+        // Now the part that was wrong: walk far enough away that it is dropped,
+        // and come back.
+        handle.forget(pos);
+        let rebuilt = handle.chunk(pos).expect("it builds again");
+
+        assert_eq!(
+            rebuilt, hole,
+            "the same hole after the chunk has been thrown away and made again, \
+             which is what walking back into it needs"
+        );
+    }
+
+    #[test]
+    fn an_untouched_chunk_comes_back_identical_and_answers_to_nothing() {
+        // The journal grows with what players have done, not with where they
+        // have walked. A server nobody edited has an empty one.
+        let handle = spawn();
+        let pos = ChunkPos { x: 1, z: 1 };
+
+        let first = handle.chunk(pos).expect("the chunk builds");
+        handle.forget(pos);
+        let second = handle.chunk(pos).expect("and builds again");
+
+        assert_eq!(
+            first, second,
+            "the same position generates the same ground, nothing having been \
+             done to it"
+        );
+    }
+
+    #[test]
+    fn an_edit_is_remembered_by_the_chunk_it_happened_in() {
+        let handle = spawn();
+        let pos = ChunkPos { x: 2, z: 2 };
+        handle.chunk(pos).expect("the chunk builds");
+
+        assert_eq!(
+            handle.edit_count(),
+            Some(0),
+            "building a chunk is not an edit"
+        );
+
+        let air = World::empty().terrain_blocks().air;
+        let mut surface = None;
+        for y in (crate::world::chunk::MIN_BLOCK_Y..200).rev() {
+            if handle
+                .world_block(BlockPos::new(40, y, 40))
+                .flatten()
+                .is_some_and(|b| b != air)
+            {
+                surface = Some(y);
+                break;
+            }
+        }
+        let surface = surface.expect("ground");
+        handle
+            .break_block(BlockPos::new(40, surface, 40))
+            .expect("a chunk")
+            .expect("a block");
+
+        assert_eq!(
+            handle.edit_count(),
+            Some(1),
+            "and one edit is remembered, under the chunk it happened in"
+        );
+        assert_eq!(
+            handle.edits(),
+            Some(vec![(pos, 1)]),
+            "which is where it will be written from"
+        );
+    }
+
+    #[test]
+    fn asking_for_a_chunk_that_is_not_there_returns_at_once() {
     // The property the whole pool exists for: a connection asking for
     // terrain it has not got must not stand there waiting for it. It got
     // this far by having no way to ask without waiting, which meant a player

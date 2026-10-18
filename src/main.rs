@@ -77,7 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::note(format!("protocol {}", server::PROTOCOL_VERSION));
     log::note("max players 20");
     log::note("status, login, configuration and the start of play are implemented");
-    log::note("chunks carry generated terrain; nothing is persisted yet");
+    log::note(                "chunks carry generated terrain; edits survive a restart: not yet");
     if verbose {
         log::note("verbose: every packet will be logged");
     }

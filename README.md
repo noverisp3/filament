@@ -58,44 +58,66 @@ Once, from an elevated prompt.
 
 ## Milestones
 
-Protocol and world:
+Grouped by what they are about, not by when they were done.
+
+### The world
 
 - [x] Chunk storage in paletted sections
-- [x] Skylight propagation across sections and chunks
+- [x] Sky light across sections and chunks
 - [x] Greedy meshing
-- [x] Raycast, place and break
+- [x] Raycasting, for the reach check
+- [x] Breaking a block
 - [x] Block state table, generated from 26.3
+- [x] Terrain from two octaves of value noise
+
+### The wire
+
 - [x] Framing, compression, primitives
 - [x] Status, so the server appears in the browser
 - [x] Offline login
 - [x] Configuration: feature flags, registries, tags
 - [x] Play phase: spawn and world setup
-- [x] Chunks sent to a client, generated on the fly
+
+### Getting the world to a client
+
+- [x] Chunks sent, and generated on the fly
 - [x] Chunks follow the player as they walk
+- [x] A chunk that is dropped and rebuilt keeps what was changed in it
 
-Two players on the same server:
+### Two players on one server
 
-- [x] Breaking a block is seen by everyone else, in real time
+- [x] Breaking a block, seen by everyone in real time
 - [x] Crack stages paced by the block's own hardness
-- [x] Dust and sound on the break, and neither is doubled for the breaker
-- [x] Players see each other, and each other's names
+- [x] Dust and sound on the break
+- [x] Players, and their names
 - [x] Movement, body rotation and head rotation
+- [x] Swinging and punching
+- [x] Crouching, which in 26.3 is a pose rather than a flag
 - [x] Bodies come and go with the observer's view distance
-- [x] Playable over LAN with two clients
 
-Still to do:
+### Running one
 
-- [ ] Persistence — nothing survives a restart
-- [ ] The tick loop, and the world clock (`set_time` is not written)
+- [x] Every interface by default, with the address printed
+- [x] Readable logs, and a clean Ctrl+C
+- [x] Terrain built in parallel, so walking does not freeze a player
+- [x] Every packet id checked against the data generator's report
+
+### Not yet
+
+- [ ] Persistence to disk. Edits survive a chunk being dropped; they do not
+      survive a restart, and that is the one a player notices.
+- [ ] The tick loop, and the world clock
 - [ ] Inventory, and placing blocks
 - [ ] Mobs
 - [ ] Authentication
 
-576 tests. A client connects, negotiates, and gets a world of generated terrain:
+597 tests. A client connects, negotiates, and gets a world of generated terrain:
 grass on top, dirt under it, stone below, hills from two octaves of value noise.
 A second client joins the same world and sees the first one walk about.
 
-Two things are worth knowing about the terrain. It is generated on request and
-nothing is stored, so it costs nothing to start and is forgotten on exit. And the
-generator's five-block registry and the game's thirty-five thousand block states
-are unrelated, so blocks are mapped between them on the way out.
+Two things are worth knowing about the terrain. It is generated on request, and a
+chunk is thrown away when the last player walks away from it, so nothing about it
+survives being dropped — what does survive is a journal of the blocks players have
+changed, replayed onto a chunk as it comes back. And the generator's five-block
+registry and the game's thirty-five thousand block states are unrelated, so blocks
+are mapped between them on the way out.

@@ -827,13 +827,12 @@ pub fn write_add_entity(
     // The delta, which is zero, which is one byte.
     out.push(0);
 
-    // The order of the four angles is body yaw, body pitch, head yaw, head
-    // pitch. The head is written twice on purpose: the head turns with the body
-    // unless it is looking somewhere else, and at spawn there is nowhere else.
+    // Three angles and not four, which is the easy mistake: there is no head
+    // pitch. Upstream reads xRot, yRot and yHeadRot, and that is the whole
+    // list. A fourth byte is one byte too many on every entity ever spawned.
     out.push(angle_byte(yaw));
     out.push(angle_byte(pitch));
     out.push(angle_byte(yaw));
-    out.push(angle_byte(pitch));
 
     // The data value: zero for a player, one for living things generally.
     VarInt(1).write(out);
@@ -1231,8 +1230,8 @@ mod tests {
             // A partial scale follows, and this writer never produces one.
         }
 
-        assert!(b.len() >= 4, "four angles were expected");
-        b = &b[4..];
+        assert!(b.len() >= 3, "three angles were expected");
+        b = &b[3..];
 
         let _data = take_varint(&mut b);
         body.len() - b.len()
@@ -1256,6 +1255,62 @@ mod tests {
             body.len(),
             "the reader stopped {read} bytes in, or the packet is {} bytes too long",
             body.len() - read
+        );
+    }
+
+    #[test]
+    fn an_entity_is_exactly_the_fields_the_game_reads() {
+        // This exists because the read-back test passed with four angles.
+        //
+        // A round trip proves the writer and the reader agree. It cannot prove
+        // they agree with the *game*, because a wrong reading written down
+        // twice is still self-consistent: both halves believed there were four
+        // angles and neither of them was wrong on its own terms. Counting the
+        // reads in the constructor is the only check that consults the game.
+        //
+        // Upstream, in order:
+        //
+        //   readVarInt    id
+        //   readUUID      uuid
+        //   registry      type
+        //   readDouble    x, y, z
+        //   LP delta      movement
+        //   readByte      xRot, yRot, yHeadRot      <- three, not four
+        //   readVarInt    data
+        //
+        const READS: usize = 1 + 1 + 1 + 3 + 1 + 3 + 1;
+        assert_eq!(READS, 11, "and the angles are the three in the middle");
+
+        let mut body = Vec::new();
+        write_add_entity(
+            &mut body,
+            7,
+            [9u8; 16],
+            PLAYER_ENTITY_TYPE,
+            (0.0, 64.0, 0.0),
+            0.0,
+            0.0,
+        );
+        // The registry id is 159, and 159 does not fit in one VarInt byte. It
+        // is two, which is worth being explicit about: it is the one field here
+        // whose length is not visible from the number alone.
+        let mut reg = Vec::new();
+        VarInt(PLAYER_ENTITY_TYPE).write(&mut reg);
+        assert_eq!(reg.len(), 2, "159 is a two byte VarInt");
+
+        // Two one-byte VarInts, a uuid, a two-byte registry id, three doubles,
+        // a one-byte delta, three angles, a one-byte data value.
+        let expected = 2 + 16 + 2 + 24 + 1 + 3 + 1;
+        assert_eq!(
+            body.len(),
+            expected,
+            "the packet should be {expected} bytes and is {}",
+            body.len()
+        );
+        assert_eq!(
+            decode_add_entity_as_client(&body),
+            body.len(),
+            "and the game's reader gets through all of it"
         );
     }
 
@@ -1287,7 +1342,7 @@ mod tests {
         assert_eq!(b[0], 64, "yaw east");
         assert_eq!(b[1], 0, "pitch level");
         assert_eq!(b[2], 64, "and the head turns with the body");
-        assert_eq!(b[3], 0, "without tipping over");
+        assert_eq!(&b[3..], &[1u8][..], "and a data value of one, for a living thing");
     }
 
     #[test]

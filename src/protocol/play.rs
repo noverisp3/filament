@@ -59,6 +59,8 @@ pub mod id {
 
     // The clientbound packet that tells the client one block changed.
     pub const BLOCK_UPDATE: i32 = 8;
+    // How far through breaking a block the client should draw the crack.
+    pub const BLOCK_DESTRUCTION: i32 = 5;
     // The clientbound packet that tells the client to drop a chunk.
     pub const FORGET_LEVEL_CHUNK: i32 = 38;
 }
@@ -627,6 +629,24 @@ pub fn write_set_default_spawn(out: &mut Vec<u8>, dimension: &str, x: i32, y: i3
 #[allow(dead_code)]
 fn set_time_is_not_implemented() {}
 
+/// Writes a `block_destruction`: how far through breaking a block is.
+///
+/// Stages are zero to nine, and minus one means there is no longer a crack on
+/// that block. The minus one is written as a byte, so it is 255 on the wire and
+/// comes back through an unsigned read as 255 too; it is signed on the way out.
+///
+/// The id is the entity that is doing the breaking. The client does not act on
+/// it, but the game uses it to leave the breaker out of its own broadcast.
+pub fn write_block_destruction(out: &mut Vec<u8>, breaker: i32, pos: (i32, i32, i32), stage: i8) {
+    VarInt(id::BLOCK_DESTRUCTION).write(out);
+    VarInt(breaker).write(out);
+    out.extend_from_slice(&pack_block_pos(pos.0, pos.1, pos.2).to_be_bytes());
+    out.push(stage as u8);
+}
+
+/// The stage that says "no crack here any more".
+pub const NO_CRACK: i8 = -1;
+
 /// Writes `ClientboundKeepAlivePacket`.
 ///
 /// The id comes back verbatim, so it has to be distinguishable from one still
@@ -919,6 +939,47 @@ mod tests {
         assert_eq!(w[1], 19, "key length");
         assert_eq!(&w[2..21], b"minecraft:overworld");
         assert_eq!(w.len(), 37, "the capture's length for this packet");
+    }
+
+    #[test]
+    fn a_block_destruction_is_a_breaker_a_position_and_a_stage() {
+        let mut out = Vec::new();
+        write_block_destruction(&mut out, 42, (1, 2, 3), 5);
+
+        // One for the packet id, one for the breaker (42 fits in a VarInt byte),
+        // eight for the position, one for the stage.
+        assert_eq!(out.len(), 11);
+        assert_eq!(out[0], id::BLOCK_DESTRUCTION as u8);
+        assert_eq!(out[1], 42);
+        assert_eq!(&out[2..10], &pack_block_pos(1, 2, 3).to_be_bytes());
+        assert_eq!(out[10], 5);
+    }
+
+    #[test]
+    fn a_breaker_over_a_hundred_and_twenty_seven_costs_two_bytes() {
+        let mut out = Vec::new();
+        write_block_destruction(&mut out, 200, (0, 0, 0), 0);
+
+        // Entity ids are a shared counter, so they pass 127 eventually and the
+        // packet grows by a byte when they do. Written out so that a reader who
+        // assumes one byte finds out here.
+        assert_eq!(out.len(), 12, "the breaker is now two bytes");
+        assert_eq!(&out[1..3], &[0xC8, 0x01], "200 as a VarInt");
+    }
+
+    #[test]
+    fn clearing_a_crack_is_a_stage_of_minus_one() {
+        let mut out = Vec::new();
+        write_block_destruction(&mut out, 1, (0, 0, 0), NO_CRACK);
+
+        // Signed on the way out, so it is 255 on the wire. The client reads it
+        // back through an unsigned read and compares it against -1 there, so
+        // writing 0 instead would leave a permanent crack rather than clearing it.
+        assert_eq!(
+            *out.last().expect("a stage was written"),
+            0xFF,
+            "and not a zero, which would be stage zero"
+        );
     }
 
     #[test]

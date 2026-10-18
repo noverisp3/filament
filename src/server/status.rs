@@ -710,24 +710,48 @@ fn play(
     //     the chunk it stands in outside the square already sent, the new edge
     //     follows. That is the difference between a world and a diorama: without
     //     it the player walks off the terrain into white nothing.
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(1)))?;
+    //     Fifty milliseconds, which is one game tick. It used to be a second,
+    //     because the only thing this loop had to do was answer a keep alive on
+    //     a fifteen second deadline and there was no reason to wake sooner.
+    //     Mining progress is that reason: a crack has ten stages and moves
+    //     through them in about a second, which a loop that wakes once a second
+    //     cannot show.
+    stream.set_read_timeout(Some(LOOP_INTERVAL))?;
     let mut last_keep_alive = std::time::Instant::now();
     let mut keep_alive_id: i64 = 1;
+
+    // The block this player is currently breaking, if any.
+    //
+    // Cracks are drawn by the client but paced by the server, so the server has to
+    // keep track of how far along it is. It is per connection because mining is per
+    // player: two people can be breaking different blocks at once and neither should
+    // be told about the other's.
+    let mut mining: Option<Mining> = None;
+    // The stage the other players were last told about, and `None` for "no crack
+    // has been sent at all".
+    //
+    // An `Option` rather than a number outside the range, because zero is a real
+    // stage: a crack that has just started *is* stage zero, and a sentinel that
+    // reads as zero makes the first stage compare equal to it and never go out.
+    // The block then stays uncracked until stage one, which is most of a second
+    // of it looking like nothing happened.
+    let mut last_stage: Option<i8> = None;
 
     // Where the player is, updated by the movement packets. The spawn is where
     // the teleport above put it.
     let mut player = spawn;
+
     // The cache center the client was last told about. The client keeps chunks
     // only within the view distance of this point, so it has to move with the
     // player: left at the spawn forever, the world renders as a fixed window
     // that the player walks out of, with chunks arriving that never draw.
     let mut center_sent = (0i32, 0i32);
 
-    loop {
-        // Blocks changed by the player, sent out after the drain rather than
-        // during it, so a burst of edits is one write.
-        let mut edits = Vec::new();
+    // Blocks changed by the player, sent out after the drain rather than
+    // during it, so a burst of edits is one write.
+    let mut edits = Vec::new();
 
+    loop {
         while let Some(frame) = dec.next_frame().map_err(io_err)? {
             let id = packet_id_of(&frame);
             if super::log::verbose() {
@@ -750,39 +774,81 @@ fn play(
                 player.z = z;
             }
 
-            // Breaking a block. The client sends START_DESTROY when the button
-            // goes down and STOP_DESTROY when the block is gone; only the second
-            // changes anything, because the first is a request to start drawing
-            // cracks and there is no progress to report without a tick loop.
+            // Breaking a block.
+            //
+            // Three actions, and they do three different things. START is the
+            // button going down: the crack starts, and the others are told it
+            // has. STOP is the block going: the crack comes off, then the block
+            // does. ABORT is the button coming up early, which is STOP without
+            // the block, so the crack comes off and nothing else happens.
+            //
+            // All three carry the reach check, not just the one that edits the
+            // world. A crack drawn on a block a kilometre away is a way to find
+            // out what is there, which is the same hole as editing it and wants
+            // the same answer.
             if id == p::id::SERVERBOUND_PLAYER_ACTION
                 && let Ok(action) = p::PlayerActionPacket::read(&frame)
-                && action.action == p::PlayerAction::StopDestroy
             {
                 let (bx, by, bz) = p::unpack_block_pos(action.pos);
                 let pos = crate::world::pos::BlockPos::new(bx, by, bz);
-
-                // How far the player is from the block, in blocks.
-                //
-                // Without this the server edits anywhere in the world on request
-                // from a client, which is the first hole in it and the cheapest
-                // to close: a client that wants to hollow out a mountain a
-                // kilometre away just says so. It is checked here, where the
-                // player's position is, rather than on the world thread, which
-                // knows nothing about players and should not.
                 let reach = reach_to(&player, pos);
+                let too_far = reach > MAX_REACH;
 
-                if reach > MAX_REACH {
+                if too_far {
                     if super::log::verbose() {
                         log.note(format!(
                             "refused a break at {bx} {by} {bz}, {reach:.1} blocks away"
                         ));
                     }
-                } else if session.world.break_block(pos).flatten().is_some() {
-                    edits.push((bx, by, bz));
-                    if super::log::verbose() {
-                        log.note(format!("broke the block at {bx} {by} {bz}"));
+                } else {
+                    match action.action {
+                        p::PlayerAction::StartDestroy => {
+                            mining = Some(Mining {
+                                pos,
+                                started: std::time::Instant::now(),
+                            });
+                            last_stage = None;
+                        }
+
+                        p::PlayerAction::AbortDestroy => {
+                            clear_crack(&mut mining, last_stage, &session, player_id, entity_id);
+                        }
+
+                        p::PlayerAction::StopDestroy => {
+                            clear_crack(&mut mining, last_stage, &session, player_id, entity_id);
+                            if session.world.break_block(pos).flatten().is_some() {
+                                edits.push((bx, by, bz));
+                                if super::log::verbose() {
+                                    log.note(format!(
+                                        "broke the block at {bx} {by} {bz}"
+                                    ));
+                                }
+                            }
+                        }
+
+                        p::PlayerAction::Other => {}
                     }
                 }
+            }
+        }
+
+        // Advance the crack, if there is one.
+        //
+        // Sent only when the stage changes, so a block being mined for ten
+        // seconds costs ten packets rather than two hundred.
+        if let Some(current) = &mining {
+            let stage = current.stage();
+            if Some(stage) != last_stage {
+                last_stage = Some(stage);
+
+                let mut body = Vec::new();
+                p::write_block_destruction(
+                    &mut body,
+                    entity_id,
+                    (current.pos.x, current.pos.y, current.pos.z),
+                    stage,
+                );
+                session.wire.send_others(player_id, body);
             }
         }
 
@@ -981,6 +1047,76 @@ fn send_one_chunk(
 /// Fifteen seconds against a thirty second client timeout, so one can be lost
 /// without the connection going.
 const KEEP_ALIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+/// How long one loop iteration waits before looking again.
+///
+/// One game tick. Long enough that an idle server is not spinning, short enough
+/// that a crack moves visibly.
+const LOOP_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// How long a block takes to break.
+///
+/// The game looks this up per block and per tool: dirt is quick, obsidian is
+/// not, a bare hand is slower than a pickaxe. None of that is here, because
+/// neither the tool in the player's hand nor the block's hardness is: the world
+/// has five blocks in its registry and the game has thirty-five thousand states
+/// with no hardness table alongside them.
+///
+/// So one duration for everything, chosen to look like ordinary dirt. It is
+/// wrong for every block that is not dirt, and it is written down as wrong rather
+/// than tuned to feel right and left looking deliberate.
+const BREAK_TIME: std::time::Duration = std::time::Duration::from_millis(1250);
+
+/// A block being broken, and when it started.
+struct Mining {
+    pos: crate::world::pos::BlockPos,
+    started: std::time::Instant,
+}
+
+impl Mining {
+    /// How far through the break this is, as one of the ten crack stages.
+    ///
+    /// Clamped rather than allowed to run past nine: the client only has ten
+    /// cracks, and a stage past the end is a number it has no picture for. The
+    /// block itself is removed by the client's stop packet, which is what actually
+    /// ends it.
+    fn stage(&self) -> i8 {
+        let done = self.started.elapsed().as_secs_f64() / BREAK_TIME.as_secs_f64();
+        ((done * 10.0) as i8).min(9)
+    }
+}
+
+/// Takes the crack off a block, if there was one on that block.
+///
+/// Sent only when there was a stage to clear, which is what makes NO_STAGE worth
+/// having: a stop with nothing drawn costs nothing, and a stop that clears
+/// somebody else's crack does not happen.
+fn clear_crack(
+    mining: &mut Option<Mining>,
+    last_stage: Option<i8>,
+    session: &Session,
+    player_id: u64,
+    entity_id: i32,
+) {
+    let Some(current) = mining.take() else {
+        return;
+    };
+    // Nothing was drawn, so there is nothing to take off. Sending the clear
+    // anyway would make every other player drop a crack that was not theirs,
+    // which on a shared world is how one player's mining cancels another's.
+    if last_stage.is_none() {
+        return;
+    }
+
+    let mut body = Vec::new();
+    crate::protocol::play::write_block_destruction(
+        &mut body,
+        entity_id,
+        (current.pos.x, current.pos.y, current.pos.z),
+        crate::protocol::play::NO_CRACK,
+    );
+    session.wire.send_others(player_id, body);
+}
+
 /// How far a player may reach to break a block, in blocks.
 ///
 /// The game's own limit is 4.5 in survival and 5 in creative, and neither is
@@ -1091,6 +1227,46 @@ fn serve_status(
 #[cfg(test)]
 mod tests {
     use crate::server::ticking::{state_id, to_state_id};
+    use super::*;
+
+    /// A break that started `ago`.
+    fn mining_ago(ago: std::time::Duration) -> Mining {
+        Mining {
+            pos: crate::world::pos::BlockPos::new(0, 0, 0),
+            // Subtracted from now rather than assembled, so the test does not care
+            // how long ago it was written down and start failing as time passes.
+            started: std::time::Instant::now() - ago,
+        }
+    }
+
+    #[test]
+    fn a_crack_starts_at_stage_zero_and_finishes_at_nine() {
+        // The two ends, because the interesting part is that the first one is a
+        // real stage rather than the absence of one.
+        assert_eq!(mining_ago(std::time::Duration::ZERO).stage(), 0);
+        assert_eq!(mining_ago(BREAK_TIME * 2).stage(), 9, "clamped, not past the end");
+    }
+
+    #[test]
+    fn a_crack_moves_through_its_stages_over_time() {
+        let tenth = BREAK_TIME / 10;
+        let mut seen = Vec::new();
+        for i in 0..10 {
+            seen.push(mining_ago(tenth * i).stage());
+        }
+
+        assert_eq!(
+            seen,
+            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+            "ten stages over the length of one break"
+        );
+    }
+
+    #[test]
+    fn a_crack_that_has_been_held_stays_at_the_last_stage() {
+        assert_eq!(mining_ago(BREAK_TIME).stage(), 9, "the last stage, held");
+        assert_eq!(mining_ago(BREAK_TIME * 100).stage(), 9, "and held longer");
+    }
 
     /// Generates a chunk and reads the blocks back out of the wire bytes.
     ///

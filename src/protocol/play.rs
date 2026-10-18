@@ -791,11 +791,21 @@ pub fn write_player_info_remove(out: &mut Vec<u8>, uuids: &[[u8; 16]]) {
 /// The three angles are a byte each, and they are **quantised to 1/256 of a
 /// turn**, so 90.0 degrees is 64 and not 90. A full circle is 256.
 ///
-/// The movement delta is a quantised vector rather than three doubles, which
-/// surprised me and is worth writing down: fifteen bits a component plus two
-/// scale bits, packed into one long. A player standing still has a delta of
-/// zero, so zero it is. Movement after this arrives as its own packet with
-/// relative deltas and does not use this.
+/// The movement delta is not three doubles and not a long. It is a quantised
+/// vector, and its length depends on the value:
+///
+/// - smaller than about 3e-5 in every component: **one byte**, zero;
+/// - otherwise six bytes — a byte, a byte and an int, holding fifteen bits a
+///   component with the scale folded into the low bits — plus a VarInt for the
+///   scale when it does not divide evenly.
+///
+/// Writing a fixed eight bytes for it, which reads like a packed long and is
+/// what the constant names suggest, makes every client's packet eight bytes
+/// longer than expected and drops the connection on the second player.
+///
+/// A player being spawned has not moved yet, so the delta is zero and the one
+/// byte is the whole of it. Movement after this arrives as its own packet with
+/// relative deltas and never needs the other branch.
 pub fn write_add_entity(
     out: &mut Vec<u8>,
     entity_id: i32,
@@ -814,8 +824,8 @@ pub fn write_add_entity(
     out.extend_from_slice(&pos.1.to_be_bytes());
     out.extend_from_slice(&pos.2.to_be_bytes());
 
-    // The quantised delta, zero because this player has not moved yet.
-    out.extend_from_slice(&0i64.to_be_bytes());
+    // The delta, which is zero, which is one byte.
+    out.push(0);
 
     // The order of the four angles is body yaw, body pitch, head yaw, head
     // pitch. The head is written twice on purpose: the head turns with the body
@@ -1189,6 +1199,66 @@ mod tests {
         assert_eq!(take_varint(&mut b), 6);
     }
 
+    /// Decodes an `add_entity` the way the game does, and reports whether it
+    /// landed exactly at the end.
+    ///
+    /// The same reasoning as the tab list: a writer can be well formed and
+    /// wrong, and only running the reader agrees with the client. This one is
+    /// here because a delta written as a packed long is eight bytes too long,
+    /// and the client says so by name.
+    fn decode_add_entity_as_client(body: &[u8]) -> usize {
+        let mut b = body;
+        assert_eq!(take_varint(&mut b), id::ADD_ENTITY);
+        let _entity_id = take_varint(&mut b);
+
+        assert!(b.len() >= 16, "a uuid was expected");
+        b = &b[16..];
+
+        let _type = take_varint(&mut b);
+
+        for _ in 0..3 {
+            assert!(b.len() >= 8, "three doubles were expected");
+            b = &b[8..];
+        }
+
+        // The delta: a zero is one byte, and reading it as a long is what
+        // leaves eight bytes over at the end of the packet.
+        let first = b[0];
+        b = &b[1..];
+        if first != 0 {
+            assert!(b.len() >= 5, "a six byte delta was expected");
+            b = &b[5..];
+            // A partial scale follows, and this writer never produces one.
+        }
+
+        assert!(b.len() >= 4, "four angles were expected");
+        b = &b[4..];
+
+        let _data = take_varint(&mut b);
+        body.len() - b.len()
+    }
+
+    #[test]
+    fn the_client_reads_add_entity_and_lands_exactly_at_the_end() {
+        let mut body = Vec::new();
+        write_add_entity(
+            &mut body,
+            7,
+            [9u8; 16],
+            PLAYER_ENTITY_TYPE,
+            (1.5, 64.0, -2.5),
+            90.0,
+            0.0,
+        );
+        let read = decode_add_entity_as_client(&body);
+        assert_eq!(
+            read,
+            body.len(),
+            "the reader stopped {read} bytes in, or the packet is {} bytes too long",
+            body.len() - read
+        );
+    }
+
     #[test]
     fn an_entity_carries_a_zero_delta_because_it_has_not_moved_yet() {
         let mut body = Vec::new();
@@ -1212,8 +1282,8 @@ mod tests {
         assert_eq!(&b[8..16], &64.0f64.to_be_bytes()[..], "y");
         assert_eq!(&b[16..24], &(-2.5f64).to_be_bytes()[..], "z");
         b = &b[24..];
-        assert_eq!(&b[..8], &0i64.to_be_bytes()[..], "a quantised delta of zero");
-        b = &b[8..];
+        assert_eq!(b[0], 0, "a zero delta is one byte, not a packed long");
+        b = &b[1..];
         assert_eq!(b[0], 64, "yaw east");
         assert_eq!(b[1], 0, "pitch level");
         assert_eq!(b[2], 64, "and the head turns with the body");

@@ -1026,8 +1026,9 @@ fn play(
     //     through them in about a second, which a loop that wakes once a second
     //     cannot show.
     stream.set_read_timeout(Some(LOOP_INTERVAL))?;
+    let mut keep_alive = KeepAlive::new();
     let mut last_keep_alive = std::time::Instant::now();
-    let mut keep_alive_id: i64 = 1;
+    let mut latency_logged = false;
 
     // The block this player is currently breaking, if any.
     //
@@ -1155,6 +1156,33 @@ fn play(
             // people on a server and two people in separate worlds.
             if id == p::id::SERVERBOUND_PUNCH {
                 session.wire.send_swing(player_id, p::MAIN_HAND);
+            }
+
+            // The answer to a keep alive: one long.
+            //
+            // Without this the server only ever sends challenges, and cannot tell
+            // a player who is there from one whose socket is still half open
+            // because their network went away and nothing followed -- no FIN, no
+            // RST, nothing. That connection holds an entity id, a name and a
+            // place in the player list until the operating system notices, which
+            // on Windows is measured in hours.
+            if id == p::id::SERVERBOUND_KEEP_ALIVE {
+                let mut body = &frame[..];
+                let (answer, _) = crate::protocol::VarLong::read(&mut body)
+                    .map_err(|e| io_err(FrameError::Decode(e)))?;
+                let since = last_keep_alive.elapsed();
+                if !keep_alive.answered(answer.0, since) {
+                    log.note(format!(
+                        "answered keep alive {answer:?} which was never asked for; \
+                         the connection is not one we are having a conversation with"
+                    ));
+                    return Ok(());
+                }
+                let latency = keep_alive.latency_ms();
+                if super::log::verbose() && !latency_logged {
+                    latency_logged = true;
+                    log.note(format!("round trip about {latency} ms"));
+                }
             }
 
             // Which keys are down: one byte of flags, after the id.
@@ -1783,21 +1811,29 @@ fn play(
             stream.flush()?;
         }
 
-        if last_keep_alive.elapsed() >= KEEP_ALIVE_EVERY {
-            let mut body = Vec::new();
-            p::write_keep_alive(&mut body, keep_alive_id);
-            let mut wire = Vec::new();
-            enc.encode(&body, &mut wire).map_err(io_err)?;
-            stream.write_all(&wire)?;
-            stream.flush()?;
+        match keep_alive.tick(last_keep_alive.elapsed(), KEEP_ALIVE_EVERY) {
+            KeepAliveTick::Silent => {}
+            KeepAliveTick::Send(id) => {
+                let mut body = Vec::new();
+                p::write_keep_alive(&mut body, id);
+                let mut wire = Vec::new();
+                enc.encode(&body, &mut wire).map_err(io_err)?;
+                stream.write_all(&wire)?;
+                stream.flush()?;
+                last_keep_alive = std::time::Instant::now();
 
-            keep_alive_id = keep_alive_id.wrapping_add(1).max(1);
-            last_keep_alive = std::time::Instant::now();
-
-            if super::log::verbose() {
-                log.out_packet("keep_alive", "play", body.len());
+                if super::log::verbose() {
+                    log.out_packet("keep_alive", "play", body.len());
+                }
+                continue;
             }
-            continue;
+            KeepAliveTick::Timeout => {
+                log.note(format!(
+                    "keep alive {} was never answered; the connection is gone",
+                    keep_alive.outstanding().unwrap_or_default()
+                ));
+                return Ok(());
+            }
         }
 
         match stream.read(&mut scratch) {
@@ -1927,6 +1963,117 @@ fn chunk_report(wanted: usize, sent_now: usize, dropped: usize) -> Option<String
 /// Fifteen seconds against a thirty second client timeout, so one can be lost
 /// without the connection going.
 const KEEP_ALIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// What the keep alive exchange wants done.
+///
+/// Sent is not the same as answered, and the difference is the whole of it. A
+/// server that only sends challenges has no way to tell a player who is there
+/// from one whose socket is still half open because their network went away and
+/// nothing followed: no FIN, no RST, nothing. That connection then holds an
+/// entity id, a name and a place in the player list until the operating system's
+/// own keepalive gives up, which on Windows is measured in hours.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeepAliveTick {
+    /// Nothing due yet.
+    Silent,
+    /// Ask, with this id.
+    Send(i64),
+    /// A challenge went unanswered for long enough. The player is gone.
+    Timeout,
+}
+
+/// The keep alive exchange, as the game runs it.
+///
+/// ```java
+/// if (now - this.keepAliveTime >= 15000L) {
+///    if (this.keepAlivePending) { this.disconnect(TIMEOUT_DISCONNECTION_MESSAGE); }
+///    else { this.keepAlivePending = true; this.send(new ClientboundKeepAlivePacket(now)); }
+/// }
+/// ```
+///
+/// so one unanswered challenge is enough, and it gets exactly one interval:
+/// `keepAliveTime` is stamped when the challenge goes out, never when an answer
+/// arrives. A client that stops answering is therefore written off between one
+/// and two intervals after it stopped, depending on where in the cycle it fell.
+///
+/// The challenge here is a counter rather than the timestamp the game uses. Both
+/// are opaque to the client, which only echoes it back, and a counter does not
+/// depend on the clock agreeing with itself.
+///
+/// The clock is the caller's. `Instant` inside would make this untestable
+/// without sleeping, and a fifteen second rule tested by waiting fifteen seconds
+/// is a test nobody runs.
+#[derive(Debug, Default)]
+pub struct KeepAlive {
+    /// The id outstanding, if one is.
+    challenge: Option<i64>,
+    next_id: i64,
+    latency_ms: i32,
+}
+
+impl KeepAlive {
+    pub fn new() -> Self {
+        KeepAlive {
+            challenge: None,
+            next_id: 1,
+            latency_ms: 0,
+        }
+    }
+
+    /// What is due, if anything, given how long it has been since the last time
+    /// anything was asked.
+    pub fn tick(
+        &mut self,
+        since_last: std::time::Duration,
+        every: std::time::Duration,
+    ) -> KeepAliveTick {
+        if since_last < every {
+            return KeepAliveTick::Silent;
+        }
+        if self.challenge.is_some() {
+            return KeepAliveTick::Timeout;
+        }
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        self.challenge = Some(id);
+        KeepAliveTick::Send(id)
+    }
+
+    /// The answer to a challenge, or a connection that is not telling the truth.
+    ///
+    /// ```java
+    /// if (this.keepAlivePending && packet.getId() == this.keepAliveChallenge) { ...; keepAlivePending = false; }
+    /// else { this.disconnect(TIMEOUT_DISCONNECTION_MESSAGE); }
+    /// ```
+    ///
+    /// So an answer with nothing outstanding is refused, not ignored: a client
+    /// replying to a challenge that was never sent is either confused or not the
+    /// client it claims to be, and neither is worth carrying.
+    pub fn answered(&mut self, id: i64, took: std::time::Duration) -> bool {
+        if self.challenge == Some(id) {
+            self.challenge = None;
+            let took = took.as_millis().min(i32::MAX as u128) as i32;
+            self.latency_ms = (self.latency_ms * 3 + took) / 4;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// The challenge outstanding, for the caller to time the reply against.
+    pub fn outstanding(&self) -> Option<i64> {
+        self.challenge
+    }
+
+    /// The round trip, smoothed the way the game smooths it.
+    ///
+    /// Three parts in four of the old reading to one of the new, so a single
+    /// slow packet does not move the number much.
+    pub fn latency_ms(&self) -> i32 {
+        self.latency_ms
+    }
+}
+
 /// How long one loop iteration waits before looking again.
 ///
 /// The game's tick, taken from the world's own definition of one rather than

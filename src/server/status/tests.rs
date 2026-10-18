@@ -928,3 +928,150 @@ fn the_numbers_that_were_guessed_are_now_tied_to_something() {
         "and a step is shorter than the budget it is spent in"
     );
 }
+const EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+const NONE: std::time::Duration = std::time::Duration::ZERO;
+const A_TICK: std::time::Duration = std::time::Duration::from_millis(50);
+
+#[test]
+fn a_keep_alive_that_goes_unanswered_is_a_dead_connection() {
+    // The whole reason this exists. A server that only sends challenges cannot
+    // tell a player who is there from one whose socket is still half open
+    // because their network went away and nothing followed: no FIN, no RST,
+    // nothing. That connection then holds an entity id, a name and a place in
+    // the player list until the operating system gives up, which on Windows is
+    // measured in hours.
+    let mut ka = KeepAlive::new();
+
+    assert_eq!(ka.tick(NONE, EVERY), KeepAliveTick::Silent, "nothing is due yet");
+    assert_eq!(
+        ka.tick(EVERY - A_TICK, EVERY),
+        KeepAliveTick::Silent,
+        "nor a moment before"
+    );
+    assert_eq!(ka.tick(EVERY, EVERY), KeepAliveTick::Send(1), "and now it is");
+
+    // The game stamps `keepAliveTime` when it sends, so a challenge has exactly
+    // one interval to be answered and no more. Not two, and not a grace.
+    assert_eq!(
+        ka.tick(EVERY, EVERY),
+        KeepAliveTick::Timeout,
+        "a full interval later, the silence is the answer"
+    );
+}
+
+#[test]
+fn a_challenge_has_exactly_one_interval_to_be_answered() {
+    // `keepAliveTime` is stamped when the challenge goes out and never updated
+    // by an answer, so the deadline is one interval after the *send* rather than
+    // after the last good news. It is the reason a dead client is bounded at all.
+    let every = KEEP_ALIVE_EVERY;
+    let mut ka = KeepAlive::new();
+
+    assert_eq!(ka.tick(every, every), KeepAliveTick::Send(1));
+    assert!(ka.answered(1, NONE), "answered at once");
+
+    assert_eq!(
+        ka.tick(every, every),
+        KeepAliveTick::Send(2),
+        "the next cycle goes out on schedule"
+    );
+    assert_eq!(
+        ka.tick(every - A_TICK, every),
+        KeepAliveTick::Silent,
+        "and is not given up before its time"
+    );
+    assert_eq!(
+        ka.tick(every, every),
+        KeepAliveTick::Timeout,
+        "exactly one interval after it went out"
+    );
+}
+
+#[test]
+fn an_answered_keep_alive_is_never_a_timeout() {
+    let mut ka = KeepAlive::new();
+    let id = match ka.tick(EVERY, EVERY) {
+        KeepAliveTick::Send(id) => id,
+        other => panic!("expected a challenge, got {other:?}"),
+    };
+    assert!(ka.answered(id, std::time::Duration::from_millis(40)));
+
+    assert_eq!(
+        ka.tick(EVERY - A_TICK, EVERY),
+        KeepAliveTick::Silent,
+        "an answered challenge is not an unanswered one, and the clock is not up"
+    );
+    assert_eq!(
+        ka.tick(EVERY, EVERY),
+        KeepAliveTick::Send(id + 1),
+        "and the next one goes out on schedule"
+    );
+}
+
+#[test]
+fn every_challenge_asks_for_something_new() {
+    // The client echoes the id back, so a repeated id would let a reply to an
+    // old question satisfy a new one.
+    let mut ka = KeepAlive::new();
+    let mut seen = Vec::new();
+    for round in 0..5 {
+        let id = match ka.tick(EVERY, EVERY) {
+            KeepAliveTick::Send(id) => id,
+            other => panic!("round {round}: expected a challenge, got {other:?}"),
+        };
+        assert!(!seen.contains(&id), "id {id} was asked for twice");
+        seen.push(id);
+        assert!(ka.answered(id, std::time::Duration::from_millis(5)));
+    }
+    assert_eq!(seen.len(), 5, "five distinct challenges");
+    assert!(seen.iter().all(|id| *id > 0), "and none of them zero");
+}
+
+#[test]
+fn answering_a_challenge_that_was_never_asked_for_is_refused() {
+    // The game cuts here rather than ignoring it: a client replying to
+    // something it was never sent is either confused or not the client it
+    // claims to be, and neither is worth carrying.
+    let mut ka = KeepAlive::new();
+    assert!(
+        !ka.answered(999, NONE),
+        "nothing was outstanding to answer"
+    );
+
+    let id = match ka.tick(EVERY, EVERY) {
+        KeepAliveTick::Send(id) => id,
+        other => panic!("expected a challenge, got {other:?}"),
+    };
+    assert!(!ka.answered(id + 1, NONE), "the wrong id is not the answer");
+    assert!(
+        ka.outstanding().is_some(),
+        "and a wrong answer does not consume the outstanding one"
+    );
+    assert!(ka.answered(id, NONE), "the right one still lands");
+    assert!(ka.outstanding().is_none(), "and clears it");
+}
+
+#[test]
+fn the_round_trip_is_smoothed_rather_than_jumping() {
+    // Three parts in four of the old reading to one of the new, so one slow
+    // packet does not move the number much.
+    let mut ka = KeepAlive::new();
+    let id = match ka.tick(EVERY, EVERY) {
+        KeepAliveTick::Send(id) => id,
+        other => panic!("expected a challenge, got {other:?}"),
+    };
+    ka.answered(id, std::time::Duration::from_millis(100));
+    assert_eq!(ka.latency_ms(), 25, "a quarter of the first reading");
+
+    let id = match ka.tick(EVERY, EVERY) {
+        KeepAliveTick::Send(id) => id,
+        other => panic!("expected a challenge, got {other:?}"),
+    };
+    ka.answered(id, std::time::Duration::from_millis(0));
+    assert_eq!(
+        ka.latency_ms(),
+        18,
+        "a fast reply after a slow one pulls it down a quarter of the way"
+    );
+    assert!(ka.latency_ms() > 0, "and not to nothing, because it is smoothed");
+}

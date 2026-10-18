@@ -511,3 +511,51 @@ fn the_pool_leaves_room_for_the_threads_that_watch_it() {
         worker_count(cores)
     );
 }
+
+#[test]
+fn a_block_state_name_is_looked_up_as_an_item_exactly_as_it_stands() {
+    // A broken block is known by its state id, and its name is how it becomes
+    // something the player can hold. The name already carries its namespace, so
+    // a lookup that adds `minecraft:` to it asks for
+    // `minecraft:minecraft:grass_block` -- finds nothing, raises nothing, and
+    // leaves the player with an empty hand after a successful dig. It has
+    // happened; these are the numbers that make it impossible to do again.
+    for (state, name, item) in [
+        (9, "minecraft:grass_block", 613),
+        (10, "minecraft:dirt", 484),
+        (1, "minecraft:stone", 1370),
+    ] {
+        assert_eq!(state_id_name(state), name);
+        assert_eq!(held_item(state), Some(item), "{name} is item {item}");
+        assert_eq!(
+            crate::generated::item_id(&format!("minecraft:{name}")),
+            None,
+            "while the doubled namespace finds nothing, which was the bug"
+        );
+    }
+}
+
+#[test]
+fn the_item_and_the_block_state_are_numbered_separately() {
+    // Dirt's state is 10 and dirt's item is 484. A server that treated one as
+    // the other would hand a player something that is not what they dug.
+    let dirt_item = held_item(10).expect("dirt can be held") as i32;
+    assert_eq!(dirt_item, 484);
+    assert_ne!(dirt_item, 10, "and never confuse it with the state id");
+}
+
+#[test]
+fn air_is_not_something_a_player_can_be_handed() {
+    // `minecraft:air` really is an item and the registry gives it id 0, so the
+    // lookup alone would happily hand a player a block of nothing. A player
+    // never digs up air: breaking a block leaves air where the block was, and
+    // that is what the block became rather than what was picked up.
+    let air = state_id("minecraft:air");
+    assert_ne!(
+        crate::generated::item_id("minecraft:air"),
+        None,
+        "air is a real item, which is why this needs saying"
+    );
+    assert_eq!(held_item(air), None, "and it is still never given out");
+}
+

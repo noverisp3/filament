@@ -1264,43 +1264,56 @@ fn play(
                                 // as the wrong one is a block that stays solid
                                 // in the client while the server believes it
                                 // is gone.
-                                let terrain = session.world.terrain_blocks();
                                 let name_of = |state: i32| {
-                                    terrain
-                                        .map(|t| {
-                                            crate::server::ticking::state_id_name(state, &t)
-                                                .to_string()
-                                        })
-                                        .unwrap_or_else(|| format!("state {state}"))
+                                    if session.world.terrain_blocks().is_some() {
+                                        crate::server::ticking::state_id_name(state).to_string()
+                                    } else {
+                                        format!("state {state}")
+                                    }
                                 };
 
-                                // The block that was there has a name, and that
-                                // name is usually also an item -- grass block is
-                                // `minecraft:grass_block` both ways, and the item
-                                // id is a different number from the block state
-                                // one: dirt is state 10 and item 484. Where there
-                                // is no item of that name the block is simply not
-                                // something that can be held, and nothing is
-                                // given.
-                                if let Some(terrain) = terrain {
-                                    let held = crate::server::ticking::state_id_name(was, &terrain);
-                                    if let Some(item) =
-                                        crate::generated::item_id(&format!("minecraft:{held}"))
-                                    {
-                                        // Into the slot that already holds this
-                                        // item, or the first free one, so twenty
-                                        // blocks in a row stack rather than
-                                        // filling the hotbar a slot at a time.
-                                        let slot = (0..item::slots::COUNT)
-                                            .find(|&s| {
+                                // The block that was there has a name, and
+                                // that name is usually also an item -- grass
+                                // block is `minecraft:grass_block` both ways.
+                                // The name already carries its namespace, so it
+                                // is looked up as it stands: adding
+                                // `minecraft:` to it again asks for
+                                // `minecraft:minecraft:grass_block`, which is
+                                // not an item, and a server that quietly got
+                                // that wrong would hand out nothing at all.
+                                //
+                                // The item id is a different number from the
+                                // block state id, though: dirt is state 10 and
+                                // item 484, grass block is 9 and 613.
+                                if session.world.terrain_blocks().is_some() {
+                                    let held = crate::server::ticking::state_id_name(was);
+                                    match crate::server::ticking::held_item(was) {
+                                        Some(item) => {
+                                            // Into the slot that already holds this
+                                            // item, or the first free one, so twenty
+                                            // blocks in a row stack rather than
+                                            // filling the hotbar a slot at a time.
+                                            let slot =
+                                                (0..item::slots::COUNT).find(|&s| {
+                                                    inventory.get(s).is_none_or(
+                                                        |held| held.item == item as i32,
+                                                    )
+                                                });
+                                            if let Some(slot) = slot {
                                                 inventory
-                                                    .get(s)
-                                                    .is_none_or(|held| held.item == item as i32)
-                                            });
-                                        if let Some(slot) = slot {
-                                            inventory.add(ItemStack::new(item as i32, 1));
-                                            slots.push((slot, inventory.get(slot)));
+                                                    .add(ItemStack::new(item as i32, 1));
+                                                slots.push((slot, inventory.get(slot)));
+                                                log.note(format!(
+                                                    "{held} went into slot {slot}"
+                                                ));
+                                            }
                                         }
+                                        // A block with no item of that name is
+                                        // simply not something that can be held,
+                                        // and neither is a full hotbar.
+                                        None => log.note(format!(
+                                            "{held} has no item of that name"
+                                        )),
                                     }
                                 }
                                 log.note(format!(
@@ -1432,16 +1445,14 @@ fn play(
                 let mut body = Vec::new();
                 item::write_container_set_slot(&mut body, slot, stack, 0);
                 enc.encode(&body, &mut framed).map_err(io_err)?;
-                if super::log::verbose() {
-                    log.note(format!(
-                        "container_set_slot {slot} {}",
-                        stack.map_or("empty".into(), |s| format!(
-                            "{} x{}",
-                            crate::generated::item_name(s.item as u32).unwrap_or("?"),
-                            s.count
-                        ))
-                    ));
-                }
+                log.note(format!(
+                    "slot {slot}: {}",
+                    stack.map_or("empty".into(), |s| format!(
+                        "{} x{}",
+                        crate::generated::item_name(s.item as u32).unwrap_or("?"),
+                        s.count
+                    ))
+                ));
             }
             // What this player is about to be handed, named.
             //

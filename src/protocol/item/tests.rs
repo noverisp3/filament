@@ -202,3 +202,4 @@ fn an_empty_stack_written_into_a_slot_is_the_same_as_empty() {
     inv.set(slots::HOTBAR_START, Some(ItemStack::new(484, 0)));
     assert_eq!(inv.get(slots::HOTBAR_START), None);
 }
+

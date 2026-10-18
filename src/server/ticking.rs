@@ -646,8 +646,7 @@ pub fn hardness_of(block: BlockId, terrain: &TerrainBlocks) -> Option<f32> {
 /// readable by eye: a log line saying a block became state 17 says nothing
 /// about whether 17 is air, and the whole question when a block stays solid is
 /// whether the id that went out was the one meant for air.
-pub fn state_id_name(state: i32, terrain: &TerrainBlocks) -> &'static str {
-    let _ = terrain;
+pub fn state_id_name(state: i32) -> &'static str {
     // The generated table is a flat list of blocks, each owning a range of
     // state ids, so the name is the block whose range covers this id. Unknown
     // ids are reported rather than hidden: they would be a bug, and a log that
@@ -674,6 +673,26 @@ pub fn state_id(name: &str) -> i32 {
         .find(|b| b.name == name)
         .map(|b| b.default_state as i32)
         .unwrap_or_else(|| panic!("{name} is in the generated block table"))
+}
+
+/// What a player gets for a block, if it is something that can be held.
+///
+/// The name from [`state_id_name`] is looked up as it stands. It already
+/// carries its namespace, and adding `minecraft:` to it again asks for
+/// `minecraft:minecraft:grass_block` -- not an item, and not an error either,
+/// just a lookup that quietly finds nothing while the player digs a block and
+/// is handed silence. This has happened, and [`tests`] pins it.
+pub fn held_item(state: i32) -> Option<u32> {
+    let name = state_id_name(state);
+    // `minecraft:air` is a real item and the registry gives it an id, but a
+    // player never digs up air: breaking a block leaves air where the block
+    // was, and that is what the block became rather than what was picked up.
+    // Without this the block that stays after the dig would be handed over as
+    // though it had come out of the ground.
+    if name == "minecraft:air" {
+        return None;
+    }
+    crate::generated::item_id(name)
 }
 
 #[cfg(test)]

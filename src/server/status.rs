@@ -929,9 +929,20 @@ fn play(
         // The framed bytes cannot be shared between connections, because
         // compression is per connection, so each one is framed again on the far
         // side with that player's encoder.
-        if !edits.is_empty() {
+        //
+        // Both lists are taken, not iterated. Leaving them in place makes every
+        // pass send everything since the connection began, twenty times a
+        // second: a repeated block update is invisible because it says the same
+        // thing, and a repeated level event is a burst of particles that does
+        // not stop until the player who caused it leaves.
+        if !edits.is_empty() || !effects.is_empty() {
+            let outgoing: Vec<Vec<u8>> = std::mem::take(&mut edits)
+                .into_iter()
+                .chain(std::mem::take(&mut effects))
+                .collect();
+
             let mut framed = Vec::new();
-            for body in edits.iter().chain(effects.iter()) {
+            for body in &outgoing {
                 session.wire.send_others(player_id, body.clone());
                 enc.encode(body, &mut framed).map_err(io_err)?;
             }
@@ -1347,6 +1358,36 @@ mod tests {
     /// The quickest block the generator makes, standing in for an arbitrary
     /// break time in the crack tests.
     const DIRT_BREAK: std::time::Duration = std::time::Duration::from_millis(750);
+
+    #[test]
+    fn a_sent_edit_is_not_sent_again_on_the_next_pass() {
+        // The bug this is for: both lists lived outside the loop and were
+        // iterated rather than taken, so every pass re-sent everything since the
+        // connection began. A repeated block update says the same thing and
+        // nobody notices. A repeated level event is twenty bursts of particles a
+        // second, which looks like the server is having a seizure until the
+        // player who caused it logs out.
+        let mut edits: Vec<Vec<u8>> = Vec::new();
+        let mut effects: Vec<Vec<u8>> = Vec::new();
+
+        // A pass where a block was broken.
+        edits.push(b"the update".to_vec());
+        effects.push(b"the dust".to_vec());
+        let sent: Vec<Vec<u8>> = std::mem::take(&mut edits)
+            .into_iter()
+            .chain(std::mem::take(&mut effects))
+            .collect();
+        assert_eq!(sent.len(), 2, "both go out once");
+
+        // The next pass, where nothing happened.
+        assert!(edits.is_empty() && effects.is_empty(), "nothing to send");
+        assert_eq!(
+            edits.len() + effects.len(),
+            0,
+            "and a pass with no breaks must send no packets at all, however \
+             many passes came before it"
+        );
+    }
 
     #[test]
     fn break_times_are_the_games_own_numbers() {

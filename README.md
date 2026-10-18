@@ -9,12 +9,6 @@ is the weakness this exists to fix, so everything here is built around one rule:
 
 > **No work that can be parallel may run on the main thread.**
 
-The name is `filament`: a thin strand, a thread running through something. It was
-picked after checking crates.io, where the short evocative names were already
-gone — `lattice`, `flurry`, `stratum`, `strata`, `tessera`, `cairn`, `flint`,
-`shard`, `spindle`, `weft`, `woven`, `fila`, `ferrum`, `ferrite`, `ferrox` and
-`dream` all turned out to be taken. Which is a decent summary of the namespace.
-
 Mojang's game is a *reference only*. See `../mc-ref/README.md` for why none of
 its code may be copied here. It is read to learn how a problem was solved, and
 the answer is then written independently in Rust.

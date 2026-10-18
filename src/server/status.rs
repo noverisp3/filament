@@ -498,6 +498,13 @@ fn configure(
                             // how much to generate. Sending less leaves the far
                             // ring of the view as the void it started as.
                             view_distance = i32::from(info.view_distance);
+                            // How far away other players stay in *this*
+                            // player's world. Set here because this is where
+                            // the client finally says how much world it wants;
+                            // before that the registration's default stands.
+                            session
+                                .wire
+                                .set_view_distance(registration.id, view_distance);
                             log.note(format!(
                                 "client settings: {} view distance {}, main hand {}",
                                 info.language, info.view_distance, info.main_hand

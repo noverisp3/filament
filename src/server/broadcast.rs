@@ -38,15 +38,26 @@
 use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-/// How finely a movement is measured, and how far away a player can be and
-/// still be worth telling about.
+/// How finely a movement is measured: one part in 4096 of a block.
 ///
-/// The scale is the game's, from `VecDeltaCodec`; see
-/// [`crate::protocol::play::write_move_entity_pos_rot`]. The range is the one
-/// the game itself uses when it broadcasts a level event to the players near
-/// something happening, which makes it a reasonable stand-in for "near enough
-/// to see a person walk".
+/// The game's, from `VecDeltaCodec`; see
+/// [`crate::protocol::play::write_move_entity_pos_rot`].
 const DELTA_SCALE: f64 = 4096.0;
+
+    /// How far away a player can be and still be in this observer's world.
+    ///
+    /// The game's rule, from `ChunkMap.TrackedEntity.updatePlayer`: the
+    /// distance is measured **horizontally**, x and z only, and the range is
+    /// the lesser of the entity's own tracking range and the observer's view
+    /// distance in chunks times sixteen.
+    ///
+    /// Both halves matter. Measuring vertically as well hides two players
+    /// standing three blocks apart on a hillside, which is the whole point of
+    /// being able to see who is on the ridge above you. And a fixed constant
+    /// makes one player's render distance decide everybody's.
+    fn visible_range(observer_view_chunks: i32) -> f64 {
+        (observer_view_chunks.clamp(2, 32) * 16) as f64
+    }
 
 /// One player's queue, and enough about them for somebody else to be told they
 /// are here.
@@ -68,6 +79,13 @@ struct Sink {
     pos: (f64, f64, f64),
     yaw: f32,
     pitch: f32,
+    /// How much world this client asked for, in chunks.
+    ///
+    /// Their own, and it is what bounds how far away another player stays in
+    /// their world, which sounds backwards until it is phrased the game's way:
+    /// the range is bounded by *their* view distance because it is their
+    /// client that has to hold the body.
+    view_chunks: i32,
     /// What this connection has been told about every other player, and where
     /// it was told they were.
     ///
@@ -200,6 +218,7 @@ impl Broadcast {
             pos,
             yaw: 0.0,
             pitch: 0.0,
+            view_chunks: 8,
             seen: std::collections::HashMap::new(),
         });
 
@@ -246,6 +265,15 @@ impl Broadcast {
         }
     }
 
+    /// Records how much world a client asked for, which bounds how far away
+    /// other players stay in its world.
+    pub fn set_view_distance(&self, id: u64, chunks: i32) {
+        let mut sinks = self.sinks.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(sink) = sinks.iter_mut().find(|s| s.id == id) {
+            sink.view_chunks = chunks;
+        }
+    }
+
     /// Records a player's new position and facing, so a later arrival is told
     /// where they actually are rather than where they logged on.
     pub fn update_pose(&self, id: u64, pos: (f64, f64, f64), yaw: f32, pitch: f32) {
@@ -274,8 +302,6 @@ impl Broadcast {
     ///   twenty identical packets a second otherwise, each of which every other
     ///   client decodes and discards.
     pub fn send_movement(&self, id: u64, on_ground: bool) {
-        const RANGE: f64 = 64.0;
-
         let mut sinks = self.sinks.lock().unwrap_or_else(|e| e.into_inner());
         // Copied out rather than borrowed: the loop below mutates the very
         // sinks it is reading, and a borrow of one while another is written
@@ -298,13 +324,19 @@ impl Broadcast {
                 continue;
             };
 
-            // How far this observer is from the player, which is not the same
-            // thing as how far the player moved. A player crossing the room in
-            // one step is a short movement and a long distance.
+            // How far away this observer is from the player, **horizontally**.
+            // The game measures x and z and ignores y, and that is the whole
+            // difference between this and the obvious three-dimensional
+            // version: measuring vertically as well hides two players standing
+            // three blocks apart on a hillside, which is precisely the case
+            // somebody on the ridge wants to be able to see.
+            //
+            // The range is the observer's own view distance, because it is
+            // their client that has to hold the body.
+            let range = visible_range(sink.view_chunks);
             let ex = subject_pos.0 - sink.pos.0;
-            let ey = subject_pos.1 - sink.pos.1;
             let ez = subject_pos.2 - sink.pos.2;
-            let too_far = ex * ex + ey * ey + ez * ez > RANGE * RANGE;
+            let too_far = ex * ex + ez * ez > range * range;
 
             if too_far {
                 // Take the body out of their world rather than stopping the
@@ -960,6 +992,87 @@ mod tests {
     }
 
     #[test]
+    fn a_player_straight_above_you_is_still_visible() {
+        // The reason the distance is measured horizontally.
+        //
+        // A three-dimensional check is the obvious one to write and it hides
+        // two players standing three blocks apart on a hillside, which is the
+        // case somebody on the ridge below most wants to be able to see. The
+        // game measures x and z and ignores y entirely.
+        let wire = Broadcast::new();
+        let lower = wire.register("lower", [1u8; 16], 1, (0.0, 0.0, 0.0));
+        let upper = wire.register("upper", [2u8; 16], 2, (3.0, 300.0, 0.0));
+        wire.set_view_distance(lower.id, 8);
+        wire.note_told(lower.id, upper.id, (3.0, 300.0, 0.0), 0.0, 0.0);
+
+        wire.update_pose(upper.id, (3.0, 305.0, 0.0), 0.0, 0.0);
+        wire.send_movement(upper.id, false);
+
+        assert!(
+            lower.inbox.try_recv().is_ok(),
+            "three blocks away horizontally, three hundred vertically"
+        );
+    }
+
+    #[test]
+    fn how_far_a_player_is_visible_is_the_observers_own_view_distance() {
+        // Not a fixed constant. One player's render distance deciding
+        // everybody's is not how the game does it.
+        for (chunks, expect_visible, expect_gone) in
+            [(2, 32.0, 33.0), (8, 128.0, 129.0), (16, 256.0, 257.0)]
+        {
+            let wire = Broadcast::new();
+            let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
+            let watcher = wire.register("watcher", [2u8; 16], 2, (0.0, 64.0, 0.0));
+            wire.set_view_distance(watcher.id, chunks);
+            wire.note_told(watcher.id, mover.id, (0.0, 64.0, 0.0), 0.0, 0.0);
+
+            // Walk out in small steps: a delta carries under eight blocks, so a
+            // jump further than that arrives as a position instead and this
+            // test is about the range, not about the step size.
+            let mut at = 0.0;
+            while at + 4.0 < expect_visible {
+                at += 4.0;
+                wire.update_pose(mover.id, (at, 64.0, 0.0), 0.0, 0.0);
+                wire.send_movement(mover.id, true);
+                assert!(
+                    watcher.inbox.try_recv().is_ok(),
+                    "walking out to {} blocks",
+                    at
+                );
+            }
+
+            wire.update_pose(mover.id, (expect_visible, 64.0, 0.0), 0.0, 0.0);
+            wire.send_movement(mover.id, true);
+            let inside = watcher
+                .inbox
+                .try_recv()
+                .unwrap_or_else(|_| panic!("nothing at {expect_visible} blocks"));
+            assert_eq!(
+                inside[0],
+                crate::protocol::play::id::MOVE_ENTITY_POS_ROT as u8,
+                "at {} blocks it is still a movement",
+                expect_visible
+            );
+            assert!(watcher.inbox.try_recv().is_err(), "and only that");
+
+            wire.update_pose(mover.id, (expect_gone, 64.0, 0.0), 0.0, 0.0);
+            wire.send_movement(mover.id, true);
+            let outside = watcher
+                .inbox
+                .try_recv()
+                .unwrap_or_else(|_| panic!("at {expect_gone} blocks, out of range"));
+            assert_eq!(
+                outside[0],
+                crate::protocol::play::id::REMOVE_ENTITIES as u8,
+                "and just past {} blocks the body is taken away",
+                chunks * 16
+            );
+            assert!(watcher.inbox.try_recv().is_err(), "once");
+        }
+    }
+
+    #[test]
     fn walking_out_of_range_removes_the_body_rather_than_freezing_it() {
         // Stopping the updates looks identical from the server and completely
         // different from the client: the client still holds the entity and
@@ -970,7 +1083,7 @@ mod tests {
         let watcher = wire.register("watcher", [2u8; 16], 2, (0.0, 64.0, 0.0));
         wire.note_told(watcher.id, mover.id, (0.0, 64.0, 0.0), 0.0, 0.0);
 
-        wire.update_pose(mover.id, (100.0, 64.0, 0.0), 0.0, 0.0);
+        wire.update_pose(mover.id, (200.0, 64.0, 0.0), 0.0, 0.0);
         wire.send_movement(mover.id, true);
 
         let gone = watcher
@@ -991,7 +1104,7 @@ mod tests {
         let watcher = wire.register("watcher", [2u8; 16], 2, (0.0, 64.0, 0.0));
         wire.note_told(watcher.id, mover.id, (0.0, 64.0, 0.0), 0.0, 0.0);
 
-        wire.update_pose(mover.id, (100.0, 64.0, 0.0), 0.0, 0.0);
+        wire.update_pose(mover.id, (200.0, 64.0, 0.0), 0.0, 0.0);
         wire.send_movement(mover.id, true);
         assert!(watcher.inbox.try_recv().is_ok(), "the first crossing removes it");
 
@@ -1014,7 +1127,7 @@ mod tests {
         let watcher = wire.register("watcher", [2u8; 16], 2, (0.0, 64.0, 0.0));
         wire.note_told(watcher.id, mover.id, (0.0, 64.0, 0.0), 0.0, 0.0);
 
-        wire.update_pose(mover.id, (100.0, 64.0, 0.0), 0.0, 0.0);
+        wire.update_pose(mover.id, (200.0, 64.0, 0.0), 0.0, 0.0);
         wire.send_movement(mover.id, true);
         watcher.inbox.try_recv().expect("removed");
 

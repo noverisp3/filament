@@ -67,8 +67,19 @@ pub enum Command {
     BreakBlock { pos: BlockPos, reply: Sender<Option<i32>> },
     /// The state at a position, if the chunk holding it has been built.
     BlockAt { pos: BlockPos, reply: Sender<Option<i32>> },
+    /// The world's own block id at a position.
+    ///
+    /// Not the game's state id. Hardness is keyed by what the world calls a
+    /// block, and handing out a state id would mean walking back through
+    /// thirty-five thousand of them to find out which block was mined.
+    WorldBlock {
+        pos: BlockPos,
+        reply: Sender<Option<BlockId>>,
+    },
     /// Drop a chunk the player has walked away from.
     Forget { pos: ChunkPos },
+    /// The terrain palette, which is five block ids and never changes.
+    TerrainBlocks { reply: Sender<TerrainBlocks> },
     /// How many chunks the world is holding.
     ChunkCount { reply: Sender<usize> },
 }
@@ -118,6 +129,21 @@ impl WorldHandle {
     /// The state at a position, if the chunk holding it exists.
     pub fn block_at(&self, pos: BlockPos) -> Option<Option<i32>> {
         self.ask(|reply| Command::BlockAt { pos, reply })
+    }
+
+    /// The world's own block id at a position, for anything keyed by block rather
+    /// than by what the game calls it.
+    pub fn world_block(&self, pos: BlockPos) -> Option<Option<BlockId>> {
+        self.ask(|reply| Command::WorldBlock { pos, reply })
+    }
+
+    /// The terrain generator's block ids, for anything that needs to recognise a
+    /// block: hardness, mostly.
+    ///
+    /// A copy, because handing out a borrow would mean holding the lock across
+    /// the caller, and the lock is on the other side of a channel.
+    pub fn terrain_blocks(&self) -> Option<TerrainBlocks> {
+        self.ask(|reply| Command::TerrainBlocks { reply })
     }
 
     /// Drops a chunk the player has walked away from.
@@ -208,6 +234,14 @@ fn apply(world: &mut World, command: Command) {
             let _ = reply.send(state_at(world, pos));
         }
 
+        Command::WorldBlock { pos, reply } => {
+            let _ = reply.send(world.block(pos));
+        }
+
+        Command::TerrainBlocks { reply } => {
+            let _ = reply.send(*world.terrain_blocks());
+        }
+
         Command::Forget { pos } => {
             world.forget_chunk(pos);
         }
@@ -251,24 +285,40 @@ fn state_at(world: &mut World, pos: BlockPos) -> Option<i32> {
     world.block(pos).map(|block| to_state_id(block, &terrain))
 }
 
-/// Maps one of the world's block ids onto the game's state id.
+/// The game's name for one of the world's blocks.
 ///
-/// The two registries are unrelated. Air is zero in both by coincidence, and
-/// nothing else lines up.
-pub fn to_state_id(block: BlockId, terrain: &TerrainBlocks) -> i32 {
+/// The two registries are unrelated: the world's ids are fixed by registration
+/// order and the game's are indices into a generated table of thirty-five
+/// thousand states. Air is zero in both by coincidence, and nothing else lines
+/// up, so every crossing between them goes through the name.
+pub fn to_state_name(block: BlockId, terrain: &TerrainBlocks) -> &'static str {
     if block == terrain.air {
-        state_id("minecraft:air")
+        "minecraft:air"
     } else if block == terrain.grass {
-        state_id("minecraft:grass_block")
+        "minecraft:grass_block"
     } else if block == terrain.dirt {
-        state_id("minecraft:dirt")
+        "minecraft:dirt"
     } else if block == terrain.stone {
-        state_id("minecraft:stone")
+        "minecraft:stone"
     } else if block == terrain.glowstone {
-        state_id("minecraft:glowstone")
+        "minecraft:glowstone"
     } else {
-        panic!("the terrain generator produced a block this cannot map")
+        panic!("the terrain generator produced a block this cannot name")
     }
+}
+
+/// Maps one of the world's block ids onto the game's state id.
+pub fn to_state_id(block: BlockId, terrain: &TerrainBlocks) -> i32 {
+    state_id(to_state_name(block, terrain))
+}
+
+/// How long a block takes to break, from the generated table.
+///
+/// `None` when the table has nothing for it, which is the honest answer: a
+/// made-up number paces the mining crack against a time the client does not
+/// share, and the crack loses its last few stages.
+pub fn hardness_of(block: BlockId, terrain: &TerrainBlocks) -> Option<f32> {
+    crate::generated::hardness_of(to_state_name(block, terrain))
 }
 
 /// Reads a block's state id out of the generated table.

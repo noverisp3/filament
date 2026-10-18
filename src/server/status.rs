@@ -809,9 +809,27 @@ fn play(
                 } else {
                     match action.action {
                         p::PlayerAction::StartDestroy => {
+                            // Read the block now so the crack is paced against
+                            // this block rather than a guess. A world edited
+                            // underneath the crack cannot change its pace
+                            // halfway through, because the duration is carried
+                            // from here.
+                            let duration = {
+                                let Some(terrain) = session.world.terrain_blocks() else {
+                                    return Ok(());
+                                };
+                                let mined = session
+                                    .world
+                                    .world_block(pos)
+                                    .flatten()
+                                    .unwrap_or(terrain.air);
+                                break_time(mined, &terrain)
+                            };
+
                             mining = Some(Mining {
                                 pos,
                                 started: std::time::Instant::now(),
+                                duration,
                             });
                             last_stage = None;
                         }
@@ -1060,36 +1078,88 @@ const KEEP_ALIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(15)
 /// that a crack moves visibly.
 const LOOP_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// How long a block takes to break.
+/// Seconds of bare-handed breaking per point of hardness.
 ///
-/// The game looks this up per block and per tool: dirt is quick, obsidian is
-/// not, a bare hand is slower than a pickaxe. None of that is here, because
-/// neither the tool in the player's hand nor the block's hardness is: the world
-/// has five blocks in its registry and the game has thirty-five thousand states
-/// with no hardness table alongside them.
+/// The game's own numbers, read out of the decompiled block definitions rather
+/// than remembered, and they line up exactly:
 ///
-/// So one duration for everything, chosen to look like ordinary dirt. It is
-/// wrong for every block that is not dirt, and it is written down as wrong rather
-/// than tuned to feel right and left looking deliberate.
-const BREAK_TIME: std::time::Duration = std::time::Duration::from_millis(1250);
+/// ```text
+/// dirt        strength(0.5)  ->  0.5 * 1.5 = 0.75s
+/// grass_block strength(0.6)  ->  0.6 * 1.5 = 0.90s
+/// stone       strength(1.5)  ->  1.5 * 1.5 = 2.25s
+/// ```
+///
+/// The first number of `strength` is the hardness and the second is the blast
+/// resistance, which has nothing to do with how long a block takes to mine.
+const SECONDS_PER_HARDNESS: f64 = 1.5;
 
-/// A block being broken, and when it started.
+/// How long a block takes to break in bare hands.
+///
+/// The hardness comes from the generated table, which reads it out of the
+/// game's own block definitions. The factor is the game's: a bare hand takes
+/// one and a half seconds per point of hardness, which the three blocks this
+/// world generates check out against exactly.
+///
+/// What is still missing is the tool. The client's number is much shorter with
+/// the right one in hand, and nothing here knows what is in the player's hand,
+/// because the inventory is not implemented and so there is nothing to have a
+/// tool in. With a tool the client finishes before the crack does, and the crack
+/// is still cut short. That is the remaining half of this, and it waits on the
+/// inventory.
+fn break_time(block: crate::world::block::BlockId, terrain: &crate::world::terrain::TerrainBlocks) -> std::time::Duration {
+    let hardness = crate::server::ticking::hardness_of(block, terrain)
+        // Nothing in the table is ever a negative number the crack can use, and
+        // a negative hardness means the block cannot be broken at all.
+        .filter(|h| *h > 0.0)
+        .unwrap_or(FALLBACK_HARDNESS);
+
+    std::time::Duration::from_secs_f64(f64::from(hardness) * SECONDS_PER_HARDNESS)
+}
+
+/// The hardness used when the table has nothing.
+///
+/// Dirt's, which is the quickest thing a bare hand can break. Too short only
+/// makes a crack finish early; too long makes the client cut it off, and the cut
+/// is the one that looks broken.
+const FALLBACK_HARDNESS: f32 = 0.5;
+
+/// A block being broken, when it started, and how long it should take.
+///
+/// The duration is carried per break rather than looked up each pass: the block
+/// is read once, at the start, so a world being edited underneath the crack
+/// cannot change its pace halfway through.
 struct Mining {
     pos: crate::world::pos::BlockPos,
     started: std::time::Instant,
+    duration: std::time::Duration,
 }
 
 impl Mining {
     /// How far through the break this is, as one of the ten crack stages.
-    ///
-    /// Clamped rather than allowed to run past nine: the client only has ten
-    /// cracks, and a stage past the end is a number it has no picture for. The
-    /// block itself is removed by the client's stop packet, which is what actually
-    /// ends it.
     fn stage(&self) -> i8 {
-        let done = self.started.elapsed().as_secs_f64() / BREAK_TIME.as_secs_f64();
-        ((done * 10.0) as i8).min(9)
+        stage_at(self.started.elapsed(), self.duration)
     }
+}
+
+/// The crack stage for an elapsed time, out of ten.
+///
+/// Integer arithmetic, because the floating point version was wrong at exactly
+/// the points that matter. A tenth of a break is a ratio like 0.1, which is not
+/// representable in binary, so `elapsed / duration * 10` came out as
+/// 0.9999999999999999 and truncating it to an integer gave stage zero instead of
+/// one. The stages that vanished were the ones landing on a boundary, so the
+/// crack sat a stage behind at every tenth and then caught up.
+///
+/// Clamped at nine: the client has ten cracks and no picture for a higher one.
+/// The block itself is removed by the client's stop packet, which is what
+/// actually ends the break.
+fn stage_at(elapsed: std::time::Duration, duration: std::time::Duration) -> i8 {
+    let total = duration.as_nanos();
+    if total == 0 {
+        return 0;
+    }
+    let done = elapsed.as_nanos().saturating_mul(10) / total;
+    done.min(9) as i8
 }
 
 /// Takes the crack off a block, if there was one on that block.
@@ -1236,43 +1306,102 @@ mod tests {
     use crate::server::ticking::{state_id, to_state_id};
     use super::*;
 
-    /// A break that started `ago`.
-    fn mining_ago(ago: std::time::Duration) -> Mining {
-        Mining {
-            pos: crate::world::pos::BlockPos::new(0, 0, 0),
-            // Subtracted from now rather than assembled, so the test does not care
-            // how long ago it was written down and start failing as time passes.
-            started: std::time::Instant::now() - ago,
-        }
+    /// The palette the generator makes, so the hardness table can be keyed on it.
+    fn terrain() -> crate::world::terrain::TerrainBlocks {
+        crate::world::terrain::register_terrain(&mut crate::world::block::BlockRegistry::new())
+    }
+
+    /// How long dirt takes in bare hands: hardness 0.5 at the rate above.
+    ///
+    /// The quickest block the generator makes, standing in for an arbitrary
+    /// break time in the crack tests.
+    const DIRT_BREAK: std::time::Duration = std::time::Duration::from_millis(750);
+
+    #[test]
+    fn break_times_are_the_games_own_numbers() {
+        // Read out of the decompiled block definitions by tools/extract_hardness.py,
+        // at one and a half seconds per point of hardness for a bare hand. These
+        // are the numbers a client uses to decide when it is finished, so a
+        // server using different ones gets its crack cut short.
+        let t = terrain();
+
+        assert_eq!(break_time(t.dirt, &t), DIRT_BREAK);
+        assert_eq!(
+            break_time(t.stone, &t),
+            DIRT_BREAK * 3,
+            "stone is three times dirt"
+        );
+
+        // Halfway cases are where an f32 shows up, so the tenths are compared
+        // as tenths rather than as exact seconds.
+        let tenths = |block| (break_time(block, &t).as_secs_f64() * 10.0).round() as i64;
+        assert_eq!(tenths(t.dirt), 8, "0.75s");
+        assert_eq!(tenths(t.grass), 9, "0.9s");
+        assert_eq!(tenths(t.stone), 23, "2.25s, three times dirt");
+        assert_eq!(tenths(t.glowstone), 5, "0.45s");
+    }
+
+    #[test]
+    fn a_block_that_cannot_be_broken_does_not_pace_a_crack() {
+        // Hardness is negative for the fifteen blocks with no break time at all,
+        // barrier among them. Multiplying a negative number by the rate gives a
+        // negative duration, and dividing by it gives a stage that is nonsense.
+        assert_eq!(
+            crate::generated::hardness_of("minecraft:barrier"),
+            Some(-1.0),
+            "which is how the table says it"
+        );
+
+        let t = terrain();
+        assert!(
+            break_time(t.air, &t) > std::time::Duration::ZERO,
+            "and air falls back rather than going negative"
+        );
     }
 
     #[test]
     fn a_crack_starts_at_stage_zero_and_finishes_at_nine() {
         // The two ends, because the interesting part is that the first one is a
         // real stage rather than the absence of one.
-        assert_eq!(mining_ago(std::time::Duration::ZERO).stage(), 0);
-        assert_eq!(mining_ago(BREAK_TIME * 2).stage(), 9, "clamped, not past the end");
+        assert_eq!(stage_at(std::time::Duration::ZERO, DIRT_BREAK), 0);
+        assert_eq!(stage_at(DIRT_BREAK * 2, DIRT_BREAK), 9, "clamped, not past the end");
     }
 
     #[test]
     fn a_crack_moves_through_its_stages_over_time() {
-        let tenth = BREAK_TIME / 10;
-        let mut seen = Vec::new();
-        for i in 0..10 {
-            seen.push(mining_ago(tenth * i).stage());
-        }
+        // A tenth of dirt's break in whole milliseconds, rather than dividing a
+        // duration and multiplying the result. `DIRT_BREAK / 10 * n` reads as
+        // dividing by ten times n, because division and multiplication bind
+        // equally and the left one wins, and that is a test which checks a
+        // different thing from the one it claims to.
+        let tenth = 75u64;
+
+        let stages: Vec<i8> = (0..10u64)
+            .map(|n| stage_at(std::time::Duration::from_millis(tenth * n), DIRT_BREAK))
+            .collect();
 
         assert_eq!(
-            seen,
+            stages,
             vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
             "ten stages over the length of one break"
         );
     }
 
     #[test]
+    fn a_slower_block_takes_longer_to_crack() {
+        // The same elapsed time is further through a dirt break than a stone
+        // one, because stone takes three times as long. Half of dirt's break is
+        // halfway through dirt and a sixth of the way through stone.
+        let half_of_dirt = DIRT_BREAK / 2;
+
+        assert_eq!(stage_at(half_of_dirt, DIRT_BREAK), 5);
+        assert_eq!(stage_at(half_of_dirt, DIRT_BREAK * 3), 1);
+    }
+
+    #[test]
     fn a_crack_that_has_been_held_stays_at_the_last_stage() {
-        assert_eq!(mining_ago(BREAK_TIME).stage(), 9, "the last stage, held");
-        assert_eq!(mining_ago(BREAK_TIME * 100).stage(), 9, "and held longer");
+        assert_eq!(stage_at(DIRT_BREAK, DIRT_BREAK), 9, "the last stage, held");
+        assert_eq!(stage_at(DIRT_BREAK * 100, DIRT_BREAK), 9, "and held longer");
     }
 
     #[test]

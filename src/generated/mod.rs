@@ -22,6 +22,7 @@
 
 mod blocks;
 mod hardness;
+mod items;
 mod registries;
 mod tags;
 
@@ -29,6 +30,7 @@ pub use blocks::{
     BlockDef, BlockState, Property, BLOCKS, BLOCK_COUNT, BLOCK_STATE_COUNT,
 };
 pub use hardness::{HARDNESS, hardness_of};
+pub use items::{ITEMS, item_id, item_name};
 pub use registries::{REGISTRY_DATA_COUNT, REGISTRY_DATA_FRAMES};
 pub use tags::{TAG_COUNTS, TAG_TOTAL, UPDATE_TAGS_BODY};
 

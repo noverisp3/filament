@@ -12,6 +12,7 @@ use std::thread;
 
 use crate::protocol::frame::{FrameDecoder, FrameEncoder, FrameError};
 use crate::protocol::handshake::{ClientIntent, ClientIntention, ServerStatus, status_response_body};
+use crate::protocol::item::{self, Inventory, ItemStack};
 use crate::protocol::{VarInt, VarLong};
 
 use super::log::{next_connection_id, packet_name, ConnLog};
@@ -989,7 +990,21 @@ fn play(
     // missing write.
     flush_buffer(stream, &mut out)?;
 
-    // 13. Keep the connection alive, and follow the player.
+    // 13. What they are carrying, which is nothing.
+    //
+    // Sent as the whole window rather than a slot at a time, which is what the
+    // game does on arrival. An empty inventory is forty-six zero bytes, so the
+    // cost is one packet and it is sent once.
+    {
+        let mut body = Vec::new();
+        item::write_container_set_content(&mut body, &Inventory::empty(), 0);
+        send(&mut out, &body, "container_set_content", &log)?;
+        stream.write_all(&out)?;
+        stream.flush()?;
+        out.clear();
+    }
+
+    // 14. Keep the connection alive, and follow the player.
     //
     //     The client hangs up after thirty seconds of silence and reads silence
     //     as "the server has stopped answering". There is no tick loop yet, so
@@ -1033,6 +1048,21 @@ fn play(
     // Where the player is, updated by the movement packets. The spawn is where
     // the teleport above put it.
     let mut player = spawn;
+
+    // What they are carrying, which starts empty and is filled by what they
+    // break.
+    //
+    // The client keeps its own copy and draws it immediately, so the server has
+    // to say what it thinks rather than leave the client to guess: a player
+    // holding nothing the server has never heard of is a player holding
+    // something they cannot put down.
+    let mut inventory = Inventory::empty();
+
+    // Slot changes to tell them about, each already a whole packet.
+    //
+    // Kept apart from the block edits because they are answered to nobody else:
+    // what one player is carrying is not on anyone else's screen.
+    let mut slots: Vec<(usize, Option<ItemStack>)> = Vec::new();
 
     // The cache center the client was last told about. The client keeps chunks
     // only within the view distance of this point, so it has to move with the
@@ -1217,6 +1247,53 @@ fn play(
                                 p::write_block_update(&mut body, bx, by, bz, now);
                                 edits.push(body);
 
+                                // And into their hand, which is how a player
+                                // gets something to build with. The game drops
+                                // an item entity for the player to walk over
+                                // and pick up; there is no item entity here yet,
+                                // so the block goes straight into the inventory,
+                                // and a player who digs a hole has the dirt to
+                                // fill it in again.
+                                //
+                                // The block that was there has a name, and that
+                                // name is usually also an item -- grass block is
+                                // `minecraft:grass_block` both ways, and the item
+                                // id is a different number from the block state
+                                // one: dirt is state 10 and item 484. Where there
+                                // is no item of that name the block is simply not
+                                // something that can be held, and nothing is
+                                // given.
+                                let terrain = session.world.terrain_blocks();
+                                let name_of = |state: i32| {
+                                    terrain
+                                        .map(|t| {
+                                            crate::server::ticking::state_id_name(state, &t)
+                                                .to_string()
+                                        })
+                                        .unwrap_or_else(|| format!("state {state}"))
+                                };
+                                if let Some(terrain) = terrain {
+                                    let held = crate::server::ticking::state_id_name(was, &terrain);
+                                    if let Some(item) =
+                                        crate::generated::item_id(&format!("minecraft:{held}"))
+                                    {
+                                        // Into the slot that already holds this
+                                        // item, or the first free one, so twenty
+                                        // blocks in a row stack rather than
+                                        // filling the hotbar a slot at a time.
+                                        let slot = (0..item::slots::COUNT)
+                                            .find(|&s| {
+                                                inventory
+                                                    .get(s)
+                                                    .is_none_or(|held| held.item == item as i32)
+                                            });
+                                        if let Some(slot) = slot {
+                                            inventory.add(ItemStack::new(item as i32, 1));
+                                            slots.push((slot, inventory.get(slot)));
+                                        }
+                                    }
+                                }
+
                                 // What was there, what is there now, and the
                                 // prediction number the client asked about.
                                 //
@@ -1341,7 +1418,7 @@ fn play(
         // it predicted the block going: the game excludes them, and sending it
         // to them gives everyone watching a single break and the player who did
         // it two.
-        if !edits.is_empty() || !effects.is_empty() || !acks.is_empty() {
+        if !edits.is_empty() || !effects.is_empty() || !acks.is_empty() || !slots.is_empty() {
             let outgoing = std::mem::take(&mut edits);
             let effects = std::mem::take(&mut effects);
             let acks = std::mem::take(&mut acks);
@@ -1355,6 +1432,24 @@ fn play(
             // belongs to the player who made it.
             for body in &acks {
                 enc.encode(body, &mut framed).map_err(io_err)?;
+            }
+            // Nor do the slot changes. What one player is carrying is on
+            // nobody else's screen, and broadcasting it would show everyone
+            // what everyone else is holding.
+            for (slot, stack) in std::mem::take(&mut slots) {
+                let mut body = Vec::new();
+                item::write_container_set_slot(&mut body, slot, stack, 0);
+                enc.encode(&body, &mut framed).map_err(io_err)?;
+                if super::log::verbose() {
+                    log.note(format!(
+                        "container_set_slot {slot} {}",
+                        stack.map_or("empty".into(), |s| format!(
+                            "{} x{}",
+                            crate::generated::item_name(s.item as u32).unwrap_or("?"),
+                            s.count
+                        ))
+                    ));
+                }
             }
             // What this player is about to be handed, named.
             //

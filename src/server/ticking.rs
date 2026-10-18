@@ -76,6 +76,17 @@ pub enum Command {
     },
     /// Break a block, and report the state now standing there.
     BreakBlock { pos: BlockPos, reply: Sender<Option<i32>> },
+    /// Put a block back, the other way round from breaking one.
+    ///
+    /// Through [`World::set_block`] rather than `set_block_quiet`, so that it
+    /// is remembered in the journal: a block placed and then walked away from
+    /// would otherwise be gone when the chunk came back, which is the same fault
+    /// in the other direction and was the one two commits ago.
+    SetBlock {
+        pos: BlockPos,
+        block: BlockId,
+        reply: Sender<bool>,
+    },
     /// The state at a position, if the chunk holding it has been built.
     BlockAt { pos: BlockPos, reply: Sender<Option<i32>> },
     /// The world's own block id at a position.
@@ -182,6 +193,15 @@ impl WorldHandle {
     /// world has never built.
     pub fn break_block(&self, pos: BlockPos) -> Option<Option<i32>> {
         self.ask(|reply| Command::BreakBlock { pos, reply })
+    }
+
+    /// Puts a block down, and reports whether it went anywhere.
+    ///
+    /// `false` means the world declined: no chunk holding that position has been
+    /// built, or the block was already what was being put there. Neither is an
+    /// error and neither should cost the player the block they were holding.
+    pub fn set_block(&self, pos: BlockPos, block: BlockId) -> Option<bool> {
+        self.ask(|reply| Command::SetBlock { pos, block, reply })
     }
 
     /// The state at a position, if the chunk holding it exists.
@@ -499,6 +519,10 @@ fn apply(world: &mut World, command: Command, pool: &Pool) {
             let broke = world.break_block(pos).is_some();
             let state = broke.then(|| state_at(world, pos)).flatten();
             let _ = reply.send(state);
+        }
+
+        Command::SetBlock { pos, block, reply } => {
+            let _ = reply.send(world.set_block(pos, block).is_some());
         }
 
         Command::BlockAt { pos, reply } => {

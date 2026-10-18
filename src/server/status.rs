@@ -286,7 +286,18 @@ fn login(
     // profile goes out so that a push arriving in the same moment as the
     // profile is queued rather than lost, and taken back down when the
     // connection ends however it ends.
-    let registration = session.wire.register(&name);
+    //
+    // The entity id is taken here rather than inside play() because it is part
+    // of what a registration is: the tab list, the body and every later movement
+    // are all addressed by it, so a player who is registered without one cannot
+    // be described to anybody else.
+    let entity_id = crate::server::next_entity_id();
+    let registration = session.wire.register(
+        &name,
+        profile_id.bytes(),
+        entity_id,
+        crate::protocol::play::SPAWN,
+    );
     let player_id = registration.id;
     log.note(format!(
         "player {name:?} is player {player_id}, {} in total",
@@ -542,6 +553,10 @@ fn play(
     let player_id = registration.id;
     let log = log.phase("play");
 
+    // Armed here and dropped however this function returns, so a player who
+    // disconnects mid-write is announced the same as one who leaves politely.
+    let _departure = super::broadcast::Departure::arm(session.wire.clone(), &registration);
+
     // Compression carries over from the configuration phase; both sides keep
     // it for the rest of the connection.
     let mut scratch = [0u8; 8192];
@@ -556,7 +571,10 @@ fn play(
     // 1. Login. The entity id comes from the shared counter rather than being
     //    written as 0, which is not a valid id: the client reads it as "not yet
     //    assigned" and throws when it adds the player to the level.
-    let entity_id = crate::server::next_entity_id();
+    //
+    //    It was taken before the registration, so this is the same one that the
+    //    other players are told about.
+    let entity_id = registration.entity_id;
     let mut body = Vec::new();
     p::write_login(
         &mut body,
@@ -600,6 +618,12 @@ fn play(
     // 5. The spawn. Halfway between block corners, so the player is inside a
     //    block rather than on a seam, and above the sea level the login says.
     let spawn = p::Movement::default();
+    debug_assert_eq!(
+        (spawn.x, spawn.y, spawn.z),
+        p::SPAWN,
+        "the position packet and the position other players are told about \
+         must be the same one"
+    );
     let mut body = Vec::new();
     p::write_player_position(&mut body, 1, &spawn);
     send(&mut out, &body, "player_position", &log)?;
@@ -696,7 +720,72 @@ fn play(
 
     log.note("chunks sent; terrain generated, and it is not persisted");
 
-    // 12. Keep the connection alive, and follow the player.
+    // 12. The other players, and telling them about this one.
+    //
+    //     Two directions, and both are needed. A player who arrives into an
+    //     empty-looking world is not being told about anybody, and the players
+    //     already here have no reason to know a new one turned up. Doing only one
+    //     of the two is the usual way this goes wrong: everyone can see who is
+    //     already there and the new arrival appears to be alone.
+    //
+    //     They go out after the chunks, because a body needs somewhere to stand.
+    //
+    //     Order matters within each player: the tab list entry first, then the
+    //     body. The other way round is a client that has an entity it has never
+    //     been told the name of, which it renders as a nameless figure or, on
+    //     some versions, does not render at all.
+    let others = session.wire.snapshot();
+    for other in &others {
+        if other.id == player_id {
+            // This connection is in the snapshot, because it was registered
+            // before this point so that nothing arriving in the gap is lost.
+            // Being in your own world is not something you are told.
+            continue;
+        }
+        let mut info = Vec::new();
+        p::write_player_info_add(&mut info, other.uuid, &other.name);
+        send(&mut out, &info, "player_info_add", &log)?;
+
+        let mut entity_packet = Vec::new();
+        p::write_add_entity(
+            &mut entity_packet,
+            other.entity_id,
+            other.uuid,
+            p::PLAYER_ENTITY_TYPE,
+            other.pos,
+            other.yaw,
+            other.pitch,
+        );
+        send(&mut out, &entity_packet, "add_entity", &log)?;
+    }
+
+    let player_name = registration.name.clone();
+    let player_uuid = registration.uuid;
+    let player_yaw = spawn.yaw;
+    let player_pitch = spawn.pitch;
+
+    if !others.iter().any(|o| o.id != player_id) {
+        log.note("first player on the server; nobody to be introduced to");
+    } else {
+        let mut info = Vec::new();
+        p::write_player_info_add(&mut info, player_uuid, &player_name);
+        session.wire.send_others(player_id, info);
+
+        let mut entity_packet = Vec::new();
+        p::write_add_entity(
+            &mut entity_packet,
+            entity_id,
+            player_uuid,
+            p::PLAYER_ENTITY_TYPE,
+            p::SPAWN,
+            player_yaw,
+            player_pitch,
+        );
+        session.wire.send_others(player_id, entity_packet);
+        log.note(format!("announced to the {} already here", others.len() - 1));
+    }
+
+    // 13. Keep the connection alive, and follow the player.
     //
     //     The client hangs up after thirty seconds of silence and reads silence
     //     as "the server has stopped answering". There is no tick loop yet, so
@@ -1383,8 +1472,8 @@ mod tests {
         // break look like two. The block update is the opposite case and does go
         // to them: it says what is there now, and their guess may be wrong.
         let wire = crate::server::broadcast::Broadcast::new();
-        let breaker = wire.register("breaker");
-        let watcher = wire.register("watcher");
+        let breaker = wire.register("breaker", [1u8; 16], 1, crate::protocol::play::SPAWN);
+        let watcher = wire.register("watcher", [2u8; 16], 2, crate::protocol::play::SPAWN);
 
         let mut update = Vec::new();
         crate::protocol::play::write_block_update(&mut update, 1, 2, 3, 0);

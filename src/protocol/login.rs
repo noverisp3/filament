@@ -73,6 +73,17 @@ impl Uuid {
         Uuid(u128::from_be_bytes(out))
     }
 
+    /// The same id as the sixteen big-endian bytes the play phase carries it as.
+    ///
+    /// A `u128` here because that is what the login phase's string form is
+    /// parsed from and compared against, and keeping one representation avoids a
+    /// conversion at every call site. The play phase wants raw bytes, and a
+    /// conversion that exists only to be forgotten at one of its call sites is
+    /// a conversion worth naming once.
+    pub fn bytes(&self) -> [u8; 16] {
+        self.0.to_be_bytes()
+    }
+
     pub fn read(r: &mut &[u8]) -> Result<Self, DecodeError> {
         if r.len() < 16 {
             return Err(DecodeError::UnexpectedEof {

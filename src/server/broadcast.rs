@@ -38,11 +38,44 @@
 use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-/// One player's queue and the name they are known by.
+/// One player's queue, and enough about them for somebody else to be told they
+/// are here.
 struct Sink {
     id: u64,
     name: String,
+    uuid: [u8; 16],
     out: Sender<Vec<u8>>,
+    /// The id the client knows this player by, which is not the same as the
+    /// profile uuid and not the same as the registration id either. Three ids
+    /// for one person, none of them derivable from the others.
+    entity_id: i32,
+    /// Where they are and which way they face.
+    ///
+    /// Held here rather than kept by the connection because the connection has
+    /// nowhere to be asked: the thread that learns a player moved is not the
+    /// thread that needs to tell anyone, and the one that needs to tell anyone
+    /// does not know it happened until the queue says so.
+    pos: (f64, f64, f64),
+    yaw: f32,
+    pitch: f32,
+}
+
+/// What a connection needs to know about another player to put them in its world.
+///
+/// The name says the tab list, which is only part of it. The entity id is what
+/// the tab list, the body and every later movement are all addressed by, so the
+/// connection's own entity id cannot be worked out locally from the name and has
+/// to be carried across.
+#[derive(Clone, Debug)]
+pub struct PlayerInfo {
+    pub id: u64,
+    pub name: String,
+    pub uuid: [u8; 16],
+    /// The connection's entity id, the one the client knows them by.
+    pub entity_id: i32,
+    pub pos: (f64, f64, f64),
+    pub yaw: f32,
+    pub pitch: f32,
 }
 
 /// A registered player: who they are, and the queue that reaches them.
@@ -53,13 +86,23 @@ struct Sink {
 pub struct Registration {
     /// Which player this is, for telling everyone but them.
     pub id: u64,
+    /// Who they are, carried here because the connection outlives the function
+    /// that read the name off the login.
+    pub name: String,
+    pub uuid: [u8; 16],
+    /// The entity id the client knows this player by, for packets that address
+    /// the body rather than the profile.
+    pub entity_id: i32,
     /// The connection's end of the queue.
     pub inbox: Receiver<Vec<u8>>,
 }
 
 impl std::fmt::Debug for Registration {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Registration").field("id", &self.id).finish()
+        f.debug_struct("Registration")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .finish()
     }
 }
 
@@ -93,7 +136,13 @@ impl Broadcast {
     ///
     /// The receiver is the connection's to drain. It ends when the player is
     /// removed, or when the broadcast is dropped.
-    pub fn register(&self, name: &str) -> Registration {
+    pub fn register(
+        &self,
+        name: &str,
+        uuid: [u8; 16],
+        entity_id: i32,
+        pos: (f64, f64, f64),
+    ) -> Registration {
         let (out, inbox) = channel();
 
         let mut id = self.next_id.lock().unwrap_or_else(|e| e.into_inner());
@@ -104,10 +153,42 @@ impl Broadcast {
         sinks.push(Sink {
             id,
             name: name.to_string(),
+            uuid,
             out,
+            entity_id,
+            pos,
+            yaw: 0.0,
+            pitch: 0.0,
         });
 
-        Registration { id, inbox }
+        Registration {
+            id,
+            name: name.to_string(),
+            uuid,
+            entity_id,
+            inbox,
+        }
+    }
+
+    /// Everyone who is here, for a connection that has just arrived.
+    ///
+    /// Taken as a copy under one lock rather than handed out as references,
+    /// because the caller writes these out over its own socket, which can block,
+    /// and a lock held across a blocked write is a lock nobody else can take.
+    pub fn snapshot(&self) -> Vec<PlayerInfo> {
+        let sinks = self.sinks.lock().unwrap_or_else(|e| e.into_inner());
+        sinks
+            .iter()
+            .map(|s| PlayerInfo {
+                id: s.id,
+                name: s.name.clone(),
+                uuid: s.uuid,
+                entity_id: s.entity_id,
+                pos: s.pos,
+                yaw: s.yaw,
+                pitch: s.pitch,
+            })
+            .collect()
     }
 
     /// Removes a player. Their queue is dropped, which ends their connection's
@@ -133,8 +214,7 @@ impl Broadcast {
     }
 
     /// How many players are listening.
-    pub fn player_count(&self) -> usize {
-        self.sinks
+    pub fn player_count(&self) -> usize {        self.sinks
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .len()
@@ -147,15 +227,113 @@ impl Broadcast {
     }
 }
 
+/// Announces that a player has gone, when their connection ends however it ends.
+///
+/// A guard rather than a call at the end of the connection, because the
+/// connection has a great many ways out — a clean return, a read error, a write
+/// that failed, an early return when the world would not answer — and a line of
+/// cleanup written at the bottom of a function is reached by none of the others.
+/// A value that is dropped is reached by all of them, including the ones nobody
+/// writes down.
+pub struct Departure {
+    wire: std::sync::Arc<Broadcast>,
+    id: u64,
+    entity_id: i32,
+    uuid: [u8; 16],
+    name: String,
+}
+
+impl Departure {
+    /// Arms the announcement. Nothing is sent until this value is dropped.
+    pub fn arm(wire: std::sync::Arc<Broadcast>, reg: &Registration) -> Self {
+        Self {
+            wire,
+            id: reg.id,
+            entity_id: reg.entity_id,
+            uuid: reg.uuid,
+            name: reg.name.clone(),
+        }
+    }
+}
+
+impl Drop for Departure {
+    fn drop(&mut self) {
+        // Only worth announcing to somebody. A server that just lost its first
+        // player has nobody to tell, and building the packets for nobody is
+        // work that grows with every join on an empty server.
+        if self.wire.player_count() > 1 {
+            // The body first, then the tab list entry, matching the order they
+            // arrived in: the client is holding a name for a body it is about to
+            // stop drawing, which is briefly a ghost in the tab list.
+            let mut body = Vec::new();
+            crate::protocol::play::write_remove_entities(&mut body, &[self.entity_id]);
+            self.wire.send_others(self.id, body);
+
+            let mut info = Vec::new();
+            crate::protocol::play::write_player_info_remove(&mut info, &[self.uuid]);
+            self.wire.send_others(self.id, info);
+        }
+
+        // After the announcement, so the packets are queued to the sinks that
+        // are still there rather than to one that has already been dropped.
+        self.wire.remove(self.id);
+        crate::server::log::note(format!(
+            "player {:?} (entity {}) left, {} remaining",
+            self.name,
+            self.entity_id,
+            self.wire.player_count()
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A registration with the parts these tests do not care about filled in.
+    ///
+    /// A uuid that is all zeroes is not a uuid a real player would have, and
+    /// nothing here looks at one. Naming the helper rather than spelling out
+    /// four arguments at each call keeps the tests about the queue, which is
+    /// what they are actually about.
+    fn join(wire: &Broadcast, name: &str) -> Registration {
+        wire.register(name, [0u8; 16], 1, crate::protocol::play::SPAWN)
+    }
+
+    #[test]
+    fn a_player_arriving_is_told_about_the_ones_already_here() {
+        let wire = std::sync::Arc::new(Broadcast::new());
+        let first = wire.register("first", [1u8; 16], 7, (0.0, 64.0, 0.0));
+        let second = wire.register("second", [2u8; 16], 9, (0.0, 64.0, 0.0));
+
+        let seen = wire.snapshot();
+        assert_eq!(
+            seen.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            vec!["first", "second"],
+            "the second arrival is handed both, including the one before it"
+        );
+
+        // Each entry carries the things the receiving side cannot work out for
+        // itself: the name, the profile uuid, and the entity id the client will
+        // address the body by.
+        let me = seen.iter().find(|p| p.name == "second").expect("the second arrival");
+        assert_eq!(me.uuid, [2u8; 16]);
+        assert_eq!(me.entity_id, 9);
+        assert_eq!(me.id, second.id);
+        assert_ne!(
+            me.id, me.entity_id as u64,
+            "the registration id and the entity id are unrelated numbers, and \
+             sending one where the other belongs addresses the wrong player"
+        );
+        let _ = first;
+    }
+
+
     #[test]
     fn a_push_reaches_everyone_but_the_one_who_caused_it() {
         let wire = Broadcast::new();
-        let mine = wire.register("digger");
-        let theirs = wire.register("watcher");
+        let mine = join(&wire, "digger");
+        let theirs = join(&wire, "watcher");
 
         wire.send_others(mine.id, b"a hole".to_vec());
 
@@ -172,8 +350,8 @@ mod tests {
     #[test]
     fn a_removed_player_is_reached_by_nothing_further() {
         let wire = Broadcast::new();
-        let gone = wire.register("leaving");
-        let stayer = wire.register("staying");
+        let gone = join(&wire, "leaving");
+        let stayer = join(&wire, "staying");
 
         wire.remove(gone.id);
         wire.send_others(stayer.id, b"hello".to_vec());
@@ -188,9 +366,9 @@ mod tests {
     #[test]
     fn ids_do_not_repeat_when_someone_comes_back() {
         let wire = Broadcast::new();
-        let first = wire.register("first");
+        let first = join(&wire, "first");
         wire.remove(first.id);
-        let second = wire.register("second");
+        let second = join(&wire, "second");
 
         assert_ne!(first.id, second.id, "or a stale queue could be addressed as it");
     }
@@ -205,8 +383,8 @@ mod tests {
         // body at all, and the client reports the position as eight bytes it
         // did not expect.
         let wire = Broadcast::new();
-        let mine = wire.register("digger");
-        let theirs = wire.register("watcher");
+        let mine = join(&wire, "digger");
+        let theirs = join(&wire, "watcher");
 
         let mut body = Vec::new();
         crate::protocol::play::write_block_update(&mut body, 1, 2, 3, 4);
@@ -235,8 +413,8 @@ mod tests {
     #[test]
     fn names_come_back_for_the_log() {
         let wire = Broadcast::new();
-        wire.register("noverisp3");
-        wire.register("notrealyet_");
+        join(&wire, "noverisp3");
+        join(&wire, "notrealyet_");
         assert_eq!(wire.names(), vec!["noverisp3", "notrealyet_"]);
     }
 }

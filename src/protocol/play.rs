@@ -61,7 +61,18 @@ pub mod id {
     pub const BLOCK_UPDATE: i32 = 8;
     // How far through breaking a block the client should draw the crack.
     pub const BLOCK_DESTRUCTION: i32 = 5;
-    // A thing happening at a position: a sound, or a burst of particles.
+    // Putting another player into this client's world.
+    pub const ADD_ENTITY: i32 = 1;
+    // Taking them out of it again.
+    pub const REMOVE_ENTITIES: i32 = 78;
+    // Which way they are looking.
+    pub const ROTATE_HEAD: i32 = 85;
+    // The tab list: who is here and what they are called.
+    // (PLAYER_INFO_UPDATE and PLAYER_INFO_REMOVE are declared above, next to the
+    // other clientbound ids, and both are off by one from each other.)
+    // Where they moved, as a delta rather than an absolute position.
+    pub const MOVE_ENTITY_POS_ROT: i32 = 55;
+    // The drop of a block when it is destroyed.
     pub const LEVEL_EVENT: i32 = 47;
     // The clientbound packet that tells the client to drop a chunk.
     pub const FORGET_LEVEL_CHUNK: i32 = 38;
@@ -646,6 +657,176 @@ pub fn write_block_destruction(out: &mut Vec<u8>, breaker: i32, pos: (i32, i32, 
     out.push(stage as u8);
 }
 
+/// Where a player stands on arrival: the middle of a block at the surface, so
+/// inside it rather than on a seam between four.
+///
+/// Written as a constant because two places need to agree on it and neither can
+/// check the other: this connection puts the player here, and the connections of
+/// everybody else are told the player is here. If the two disagreed the player
+/// would appear somewhere they did not arrive.
+pub const SPAWN: (f64, f64, f64) = (0.5, 64.0, 0.5);
+
+/// The entity type id for a player, in the registry the client was sent.
+///
+/// Read out of the data generator's report, where the entry carries an explicit
+/// protocol id and the 161 of them run from 0 to 160 with nothing missing. That
+/// matters: the client numbers this registry by the order it arrived in the
+/// login frames, so an id that is off by one is a client trying to spawn the
+/// wrong thing and, most likely, refusing to spawn anything at all.
+pub const PLAYER_ENTITY_TYPE: i32 = 159;
+
+/// Writes a `player_info_update`, the tab list.
+///
+/// This is the fiddliest packet in the set, and the shape is worth stating
+/// plainly before the code:
+///
+/// ```text
+/// VarInt   a bit per action, set
+/// VarInt   how many entries follow
+///   for each entry:
+///     16 bytes  the profile's uuid, always
+///     then only the fields of the actions that were set, in the order they
+///              appear in the enum
+/// ```
+///
+/// The uuid first, unconditionally, is the part that is easy to get wrong. It
+/// is not one of the actions and it is not the entity id: the upstream codec
+/// writes `entry.profileId()` before it walks the actions at all, because the
+/// whole tab list is keyed by uuid and the entity id is something the client
+/// works out for itself. An entity id here is sixteen wrong bytes and the client
+/// disconnects.
+///
+/// Only three actions are set, which is the smallest set that leaves a player a
+/// client can name, play as and show:
+///
+/// - **bit 0, ADD_PLAYER**: a name and the properties of its profile. The
+///   properties map is a count and then that many entries, and an offline
+///   profile owns none.
+/// - **bit 6, UPDATE_GAME_MODE**: a game mode index. Zero is survival.
+/// - **bit 8, UPDATE_LATENCY**: a latency in milliseconds. Zero is fine.
+///
+/// The rest of the enum exists and is not set: chat sessions, display names,
+/// listed, and the rest. The mask and the fields written after it are written
+/// together in one function precisely so they cannot drift apart.
+pub fn write_player_info_add(out: &mut Vec<u8>, uuid: [u8; 16], name: &str) {
+    // ADD_PLAYER | UPDATE_GAME_MODE | UPDATE_LATENCY
+    let mask = (1 << 0) | (1 << 6) | (1 << 8);
+
+    VarInt(id::PLAYER_INFO_UPDATE).write(out);
+    VarInt(mask).write(out);
+    VarInt(1).write(out);
+
+    // The profile's uuid, before any action field.
+    out.extend_from_slice(&uuid);
+
+    // ADD_PLAYER: the name, then the profile's properties, which are none.
+    // A string on the wire is its byte length as a VarInt and then its UTF-8.
+    // The length is in bytes and not in characters, which matters the moment
+    // somebody has an accent in their name.
+    VarInt(name.len() as i32).write(out);
+    out.extend_from_slice(name.as_bytes());
+    VarInt(0).write(out);
+
+    // UPDATE_GAME_MODE: survival.
+    VarInt(0).write(out);
+
+    // UPDATE_LATENCY: zero.
+    VarInt(0).write(out);
+}
+
+/// Writes a `player_info_remove`, taking players out of the tab list.
+///
+/// Sent alongside `remove_entities` and for the same reason: an entry left in
+/// the tab list for a player who is gone is a client that keeps a name for
+/// somebody who has left.
+///
+/// By uuid, and not by entity id, which is the same reason the update above is:
+/// the list is keyed by profile, and the entity id is only ever something this
+/// side remembers.
+pub fn write_player_info_remove(out: &mut Vec<u8>, uuids: &[[u8; 16]]) {
+    VarInt(id::PLAYER_INFO_REMOVE).write(out);
+    VarInt(uuids.len() as i32).write(out);
+    for uuid in uuids {
+        out.extend_from_slice(uuid);
+    }
+}
+
+/// Writes an `add_entity`: putting somebody into the world.
+///
+/// The three angles are a byte each, and they are **quantised to 1/256 of a
+/// turn**, so 90.0 degrees is 64 and not 90. A full circle is 256.
+///
+/// The movement delta is a quantised vector rather than three doubles, which
+/// surprised me and is worth writing down: fifteen bits a component plus two
+/// scale bits, packed into one long. A player standing still has a delta of
+/// zero, so zero it is. Movement after this arrives as its own packet with
+/// relative deltas and does not use this.
+pub fn write_add_entity(
+    out: &mut Vec<u8>,
+    entity_id: i32,
+    uuid: [u8; 16],
+    entity_type: i32,
+    pos: (f64, f64, f64),
+    yaw: f32,
+    pitch: f32,
+) {
+    VarInt(id::ADD_ENTITY).write(out);
+    VarInt(entity_id).write(out);
+    out.extend_from_slice(&uuid);
+    VarInt(entity_type).write(out);
+
+    out.extend_from_slice(&pos.0.to_be_bytes());
+    out.extend_from_slice(&pos.1.to_be_bytes());
+    out.extend_from_slice(&pos.2.to_be_bytes());
+
+    // The quantised delta, zero because this player has not moved yet.
+    out.extend_from_slice(&0i64.to_be_bytes());
+
+    // The order of the four angles is body yaw, body pitch, head yaw, head
+    // pitch. The head is written twice on purpose: the head turns with the body
+    // unless it is looking somewhere else, and at spawn there is nowhere else.
+    out.push(angle_byte(yaw));
+    out.push(angle_byte(pitch));
+    out.push(angle_byte(yaw));
+    out.push(angle_byte(pitch));
+
+    // The data value: zero for a player, one for living things generally.
+    VarInt(1).write(out);
+}
+
+/// Writes a `remove_entities`, taking them out of the world.
+pub fn write_remove_entities(out: &mut Vec<u8>, entity_ids: &[i32]) {
+    VarInt(id::REMOVE_ENTITIES).write(out);
+    VarInt(entity_ids.len() as i32).write(out);
+    for id in entity_ids {
+        VarInt(*id).write(out);
+    }
+}
+
+/// Writes a `rotate_head`, so a client knows which way somebody is looking.
+pub fn write_rotate_head(out: &mut Vec<u8>, entity_id: i32, yaw: f32) {
+    VarInt(id::ROTATE_HEAD).write(out);
+    VarInt(entity_id).write(out);
+    out.push(angle_byte(yaw));
+}
+
+/// One angle in the byte the protocol uses for it: 1/256 of a turn.
+///
+/// Two and a quarter degrees a step, so a face is not very precise. It is what
+/// the protocol carries, and rounding to it is better than truncating, which
+/// would put every facing a step below where it should be.
+fn angle_byte(degrees: f32) -> u8 {
+    let steps = degrees / 360.0 * 256.0;
+    // Round half away from zero, and fold the result back into a byte so a
+    // negative yaw wraps rather than saturating.
+    let rounded = if steps < 0.0 {
+        -(-steps + 0.5).floor()
+    } else {
+        (steps + 0.5).floor()
+    };
+    (rounded as i64).rem_euclid(256) as u8
+}
+
 /// A level event is a thing that happened at a place: a sound, or a burst of
 /// particles.
 ///
@@ -754,6 +935,137 @@ pub fn write_chunk_batch_finished(out: &mut Vec<u8>, batch_size: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reads a VarInt back out of a body, for tests that care about what a
+    /// packet actually says rather than that it was produced.
+    fn take_varint(b: &mut &[u8]) -> i32 {
+        let mut value = 0i32;
+        let mut shift = 0;
+        loop {
+            let byte = b[0];
+            *b = &b[1..];
+            value |= ((byte & 0x7f) as i32) << shift;
+            if byte & 0x80 == 0 {
+                return value;
+            }
+            shift += 7;
+        }
+    }
+
+    #[test]
+    fn an_angle_is_a_two_hundred_and_fifty_sixth_of_a_turn() {
+        assert_eq!(angle_byte(0.0), 0);
+        assert_eq!(angle_byte(90.0), 64);
+        assert_eq!(angle_byte(180.0), 128);
+        assert_eq!(angle_byte(-90.0), 192);
+        assert_eq!(angle_byte(360.0), 0, "a full turn is back to the start");
+        // It rounds rather than truncates, or every face sits one step below
+        // where it should be.
+        assert_eq!(angle_byte(1.40625), 1, "one step is 1.40625 degrees");
+    }
+
+    #[test]
+    fn the_player_entity_type_is_the_one_from_the_registry() {
+        // Off by one here and the client tries to spawn whatever is next in the
+        // registry, or nothing at all.
+        assert_eq!(PLAYER_ENTITY_TYPE, 159);
+    }
+
+    #[test]
+    fn the_tab_list_entry_says_the_three_things_a_client_needs() {
+        let mut body = Vec::new();
+        write_player_info_add(&mut body, [3u8; 16], "Steve");
+
+        let mut b = &body[..];
+        assert_eq!(take_varint(&mut b), id::PLAYER_INFO_UPDATE);
+        let mask = take_varint(&mut b);
+        assert_eq!(mask & 1, 1, "ADD_PLAYER is set");
+        assert_eq!((mask >> 6) & 1, 1, "UPDATE_GAME_MODE is set");
+        assert_eq!((mask >> 8) & 1, 1, "UPDATE_LATENCY is set");
+        assert_eq!(take_varint(&mut b), 1, "one entry");
+
+        // The uuid comes first and is sixteen bytes. It is not an action and it
+        // is not the entity id, and putting an entity id here is sixteen wrong
+        // bytes that end the connection.
+        assert_eq!(&b[..16], &[3u8; 16][..], "the profile uuid");
+        b = &b[16..];
+
+        assert_eq!(take_varint(&mut b), 5, "the name is five bytes");
+        assert_eq!(&b[..5], b"Steve");
+        b = &b[5..];
+        assert_eq!(take_varint(&mut b), 0, "and an offline profile owns no properties");
+        assert_eq!(take_varint(&mut b), 0, "survival");
+        assert_eq!(take_varint(&mut b), 0, "no latency");
+        assert!(b.is_empty(), "and nothing else, or the client reads past it");
+    }
+
+    #[test]
+    fn taking_a_player_off_the_tab_list_is_by_uuid() {
+        let mut body = Vec::new();
+        write_player_info_remove(&mut body, &[[1u8; 16], [2u8; 16]]);
+
+        let mut b = &body[..];
+        assert_eq!(take_varint(&mut b), id::PLAYER_INFO_REMOVE);
+        assert_eq!(take_varint(&mut b), 2);
+        assert_eq!(&b[..16], &[1u8; 16][..]);
+        assert_eq!(&b[16..32], &[2u8; 16][..]);
+        assert!(b[32..].is_empty());
+    }
+
+    #[test]
+    fn a_name_is_measured_in_bytes_and_not_in_characters() {
+        let mut body = Vec::new();
+        write_player_info_add(&mut body, [0u8; 16], "Tiến");
+        let mut b = &body[..];
+        // Packet id, the action mask and the entry count, then the uuid. The
+        // mask is 321, which is a two byte VarInt, so counting bytes here
+        // rather than fields would be wrong.
+        for _ in 0..3 {
+            take_varint(&mut b);
+        }
+        b = &b[16..];
+        // Four characters, six bytes of UTF-8.
+        assert_eq!(take_varint(&mut b), 6);
+    }
+
+    #[test]
+    fn an_entity_carries_a_zero_delta_because_it_has_not_moved_yet() {
+        let mut body = Vec::new();
+        write_add_entity(
+            &mut body,
+            7,
+            [9u8; 16],
+            PLAYER_ENTITY_TYPE,
+            (1.5, 64.0, -2.5),
+            90.0,
+            0.0,
+        );
+
+        let mut b = &body[..];
+        assert_eq!(take_varint(&mut b), id::ADD_ENTITY);
+        assert_eq!(take_varint(&mut b), 7);
+        assert_eq!(&b[..16], &[9u8; 16][..]);
+        b = &b[16..];
+        assert_eq!(take_varint(&mut b), PLAYER_ENTITY_TYPE);
+        assert_eq!(&b[..8], &1.5f64.to_be_bytes()[..], "x");
+        assert_eq!(&b[8..16], &64.0f64.to_be_bytes()[..], "y");
+        assert_eq!(&b[16..24], &(-2.5f64).to_be_bytes()[..], "z");
+        b = &b[24..];
+        assert_eq!(&b[..8], &0i64.to_be_bytes()[..], "a quantised delta of zero");
+        b = &b[8..];
+        assert_eq!(b[0], 64, "yaw east");
+        assert_eq!(b[1], 0, "pitch level");
+        assert_eq!(b[2], 64, "and the head turns with the body");
+        assert_eq!(b[3], 0, "without tipping over");
+    }
+
+    #[test]
+    fn removing_nobody_is_still_a_well_formed_packet() {
+        let mut body = Vec::new();
+        write_remove_entities(&mut body, &[]);
+        assert_eq!(body[0], id::REMOVE_ENTITIES as u8);
+        assert_eq!(body[1], 0, "a count of zero, not a missing one");
+    }
 
     const LEVELS: [&str; 3] = ["minecraft:overworld", "minecraft:the_nether", "minecraft:the_end"];
 

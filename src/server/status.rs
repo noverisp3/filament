@@ -747,9 +747,15 @@ fn play(
     // that the player walks out of, with chunks arriving that never draw.
     let mut center_sent = (0i32, 0i32);
 
-    // Blocks changed by the player, sent out after the drain rather than
-    // during it, so a burst of edits is one write.
-    let mut edits = Vec::new();
+    // Blocks changed by the player, each already a whole packet.
+    //
+    // One packet each, not one packet per pass. A frame carries a length and
+    // then exactly one packet, so two edits written into one buffer and framed
+    // once arrive as a single frame holding two packets: the client reads the
+    // first, finds ten bytes where there should be none, and hangs up. Two edits
+    // in one pass is not exotic, it is what a player holding the mouse down
+    // does.
+    let mut edits: Vec<Vec<u8>> = Vec::new();
 
     loop {
         while let Some(frame) = dec.next_frame().map_err(io_err)? {
@@ -817,11 +823,18 @@ fn play(
                         p::PlayerAction::StopDestroy => {
                             clear_crack(&mut mining, last_stage, &session, player_id, entity_id);
                             if session.world.break_block(pos).flatten().is_some() {
-                                edits.push((bx, by, bz));
+                                let state = session
+                                    .world
+                                    .block_at(pos)
+                                    .flatten()
+                                    .unwrap_or(AIR_STATE);
+
+                                let mut body = Vec::new();
+                                p::write_block_update(&mut body, bx, by, bz, state);
+                                edits.push(body);
+
                                 if super::log::verbose() {
-                                    log.note(format!(
-                                        "broke the block at {bx} {by} {bz}"
-                                    ));
+                                    log.note(format!("broke the block at {bx} {by} {bz}"));
                                 }
                             }
                         }
@@ -859,26 +872,20 @@ fn play(
         // it is gone. Without the second half the other player keeps drawing it
         // as well, until they walk away and back and the chunk is sent again.
         //
-        // The body is built once and framed twice over: once here with this
-        // connection's encoder, and once in each other connection, with theirs.
-        // Compression is per connection, so a framed packet cannot be shared.
+        // Each edit is framed on its own, and each body goes out whole: framing
+        // adds a length and nothing else, so a body sent without the packet id
+        // arrives with the first byte of the position standing in for it, and
+        // two bodies framed together arrive as one packet with ten bytes over.
+        //
+        // The framed bytes cannot be shared between connections, because
+        // compression is per connection, so each one is framed again on the far
+        // side with that player's encoder.
         if !edits.is_empty() {
-            let mut body = Vec::new();
-            for (bx, by, bz) in &edits {
-                let pos = crate::world::pos::BlockPos::new(*bx, *by, *bz);
-                let state = session.world.block_at(pos).flatten().unwrap_or(AIR_STATE);
-                p::write_block_update(&mut body, *bx, *by, *bz, state);
-            }
-
-            // The body goes out whole. The packet id is part of it, because
-            // framing adds a length and nothing else: a body sent without the id
-            // arrives as a packet whose id is the first byte of the position,
-            // which is 8 here, and id 8 is bundle_delimiter, whose body is
-            // nothing. The client then reports the eight bytes it did not expect.
-            session.wire.send_others(player_id, body.clone());
-
             let mut framed = Vec::new();
-            enc.encode(&body, &mut framed).map_err(io_err)?;
+            for body in &edits {
+                session.wire.send_others(player_id, body.clone());
+                enc.encode(body, &mut framed).map_err(io_err)?;
+            }
             stream.write_all(&framed)?;
             stream.flush()?;
         }
@@ -1266,6 +1273,54 @@ mod tests {
     fn a_crack_that_has_been_held_stays_at_the_last_stage() {
         assert_eq!(mining_ago(BREAK_TIME).stage(), 9, "the last stage, held");
         assert_eq!(mining_ago(BREAK_TIME * 100).stage(), 9, "and held longer");
+    }
+
+    #[test]
+    fn two_edits_are_two_frames_and_not_one_frame_holding_two_packets() {
+        // The bug this is for: both edits written into one buffer and framed
+        // once, so the frame claimed a length that covered two packets. The
+        // client reads the first, finds ten bytes where there should be none,
+        // and hangs up. Both clients died, so it looked like the crack and was
+        // not.
+        let enc = crate::protocol::frame::FrameEncoder::new();
+
+        let mut first = Vec::new();
+        crate::protocol::play::write_block_update(&mut first, 1, 2, 3, 0);
+        let mut second = Vec::new();
+        crate::protocol::play::write_block_update(&mut second, 4, 5, 6, 0);
+
+        assert_eq!(first.len(), 10, "one block update is ten bytes");
+
+        // What the code used to do: both bodies into one frame.
+        let mut both = first.clone();
+        both.extend_from_slice(&second);
+        let mut one_frame = Vec::new();
+        enc.encode(&both, &mut one_frame).expect("framed");
+
+        // What it does now: a frame each.
+        let mut two_frames = Vec::new();
+        enc.encode(&first, &mut two_frames).expect("framed");
+        enc.encode(&second, &mut two_frames).expect("framed");
+
+        assert_ne!(
+            one_frame, two_frames,
+            "these are different streams, which is the whole point"
+        );
+
+        // The length the single frame claims is the whole of both packets, so
+        // after the client has read one it has ten bytes left in a frame that
+        // should have ended.
+        let claimed = {
+            let mut r = &one_frame[..];
+            // read gives back the VarInt and how many bytes it took; the value
+            // is inside the VarInt.
+            crate::protocol::VarInt::read(&mut r).expect("a length").0 .0
+        };
+        assert_eq!(claimed, both.len() as i32);
+        assert_eq!(
+            claimed, 2 * first.len() as i32,
+            "twice what one packet needs, which is how ten bytes end up over"
+        );
     }
 
     /// Generates a chunk and reads the blocks back out of the wire bytes.

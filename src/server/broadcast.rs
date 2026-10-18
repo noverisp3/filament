@@ -279,7 +279,7 @@ impl Broadcast {
         };
         let (subject_entity_id, subject_pos, subject_yaw, subject_pitch) = subject;
 
-        let mut bodies = Vec::new();
+        let mut deliveries: Vec<(u64, Vec<u8>)> = Vec::new();
         for sink in sinks.iter_mut() {
             if sink.id == id {
                 continue;
@@ -326,7 +326,7 @@ impl Broadcast {
                 subject_pitch,
                 on_ground,
             );
-            bodies.push(body);
+            deliveries.push((sink.id, body));
 
             sink.seen.insert(
                 id,
@@ -338,11 +338,13 @@ impl Broadcast {
             );
         }
 
-        for body in bodies {
-            for sink in sinks.iter() {
-                if sink.id != id {
-                    let _ = sink.out.send(body.clone());
-                }
+        // One packet, to the one observer it was measured for. Collecting the
+        // bodies and then sending each of them to everybody would give every
+        // observer one movement per observer, so the body would advance at the
+        // square of the player count and walk off in the sky.
+        for (observer, body) in deliveries {
+            if let Some(sink) = sinks.iter().find(|s| s.id == observer) {
+                let _ = sink.out.send(body);
             }
         }
     }
@@ -616,6 +618,22 @@ mod tests {
 
         let to_watcher = watcher.inbox.try_recv().expect("the watcher again");
         let to_late = late.inbox.try_recv().expect("the latecomer too");
+
+        // Exactly one each. This assertion is the one that was missing, and its
+        // absence is why a server with two observers sent everybody else's
+        // movement as well: each observer received one packet per observer, so
+        // the body advanced twice as fast as it was told it had and walked off
+        // into the sky. The delta values were all correct, which is why the
+        // earlier version of this test passed while the game was visibly wrong.
+        assert!(
+            watcher.inbox.try_recv().is_err(),
+            "one packet per movement, however many are watching"
+        );
+        assert!(
+            late.inbox.try_recv().is_err(),
+            "and the same for the other one"
+        );
+
         assert_eq!(
             read_delta_x(&to_watcher),
             1.0,
@@ -632,6 +650,39 @@ mod tests {
         // kept one copy of the mover's position, one of these would have been a
         // two block jump.
         assert_eq!(to_watcher, to_late);
+    }
+
+    #[test]
+    fn every_observer_gets_one_packet_and_not_one_per_observer() {
+        // Three watchers, so the mistake would have tripled the speed.
+        let wire = Broadcast::new();
+        let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
+        let mut watchers = Vec::new();
+        for i in 0..3 {
+            let w = wire.register(&format!("watcher{i}"), [2u8; 16], 100 + i, (0.0, 64.0, 0.0));
+            wire.note_told(w.id, mover.id, (0.0, 64.0, 0.0), 0.0, 0.0);
+            watchers.push(w);
+        }
+
+        wire.update_pose(mover.id, (1.0, 64.0, 0.0), 0.0, 0.0);
+        wire.send_movement(mover.id, true);
+
+        for w in &watchers {
+            assert_eq!(
+                read_delta_x(&w.inbox.try_recv().unwrap_or_else(|_| {
+                    panic!("watcher {} got nothing", w.name)
+                })),
+                1.0,
+                "watcher {} was told the move",
+                w.name
+            );
+            assert!(
+                w.inbox.try_recv().is_err(),
+                "watcher {} was told it more than once, and will walk at three \
+                 times the speed it was told about",
+                w.name
+            );
+        }
     }
 
     #[test]

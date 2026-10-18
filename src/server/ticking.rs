@@ -31,7 +31,9 @@
 //! first answer and it will not be the last: splitting the world across threads
 //! wants the world partitioned, and that is a much larger change than a channel.
 
+use crate::world::chunk::Chunk;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::world::block::BlockId;
@@ -63,6 +65,15 @@ const MAX_CATCH_UP: u32 = 5;
 pub enum Command {
     /// One chunk, as the body of a `level_chunk_with_light` packet.
     Chunk { pos: ChunkPos, reply: Sender<Vec<u8>> },
+    /// One chunk, but only if it is already here.
+    ///
+    /// Distinct from `Chunk` because the difference is the whole point: `Chunk`
+    /// builds it if it is missing, which takes as long as it takes, and asking
+    /// whether it is here must not be the thing that finds out.
+    StoredChunk {
+        pos: ChunkPos,
+        reply: Sender<Option<Vec<u8>>>,
+    },
     /// Break a block, and report the state now standing there.
     BreakBlock { pos: BlockPos, reply: Sender<Option<i32>> },
     /// The state at a position, if the chunk holding it has been built.
@@ -92,7 +103,20 @@ pub enum Command {
 #[derive(Clone)]
 pub struct WorldHandle {
     to_world: Sender<Command>,
+    /// Where chunks to build are handed over. Closed when every handle is
+    /// dropped, which is how the workers learn to stop.
+    work: Sender<ChunkPos>,
+    /// Positions already queued or being built, so two connections wanting the
+    /// same chunk do not both pay for it.
+    queued: Arc<Mutex<std::collections::HashSet<ChunkPos>>>,
 }
+
+/// A chunk a worker finished, on its way into the world.
+type Pending = (ChunkPos, Chunk);
+
+/// Positions queued or being built, so a second request for one does not pay
+/// for it twice and a worker finishing one lets the next request through.
+type Queued = Arc<Mutex<std::collections::HashSet<ChunkPos>>>;
 
 impl WorldHandle {
     /// Sends a command and waits for its answer.
@@ -109,10 +133,35 @@ impl WorldHandle {
             .ok()?;
         answer.recv().ok()
     }
-
-    /// One chunk, ready to frame and send.
+    /// Asks for a chunk without waiting for it to be built.
     ///
-    /// The body is returned rather than a chunk, because the caller needs bytes
+    /// Returns the body if the world already has that chunk, which is the usual
+    /// case once a worker has got to it. Otherwise the work goes to the pool and
+    /// `None` comes back now; asking again later returns it.
+    ///
+    /// The point of not waiting is the player this is called for. Generating a
+    /// chunk is the expensive half of answering, and doing it on the world's own
+    /// thread meant a player walking into new terrain stopped answering their
+    /// socket while it happened — so they sent no movement, and everyone
+    /// watching saw them stand still for as long as the ground took to build.
+    /// The client's own hitch is the client's; that one was ours.
+    pub fn want_chunk(&self, pos: ChunkPos) -> Option<Vec<u8>> {
+        if let Some(body) = self.ask(|reply| Command::StoredChunk { pos, reply })? {
+            return Some(body);
+        }
+
+        let mut queued = self.queued.lock().unwrap_or_else(|e| e.into_inner());
+        if queued.insert(pos) {
+            // Queued. The world's own thread takes it back off `queued` when the
+            // chunk lands, so a second request after that finds it stored.
+            if self.work.send(pos).is_err() {
+                queued.remove(&pos);
+            }
+        }
+        None
+    }
+    ///
+    /// One chunk, ready to frame and send.
     /// and the world does not know about compression or framing.
     pub fn chunk(&self, pos: ChunkPos) -> Option<Vec<u8>> {
         self.ask(|reply| Command::Chunk { pos, reply })
@@ -168,23 +217,109 @@ impl WorldHandle {
 pub fn spawn() -> WorldHandle {
     let (to_world, from_connections) = channel();
     let world = World::empty();
+    let terrain = *world.terrain_blocks();
+
+    let (work_tx, work_rx) = channel();
+    let work_rx = Arc::new(Mutex::new(work_rx));
+    let pending: Arc<Mutex<Vec<Pending>>> = Arc::new(Mutex::new(Vec::new()));
+    let queued = Arc::new(Mutex::new(std::collections::HashSet::new()));
 
     std::thread::Builder::new()
         .name("world".to_string())
-        .spawn(move || run(world, from_connections, |_| {}))
+        .spawn({
+            let pending = Arc::clone(&pending);
+            let queued = Arc::clone(&queued);
+            move || run(world, from_connections, pending, queued, |_| {})
+        })
         .expect("a thread can be spawned");
 
-    WorldHandle { to_world }
+    // Workers.
+    //
+    // The terrain generator is a pure function of a chunk's position and the
+    // block palette, so any number of these can run at once with nothing to
+    // share and nothing to lock. How many is a guess: this machine has four
+    // real cores, and the world thread wants one for itself.
+    for worker in 0..4 {
+        let rx = Arc::clone(&work_rx);
+        let pending = Arc::clone(&pending);
+        std::thread::Builder::new()
+            .name(format!("terrain-{worker}"))
+            .spawn(move || {
+                loop {
+                    // The lock is held while waiting for the next job, not
+                    // while building it, so the workers do run in parallel.
+                    let pos = {
+                        let rx = rx.lock().unwrap_or_else(|e| e.into_inner());
+                        // Closed when every handle is gone: the server has
+                        // shut down and there is nothing left to build for.
+                        let Ok(pos) = rx.recv() else { return };
+                        pos
+                    };
+
+                    let chunk = crate::world::terrain::generate_chunk(pos, &terrain);
+                    pending
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push((pos, chunk));
+                }
+            })
+            .expect("a thread can be spawned");
+    }
+
+    WorldHandle {
+        to_world,
+        work: work_tx,
+        queued,
+    }
+}
+
+/// The parts of the generation pool, for a world driven without one.
+///
+/// The sender is dropped on the floor, so nothing is ever queued: a test that
+/// asks for a missing chunk gets nothing back and has to ask again, which is
+/// the honest shape of the question. Tests that want a chunk built ask through
+/// [`WorldHandle::chunk`], which still builds it on the world's own thread.
+pub fn no_pool() -> (Arc<Mutex<Vec<Pending>>>, Queued, Sender<ChunkPos>) {
+    let (work, dropped) = channel();
+    // Keep the receiver alive so the sender does not report a broken pipe: a
+    // test world has no workers, and a closed channel would look like a server
+    // shutting down.
+    std::mem::forget(dropped);
+    (
+        Arc::new(Mutex::new(Vec::new())),
+        Arc::new(Mutex::new(std::collections::HashSet::new())),
+        work,
+    )
 }
 
 /// The loop. Split out so a test can drive it without a thread.
-pub fn run(mut world: World, commands: Receiver<Command>, mut tick: impl FnMut(&mut World)) -> u32 {
+pub fn run(
+    mut world: World,
+    commands: Receiver<Command>,
+    pending: Arc<Mutex<Vec<Pending>>>,
+    queued: Arc<Mutex<std::collections::HashSet<ChunkPos>>>,
+    mut tick: impl FnMut(&mut World),
+) -> u32 {
     let mut ticks = 0;
     let mut next_tick = Instant::now() + TICK;
 
     loop {
         let now = Instant::now();
         let wait = next_tick.saturating_duration_since(now);
+
+        // Take in anything the terrain pool has finished.
+        //
+        // Drained here rather than through a command so that a worker needs
+        // nothing from this thread's channel, and therefore nothing that keeps
+        // this thread alive: the pool stops when the last handle goes, and this
+        // stops when the same thing happens.
+        {
+            let mut ready = pending.lock().unwrap_or_else(|e| e.into_inner());
+            for (pos, chunk) in ready.drain(..) {
+                world.store_chunk(pos, chunk);
+                queued.lock().unwrap_or_else(|e| e.into_inner()).remove(&pos);
+            }
+        }
 
         match commands.recv_timeout(wait) {
             Ok(command) => apply(&mut world, command),
@@ -222,6 +357,11 @@ fn apply(world: &mut World, command: Command) {
             // A receiver that has gone is a connection that gave up waiting,
             // which is ordinary. The work was done either way.
             let _ = reply.send(body);
+        }
+        Command::StoredChunk { pos, reply } => {
+            // Only if it is here. Generating is somebody else's job now.
+            let terrain = *world.terrain_blocks();
+            let body = world.chunk(pos).map(|c| encode_chunk_body(c, &terrain, pos));            let _ = reply.send(body);
         }
 
         Command::BreakBlock { pos, reply } => {
@@ -263,13 +403,28 @@ fn chunk_body(world: &mut World, pos: ChunkPos) -> Vec<u8> {
 
     let terrain = *world.terrain_blocks();
     let chunk = world.chunk(pos).expect("the chunk was just stored");
+    encode_chunk_body(chunk, &terrain, pos)
+}
 
+/// Writes a chunk out as a packet body.
+///
+/// Pure: a chunk and the block palette go in, bytes come out, and it needs
+/// nothing else. That is what lets a worker thread outside the world do it,
+/// which matters because this half is not cheap either — sixteen thousand
+/// blocks and their light, every one of them looked up in a table of thirty-five
+/// thousand states.
+///
+/// A chunk's bytes are therefore not the same thing as the chunk. Once a block
+/// has been broken the stored chunk differs from the one these bytes were made
+/// from, so anything wanting current bytes asks the world again rather than
+/// keeping these.
+fn encode_chunk_body(chunk: &Chunk, terrain: &TerrainBlocks, pos: ChunkPos) -> Vec<u8> {
     let sections: Vec<Vec<i32>> = chunk
         .sections()
         .iter()
         .map(|s| {
             section::iter_blocks(s)
-                .map(|block| to_state_id(block, &terrain))
+                .map(|block| to_state_id(block, terrain))
                 .collect()
         })
         .collect();
@@ -434,11 +589,154 @@ mod tests {
     fn orphan_after_shutdown() -> Option<usize> {
         let (to_world, from_connections) = channel();
         drop(to_world);
+        let (pending, queued, _work) = no_pool();
+        let queued2 = std::sync::Arc::clone(&queued);
         // Run the loop with a closed channel, as it is after every handle goes.
-        run(World::empty(), from_connections, |_| {});
+        run(World::empty(), from_connections, pending, queued, |_| {});
 
-        let handle = WorldHandle { to_world: channel().0 };
+        let handle = WorldHandle {
+            to_world: channel().0,
+            work: channel().0,
+            queued: queued2,
+        };
         handle.chunk_count()
+    }
+
+    #[test]
+    fn asking_for_a_chunk_that_is_not_there_returns_at_once() {
+        // The property the whole pool exists for: a connection asking for
+        // terrain it has not got must not stand there waiting for it. It got
+        // this far by having no way to ask without waiting, which meant a player
+        // walking into new ground stopped answering their socket while the
+        // ground was built — and a player who is not answering is a player
+        // everybody watching sees standing still.
+        let (to_world, from_connections) = channel();
+        let (pending, queued, work) = no_pool();
+
+        // A world with no pool behind it, so nothing can ever arrive.
+        let queued2 = std::sync::Arc::clone(&queued);
+        let for_loop = std::sync::Arc::clone(&pending);
+
+        std::thread::spawn(move || {
+            run(World::empty(), from_connections, for_loop, queued, |_| {})
+        });
+        let _ = &pending;
+
+        let handle = WorldHandle {
+            to_world,
+            work,
+            queued: queued2,
+        };
+
+        let start = Instant::now();
+        assert!(
+            handle.want_chunk(ChunkPos { x: 4, z: 4 }).is_none(),
+            "it is not built, so there is nothing to send"
+        );
+        let took = start.elapsed();
+
+        assert!(
+            took < Duration::from_millis(50),
+            "and it said so in {took:?} rather than building it first"
+        );
+    }
+
+    #[test]
+    fn a_chunk_that_has_been_built_comes_back_the_second_time_it_is_asked_for() {
+        let (to_world, from_connections) = channel();
+        let (pending, queued, work) = no_pool();
+
+        // One copy of each for the loop's thread and one to keep in the test,
+        // so the test can play the part of the worker putting a chunk in.
+        let for_loop = std::sync::Arc::clone(&pending);
+        let queued_for_loop = std::sync::Arc::clone(&queued);
+        std::thread::spawn(move || {
+            run(World::empty(), from_connections, for_loop, queued_for_loop, |_| {})
+        });
+
+        let handle = WorldHandle {
+            to_world,
+            work,
+            queued,
+        };
+
+        let pos = ChunkPos { x: 7, z: -3 };
+        assert!(handle.want_chunk(pos).is_none(), "first time, nothing built yet");
+
+        // Somebody puts it there, the way a worker would.
+        let terrain = *World::empty().terrain_blocks();
+        let chunk = crate::world::terrain::generate_chunk(pos, &terrain);
+        pending.lock().unwrap().push((pos, chunk));
+
+        // The world's thread drains it into itself, and the next ask finds it.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let body = loop {
+            if let Some(body) = handle.want_chunk(pos) {
+                break body;
+            }
+            assert!(Instant::now() < deadline, "the chunk never arrived");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+
+        assert!(!body.is_empty(), "and it is a chunk packet body");
+    }
+
+    #[test]
+    fn the_real_pool_actually_hands_chunks_over() {
+        // The end to end of the thing the pool is for, with the workers running
+        // rather than a stand-in: ask for a chunk that is not there, get nothing
+        // back at once, and then get it.
+        //
+        // Without this the failure mode is silent and total. A world whose pool
+        // never hands anything over does not error, does not log, and does not
+        // crash — it leaves every player on the loading screen for ever, because
+        // the join waits for the whole batch and the batch never completes.
+        let handle = spawn();
+
+        let pos = ChunkPos { x: 3, z: 5 };
+        let start = Instant::now();
+        let body = loop {
+            if let Some(body) = handle.want_chunk(pos) {
+                break body;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "ten seconds and the pool still has not built {pos:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        assert!(
+            body.len() > 100,
+            "a chunk body is thousands of bytes, got {}",
+            body.len()
+        );
+    }
+
+    #[test]
+    fn the_real_pool_builds_more_than_one_chunk_at_once() {
+        // Four workers, asked for four corners of a ring. If they ran one after
+        // another this would still pass, just slower — so it checks that all
+        // four arrive, not how fast, and the speed claim is left to a
+        // measurement rather than asserted as a wall clock in a unit test.
+        let handle = spawn();
+        let wanted: Vec<ChunkPos> = (0..4).map(|i| ChunkPos { x: i * 7, z: i * 11 }).collect();
+
+        let start = Instant::now();
+        let mut got = 0;
+        while got < wanted.len() {
+            for pos in &wanted {
+                if handle.want_chunk(*pos).is_some() {
+                    got += 1;
+                }
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "only {got} of {} arrived",
+                wanted.len()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     const AIR: i32 = crate::protocol::chunk::AIR_STATE_ID;
@@ -450,7 +748,8 @@ mod tests {
         let counter = ticks.clone();
 
         let worker = std::thread::spawn(move || {
-            run(World::empty(), from_connections, move |_| {
+            let (pending, queued, _work) = no_pool();
+            run(World::empty(), from_connections, pending, queued, move |_| {
                 counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             })
         });
@@ -479,7 +778,8 @@ mod tests {
         // Nothing to serve, so this returns rather than ticking forever. That it
         // returns at all is the assertion: it is what lets a test build a world,
         // use it, and have it go away without reaching into the runtime.
-        let ticks = run(World::empty(), from_connections, |_| {});
+        let (pending, queued, _work) = no_pool();
+        let ticks = run(World::empty(), from_connections, pending, queued, |_| {});
 
         assert_eq!(ticks, 0, "no handles, so no ticks were due");
     }

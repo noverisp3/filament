@@ -94,6 +94,18 @@ impl World {
         false
     }
 
+    /// Stores a chunk that was generated somewhere else.
+    ///
+    /// The point of the method is that generating and storing are separate
+    /// jobs. Generating is a pure function of the position and the palette, so
+    /// it can happen on any thread and several at once; storing is a hash map
+    /// insert that has to happen on the thread that owns the map. Splitting them
+    /// is what lets a connection ask for a chunk without waiting for the
+    /// world's thread to have finished building it.
+    pub fn store_chunk(&mut self, pos: ChunkPos, chunk: Chunk) {
+        self.chunks.insert(pos, chunk);
+    }
+
     /// Drops a chunk and its edits.
     ///
     /// Called when the player walks out of range of it. The terrain comes back

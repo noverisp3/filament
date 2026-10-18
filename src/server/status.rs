@@ -700,20 +700,42 @@ fn play(
         }
 
         for (dx, dz) in chunks {
-            // Asked of the thread that owns the world, and waited for. The
-            // generation happens there rather than here, which is the whole
-            // reason the two hundred and eighty-nine of an initial join no
-            // longer block anyone else.
-            let Some(body) = session.world.chunk(ChunkPos { x: dx, z: dz }) else {
-                return Ok(());
-            };
+            // Asked for without waiting: either the world has it and the bytes
+            // come straight back, or the pool is told and the wait below picks
+            // it up when it lands.
+            session.world.want_chunk(ChunkPos { x: dx, z: dz });
+        }
+    }
 
+    // How many chunks the batch holds, so the wait below knows when it is done.
+    let expected_chunks = (2 * radius + 1) * (2 * radius + 1);
+
+    // Wait for the batch, asking again for anything the pool has not finished.
+    //
+    // The player is on a loading screen here, so this does wait — but it waits
+    // by asking, not by standing in the world thread's way. The chunk lands
+    // there as soon as a worker hands it over, and the next ask gets it. What
+    // used to happen is that this connection held the world's only thread for
+    // the length of the batch, so every other player on the server stopped
+    // being answered while this one loaded.
+    while sent_count < expected_chunks {
+        for (dx, dz) in wanted_positions(radius) {
+            if sent.contains(&(dx, dz)) {
+                continue;
+            }
+            let Some(body) = session.world.want_chunk(ChunkPos { x: dx, z: dz }) else {
+                continue;
+            };
             enc.encode(&body, &mut out).map_err(io_err)?;
             sent_count += 1;
             sent.insert((dx, dz));
             if super::log::verbose() {
                 log.out_packet("level_chunk_with_light", "play", body.len());
             }
+        }
+
+        if sent_count < expected_chunks {
+            std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
     let mut body = Vec::new();
@@ -1180,15 +1202,21 @@ fn play(
             let mut sorted = arriving.clone();
             sorted.sort_unstable();
 
+            // Asked for and sent if it is here. A chunk the pool has not
+            // finished is simply not in this batch: it is asked for again on
+            // the next pass and goes out then. That leaves the batch's closing
+            // count honest, which matters, because the client uses the pair to
+            // know when the world it has been sent is complete.
+            let mut in_batch = 0;
             for (dx, dz) in &sorted {
-                if !send_one_chunk(&mut out, &mut enc, &session.world, *dx, *dz)? {
-                    return Ok(());
+                if send_one_chunk(&mut out, &mut enc, &session.world, *dx, *dz)? {
+                    sent.insert((*dx, *dz));
+                    in_batch += 1;
                 }
-                sent.insert((*dx, *dz));
             }
 
             let mut body = Vec::new();
-            p::write_chunk_batch_finished(&mut body, sorted.len() as i32);
+            p::write_chunk_batch_finished(&mut body, in_batch);
             enc.encode(&body, &mut out).map_err(io_err)?;
 
             // The forgets go after the batch, and each is its own packet. They
@@ -1260,6 +1288,29 @@ fn play(
 ///
 /// The chunk comes out of the shared world, so a block one player broke is still
 /// missing when the chunk is sent to the next, and to the same one walking back.
+/// Every chunk within `radius` of the origin, in a fixed order.
+///
+/// Sorted so the same radius always produces the same sequence, which is what
+/// makes a session reproducible: the same walk sends the same chunks in the
+/// same order.
+fn wanted_positions(radius: i32) -> Vec<(i32, i32)> {
+    let mut out = Vec::with_capacity(((2 * radius + 1) * (2 * radius + 1)) as usize);
+    for dz in -radius..=radius {
+        for dx in -radius..=radius {
+            out.push((dx, dz));
+        }
+    }
+    out
+}
+
+/// Asks for one chunk and sends it if it is here.
+///
+/// Returns whether it went out, and the answer is allowed to be no: a chunk
+/// that has not been built yet comes back later, on a later pass of the loop,
+/// rather than holding this connection up until it exists. The connection's own
+/// socket is not being read while that happens, and that is the whole point —
+/// a player standing still while their terrain generates is a player nobody
+/// watching can see move.
 fn send_one_chunk(
     out: &mut Vec<u8>,
     enc: &mut crate::protocol::frame::FrameEncoder,
@@ -1269,7 +1320,7 @@ fn send_one_chunk(
 ) -> std::io::Result<bool> {
     use crate::world::pos::ChunkPos;
 
-    let Some(body) = world.chunk(ChunkPos { x: dx, z: dz }) else {
+    let Some(body) = world.want_chunk(ChunkPos { x: dx, z: dz }) else {
         return Ok(false);
     };
     enc.encode(&body, out).map_err(io_err)?;

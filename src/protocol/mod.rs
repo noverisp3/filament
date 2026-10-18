@@ -12,6 +12,7 @@ mod chunk_reference;
 pub mod configuration;
 pub mod frame;
 pub mod handshake;
+pub mod item;
 pub mod login;
 pub mod play;
 pub mod primitive;

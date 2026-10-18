@@ -32,6 +32,12 @@ pub mod id {
     pub const SET_CHUNK_CACHE_CENTER: i32 = 96;
     pub const SET_DEFAULT_SPAWN: i32 = 99;
     pub const SET_HELD_SLOT: i32 = 107;
+
+    // The inventory. container_set_content replaces every slot of a window and
+    // container_set_slot changes one, which is what a player watches when a
+    // block they just broke appears in their hand.
+    pub const CONTAINER_SET_CONTENT: i32 = 18;
+    pub const CONTAINER_SET_SLOT: i32 = 20;
     pub const SET_TIME: i32 = 115;
 
     // Serverbound, from the same file. The keep alive is 28 and not 23: 23 is

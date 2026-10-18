@@ -118,8 +118,23 @@ fn read_varint(body: &mut &[u8]) -> Result<i32, DecodeError> {
 }
 
 impl ContainerClickPacket {
-    pub fn read(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut body = bytes;
+    pub fn read(frame: &[u8]) -> Result<Self, DecodeError> {
+        let mut body = frame;
+        // Step over the id first, and check it. Every packet here is handed the
+        // whole frame, id included, because that is what the wire carries and
+        // what `FrameEncoder::encode` wants back; a decoder that starts on the
+        // id reads it as the first field. It is an easy mistake to make because
+        // nothing fails loudly -- the id is a small number, so it parses as a
+        // perfectly reasonable container id, and the error surfaces two fields
+        // later looking like something else entirely.
+        let (id, _) = VarInt::read(&mut body)?;
+        if id.0 != crate::protocol::play::id::SERVERBOUND_CONTAINER_CLICK {
+            return Err(DecodeError::UnexpectedEof {
+                wanted: "container_click",
+                got: id.0.unsigned_abs() as usize,
+            });
+        }
+
         let container_id = read_varint(&mut body)?;
         let state_id = read_varint(&mut body)?;
         let slot = read_short(&mut body)?;
@@ -154,8 +169,18 @@ const MAX_COMPONENTS: i32 = 256;
 /// The slot the player has selected on the hotbar, as a window slot -- 36 to 44.
 /// Sent every time the scroll wheel turns or a number key goes down, which is the
 /// only way the server ever finds out which item is about to be used.
-pub fn read_set_carried_item(bytes: &[u8]) -> Result<u16, DecodeError> {
-    let mut body = bytes;
+///
+/// Steps over the packet id for the same reason
+/// [`ContainerClickPacket::read`] does.
+pub fn read_set_carried_item(frame: &[u8]) -> Result<u16, DecodeError> {
+    let mut body = frame;
+    let (id, _) = VarInt::read(&mut body)?;
+    if id.0 != crate::protocol::play::id::SERVERBOUND_SET_CARRIED_ITEM {
+        return Err(DecodeError::UnexpectedEof {
+            wanted: "set_carried_item",
+            got: id.0.unsigned_abs() as usize,
+        });
+    }
     Ok(read_short(&mut body)? as u16)
 }
 

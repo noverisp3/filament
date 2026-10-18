@@ -155,6 +155,14 @@ fn handle_connection(
 
     // The handshake is the first thing on the connection, and nothing is
     // compressed before login, so the decoder needs no threshold here.
+    //
+    // The decoder is handed to whichever phase comes next rather than replaced.
+    // A client sends its handshake and its login hello back to back, so both are
+    // usually in one segment, and the read above tends to bring both in at once.
+    // A fresh decoder in the next phase drops the second one on the floor, and
+    // the server then waits for a hello that has already arrived and been thrown
+    // away: the client times out and hangs up, and the log says it closed before
+    // the hello arrived, which is exactly what it says.
     let intention = loop {
         let n = stream.read(&mut scratch)?;
         if n == 0 {
@@ -196,7 +204,7 @@ Ok(Some(frame)) => {
 
     match intention.intent {
         ClientIntent::Status => serve_status(&mut stream, dec, enc, status, log),
-        ClientIntent::Login => login(&mut stream, log, world),
+        ClientIntent::Login => login(&mut stream, log, dec, world),
         ClientIntent::Transfer => {
             log.note("transfer is not implemented");
             Ok(())
@@ -215,12 +223,16 @@ Ok(Some(frame)) => {
 /// applies the threshold to whatever arrives *after* the compression packet, so
 /// sending that packet already compressed means the client reads its own
 /// threshold as garbage and disconnects.
-fn login(stream: &mut TcpStream, log: ConnLog, world: WorldHandle) -> std::io::Result<()> {
+fn login(
+    stream: &mut TcpStream,
+    log: ConnLog,
+    mut dec: FrameDecoder,
+    world: WorldHandle,
+) -> std::io::Result<()> {
     use crate::protocol::frame::DEFAULT_COMPRESSION_THRESHOLD;
     use crate::protocol::login::{write_login_compression, write_login_finished, Uuid};
 
     let log = log.phase("login");
-    let mut dec = FrameDecoder::new();
     let mut enc = FrameEncoder::new();
     let mut scratch = [0u8; 8192];
 

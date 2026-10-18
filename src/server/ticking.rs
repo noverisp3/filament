@@ -232,6 +232,24 @@ impl WorldHandle {
     }
 }
 
+/// How many terrain workers to run on a machine with `cores` of it.
+///
+/// Kept apart from the thread spawning so it can be checked rather than
+/// guessed. It was four, hard, and the fault only shows on a machine that does
+/// not have four cores: half the CPU sits idle, and the opening batch of chunks
+/// takes twice as long as it should. On eight cores that was five to eight
+/// seconds of a player waiting to arrive.
+///
+/// The bounds matter more than the subtraction. At least two, so a small machine
+/// still builds chunks in parallel with its world thread, but never more than
+/// the machine has cores, since a thread that has nothing to run on costs a
+/// context switch and buys nothing. At most eight, so a large one does not
+/// starve the connection threads, which answer keep alives and movement and are
+/// the ones that notice when the pool falls behind.
+fn worker_count(cores: usize) -> usize {
+    cores.saturating_sub(2).clamp(2, 8).min(cores)
+}
+
 /// Starts the thread that owns the world, and returns the handle connections use.
 ///
 /// The thread stops when every handle is dropped, since the channel closes with
@@ -260,9 +278,23 @@ pub fn spawn() -> WorldHandle {
     //
     // The terrain generator is a pure function of a chunk's position and the
     // block palette, so any number of these can run at once with nothing to
-    // share and nothing to lock. How many is a guess: this machine has four
-    // real cores, and the world thread wants one for itself.
-    for worker in 0..4 {
+    // share and nothing to lock.
+    //
+    // How many used to be four, written down because the machine it was written
+    // on had four real cores. That is a guess with a shelf life, and it expired:
+    // on eight cores it used half the machine, which showed up as a player
+    // waiting five to eight seconds for their opening batch of two hundred and
+    // eighty-nine chunks, and a second player waiting longer still behind them
+    // in the queue.
+    //
+    // Asked for instead, and never all of them: the world thread above needs
+    // one, the connection threads want to keep answering keep alives and
+    // movement, and the mesh and lighting are done by whoever picked the chunk
+    // up. A pool that takes every core leaves nothing for the threads whose job
+    // is to notice the pool is behind.
+    let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let workers = worker_count(cores);
+    for worker in 0..workers {
         let rx = Arc::clone(&work_rx);
         let pending = Arc::clone(&pending);
         std::thread::Builder::new()

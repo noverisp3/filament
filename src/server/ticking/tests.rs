@@ -474,3 +474,40 @@ fn the_loop_stops_when_the_last_handle_goes() {
 
     assert_eq!(ticks, 0, "no handles, so no ticks were due");
 }
+#[test]
+fn the_pool_scales_with_the_machine_instead_of_a_number_written_down() {
+    // It was four, and that was right on the machine it was written on and wrong
+    // everywhere else. The symptom is a player waiting to arrive: half the CPU
+    // idle, and the opening batch of two hundred and eighty-nine chunks taking
+    // seconds longer than it should.
+    assert_eq!(worker_count(8), 6, "eight cores is six workers, not four");
+    assert_eq!(worker_count(16), 8, "and it does not keep going");
+    assert_eq!(worker_count(4), 2, "four cores is the number it always used");
+
+// Never zero, never more than the machine has cores. The lower bound of two
+    // is a preference for the machines that can have it: a one or two core
+    // machine gets as many as it has, because a thread that has nothing to run
+    // on costs a context switch and buys nothing.
+    for cores in 1..=64 {
+        let n = worker_count(cores);
+        assert!(n >= 1, "a {cores} core machine builds something");
+        assert!(n <= cores, "and never more workers than cores: {n} of {cores}");
+        if cores >= 4 {
+            assert!(n >= 2, "and a {cores} core machine still builds in parallel");
+        }
+    }
+}
+
+#[test]
+fn the_pool_leaves_room_for_the_threads_that_watch_it() {
+    // The connection threads answer keep alives and movement, and they are the
+    // ones that notice when the pool falls behind. A pool holding every core
+    // leaves them nothing, and a server that cannot answer a keep alive looks
+    // exactly like one that has hung.
+    let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+    assert!(
+        worker_count(cores) < cores,
+        "the pool leaves room for the rest: {} of {cores}",
+        worker_count(cores)
+    );
+}

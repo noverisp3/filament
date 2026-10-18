@@ -27,15 +27,15 @@ fn a_plain_stack_is_a_count_an_id_and_two_zeroes() {
     // zeroes when there are no components. DataComponentPatch.STREAM_CODEC
     // reads positiveCount and negativeCount and stops at both being zero.
     let mut out = Vec::new();
-    ItemStack::new(484, 64).write(&mut out);
+    ItemStack::new(55, 64).write(&mut out);
     assert_eq!(
         out,
-        [0x40, 0xE4, 0x03, 0x00, 0x00],
-        "64, dirt at 484, and an empty patch"
+        [0x40, 0x37, 0x00, 0x00],
+        "64, dirt at 55, and an empty patch"
     );
 
     let read = ItemStack::read(&out).expect("a stack reads back");
-    assert_eq!(read, ItemStack::new(484, 64));
+    assert_eq!(read, ItemStack::new(55, 64));
 }
 
 #[test]
@@ -44,7 +44,7 @@ fn a_stack_with_components_is_refused_rather_than_half_read() {
     // the packet after that would be the one that goes wrong -- somewhere else,
     // much later, in a way nobody connects back to here.
     let mut out = varint(1);
-    out.extend(varint(484));
+    out.extend(varint(55));
     out.extend(varint(1)); // one component
     out.extend(varint(1)); // ...and one removed
 
@@ -103,11 +103,11 @@ fn taking_the_last_one_out_empties_the_slot() {
     // draws them differently, so the last one has to clear it rather than
     // leave a count of zero behind.
     let mut inv = Inventory::empty();
-    inv.set(slots::HOTBAR_START, Some(ItemStack::new(484, 2)));
+    inv.set(slots::HOTBAR_START, Some(ItemStack::new(55, 2)));
 
     let left = inv.take_one(slots::HOTBAR_START);
-    assert_eq!(left, Some(ItemStack::new(484, 1)), "one left in the hand");
-    assert_eq!(inv.get(slots::HOTBAR_START), Some(ItemStack::new(484, 1)));
+    assert_eq!(left, Some(ItemStack::new(55, 1)), "one left in the hand");
+    assert_eq!(inv.get(slots::HOTBAR_START), Some(ItemStack::new(55, 1)));
 
     let left = inv.take_one(slots::HOTBAR_START);
     assert_eq!(left, None, "and nothing in the hand, not a stack of zero");
@@ -121,7 +121,7 @@ fn a_block_broken_twice_stacks_rather_than_filling_two_slots() {
     // nine. The game merges into what is already there.
     let mut inv = Inventory::empty();
     for _ in 0..20 {
-        inv.add(ItemStack::new(613, 1));
+        inv.add(ItemStack::new(54, 1));
     }
 
     let mut used = 0;
@@ -147,7 +147,7 @@ fn adding_a_block_names_the_slot_it_went_into_and_no_other() {
     // slot 0 had changed when it had not, and the hotbar stayed empty. So the
     // slot comes from `add` and there is nowhere else to get it.
     let mut inv = Inventory::empty();
-    let used = inv.add(ItemStack::new(613, 1));
+    let used = inv.add(ItemStack::new(54, 1));
 
     assert_eq!(
         used,
@@ -161,19 +161,19 @@ fn adding_a_block_names_the_slot_it_went_into_and_no_other() {
     );
 
     // Merging into what is already there names the slot it merged into, once.
-    let again = inv.add(ItemStack::new(613, 1));
+    let again = inv.add(ItemStack::new(54, 1));
     assert_eq!(again, vec![slots::HOTBAR_START]);
     assert_eq!(inv.get(slots::HOTBAR_START).unwrap().count, 2);
     assert_eq!(again.len(), 1, "one slot changed, so one slot is reported");
 
     // A different item goes to its own slot rather than over the first.
-    let other = inv.add(ItemStack::new(484, 1));
+    let other = inv.add(ItemStack::new(55, 1));
     assert_eq!(other, vec![slots::HOTBAR_START + 1]);
     assert_ne!(other[0], slots::HOTBAR_START);
 
     // A stack too big for one slot names every slot it landed in.
     let mut inv = Inventory::empty();
-    let split = inv.add(ItemStack::new(1370, 250));
+    let split = inv.add(ItemStack::new(1, 250));
     assert_eq!(
         split.len(),
         3,
@@ -196,15 +196,15 @@ fn adding_what_fits_nowhere_names_no_slot_at_all() {
     // change -- so the caller can say the block was lost rather than believing
     // it went somewhere.
     let mut inv = Inventory::empty();
-    inv.add(ItemStack::new(1370, 990));
+    inv.add(ItemStack::new(1, 990));
 
     assert_eq!(
-        inv.add(ItemStack::new(613, 1)),
+        inv.add(ItemStack::new(54, 1)),
         Vec::<usize>::new(),
         "a different item with a full hotbar goes nowhere"
     );
     assert_eq!(
-        inv.add(ItemStack::new(613, 1)),
+        inv.add(ItemStack::new(54, 1)),
         Vec::<usize>::new(),
         "and stays true on the next attempt"
     );
@@ -216,7 +216,7 @@ fn a_stacked_hotbar_splits_across_the_nine_slots() {
     // somewhere. It goes to the hotbar, which is the part of the window the
     // player is looking at.
     let mut inv = Inventory::empty();
-    inv.add(ItemStack::new(1370, 250));
+    inv.add(ItemStack::new(1, 250));
 
     let on_hotbar = (slots::HOTBAR_START..slots::HOTBAR_END)
         .filter(|&s| inv.get(s).is_some())
@@ -252,7 +252,7 @@ fn setting_a_slot_that_is_already_what_it_should_be_writes_nothing() {
     // for every pass would be a packet per player per frame for no change, and
     // the client would redraw what it already has.
     let mut inv = Inventory::empty();
-    let block = Some(ItemStack::new(484, 3));
+    let block = Some(ItemStack::new(55, 3));
 
     assert!(inv.set(slots::HOTBAR_START, block), "the first write changes it");
     assert!(!inv.set(slots::HOTBAR_START, block), "the second does not");
@@ -271,7 +271,7 @@ fn an_empty_stack_written_into_a_slot_is_the_same_as_empty() {
     // count zero is not a thing the client understands, so a caller offering
     // one must end up with an empty slot rather than a stack it cannot draw.
     let mut inv = Inventory::empty();
-    inv.set(slots::HOTBAR_START, Some(ItemStack::new(484, 0)));
+    inv.set(slots::HOTBAR_START, Some(ItemStack::new(55, 0)));
     assert_eq!(inv.get(slots::HOTBAR_START), None);
 }
 

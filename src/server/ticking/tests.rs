@@ -521,9 +521,9 @@ fn a_block_state_name_is_looked_up_as_an_item_exactly_as_it_stands() {
     // leaves the player with an empty hand after a successful dig. It has
     // happened; these are the numbers that make it impossible to do again.
     for (state, name, item) in [
-        (9, "minecraft:grass_block", 613),
-        (10, "minecraft:dirt", 484),
-        (1, "minecraft:stone", 1370),
+        (9, "minecraft:grass_block", 54),
+        (10, "minecraft:dirt", 55),
+        (1, "minecraft:stone", 1),
     ] {
         assert_eq!(state_id_name(state), name);
         assert_eq!(held_item(state), Some(item), "{name} is item {item}");
@@ -536,12 +536,83 @@ fn a_block_state_name_is_looked_up_as_an_item_exactly_as_it_stands() {
 }
 
 #[test]
+fn an_item_id_is_the_entrys_own_number_and_not_its_place_in_the_report() {
+    // The report is keyed by identifier, so its entries arrive alphabetically.
+    // The wire id is the entry's own `protocol_id`, and the two are nowhere near
+    // each other: alphabetical position 613 is light grey stained glass, and
+    // grass block -- which is 613rd in the file -- is id 54.
+    //
+    // Taking the position produced packets that were entirely valid and entirely
+    // wrong: a player who dug grass was handed light grey stained glass, and
+    // one who dug dirt was handed vines, and nothing in the log objected
+    // because every id sent was a real item. This is what caught it.
+    assert_eq!(
+        crate::generated::item_id("minecraft:grass_block"),
+        Some(54),
+        "grass block is 54, not the 613rd line of the file"
+    );
+    assert_eq!(crate::generated::item_id("minecraft:dirt"), Some(55));
+    assert_eq!(
+        crate::generated::item_id("minecraft:light_gray_stained_glass"),
+        Some(613),
+        "and 613 is that instead"
+    );
+    assert_eq!(crate::generated::item_id("minecraft:vine"), Some(484));
+    assert_eq!(
+        crate::generated::item_name(54),
+        Some("minecraft:grass_block"),
+        "the id names it back"
+    );
+    assert_eq!(
+        crate::generated::item_name(613),
+        Some("minecraft:light_gray_stained_glass"),
+        "and 613 is not grass"
+    );
+}
+
+#[test]
 fn the_item_and_the_block_state_are_numbered_separately() {
-    // Dirt's state is 10 and dirt's item is 484. A server that treated one as
+    // Dirt's state is 10 and dirt's item is 55. A server that treated one as
     // the other would hand a player something that is not what they dug.
     let dirt_item = held_item(10).expect("dirt can be held") as i32;
-    assert_eq!(dirt_item, 484);
+    assert_eq!(dirt_item, 55);
     assert_ne!(dirt_item, 10, "and never confuse it with the state id");
+}
+
+#[test]
+fn every_item_names_itself_back() {
+    // Walking the whole table in both directions. The one id that mattered got
+    // its number from its place in a file instead of from the entry, and every
+    // id it produced was a real item and the wrong one -- so a spot check of the
+    // handful of blocks this server generates would never have found it.
+    let mut seen = std::collections::HashSet::new();
+    for (id, name) in crate::generated::ITEMS.iter().enumerate() {
+        assert_eq!(
+            crate::generated::item_name(id as u32),
+            Some(*name),
+            "id {id} names itself back"
+        );
+        assert_eq!(
+            crate::generated::item_id(name),
+            Some(id as u32),
+            "and {name} at id {id} is found there"
+        );
+        assert!(seen.insert(*name), "{name} appears once");
+    }
+    assert!(
+        seen.len() == crate::generated::ITEMS.len(),
+        "and no name is repeated"
+    );
+    assert_eq!(
+        crate::generated::item_name(crate::generated::ITEMS.len() as u32),
+        None,
+        "one past the end is nothing"
+    );
+    assert_eq!(
+        crate::generated::item_id("minecraft:not_a_real_item"),
+        None,
+        "and a name that is not there is not an id"
+    );
 }
 
 #[test]

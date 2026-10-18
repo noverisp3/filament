@@ -15,3 +15,10 @@ __pycache__/
 # not, because regenerating them is one command and they change on every run.
 captured/run.log
 captured/packets.jsonl
+
+# What the scripted clients write. Unlike captured/play/, which holds the
+# reference packets pinned against the client jar, these are the output of a
+# probe pointed at whatever is running: which server, what it answered, and a
+# verdict that is only true of that run. Nothing reads them twice.
+captured/break/
+captured/ghost/

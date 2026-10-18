@@ -2,6 +2,50 @@ use crate::server::ticking::{state_id, to_state_id};
 use super::*;
 
 #[test]
+fn a_flushed_buffer_does_not_send_its_contents_twice() {
+    // `write_all` sends the bytes and leaves them where they were. A buffer
+    // written twice therefore sends everything it held, twice, and the second
+    // copy arrives after whatever was appended in between -- which for the
+    // opening batch of chunks means a world made before the player touched it
+    // turning up after they did, and quietly undoing the change.
+    //
+    // This is the fault that left a broken block standing again, invisible, for
+    // as long as the session lasted and only a rejoin cleared.
+    let mut sink: Vec<u8> = Vec::new();
+    let mut out: Vec<u8> = b"the whole chunk batch".to_vec();
+
+    flush_buffer(&mut sink, &mut out).expect("the first write goes out");
+
+    assert!(
+        out.is_empty(),
+        "the buffer is emptied by the write, so a later write carries only what \
+         has been added since: {:?}",
+        String::from_utf8_lossy(&out)
+    );
+
+    out.extend_from_slice(b"and the introductions");
+    flush_buffer(&mut sink, &mut out).expect("the second write goes out");
+
+    assert_eq!(
+        sink, b"the whole chunk batchand the introductions",
+        "each write carries only what was added since the last, in order"
+    );
+}
+
+#[test]
+fn a_flushed_buffer_puts_nothing_on_the_wire_when_it_is_empty() {
+    // Two writes with nothing added between them must send nothing, rather
+    // than a stray empty frame or a repeat of what the first one carried.
+    let mut sink: Vec<u8> = Vec::new();
+    let mut out: Vec<u8> = Vec::new();
+
+    flush_buffer(&mut sink, &mut out).expect("an empty write is not an error");
+    flush_buffer(&mut sink, &mut out).expect("and neither is doing it twice");
+
+    assert!(sink.is_empty(), "nothing was sent: {sink:?}");
+}
+
+#[test]
 fn a_ring_the_pool_has_not_finished_is_not_reported_over_and_over() {
     // Seventeen wanted, none built. The loop sees the same seventeen on
     // every pass, and saying so on every pass is the noise.

@@ -546,6 +546,23 @@ fn configure(
 /// out on the wire; handing it here and writing it again made the client read
 /// 158 KB of configuration a second time while it was in the play phase, where
 /// registry id 7 means something else entirely.
+/// Sends the buffer and empties it.
+///
+/// `write_all` sends the bytes and leaves them in the buffer it was given, so a
+/// buffer that is written twice sends its whole contents twice. That is how a
+/// client received the login packet and every chunk in the opening batch a
+/// second time, hours of play later than the first copy was drawn: the resend
+/// is not noticed as a resend, it is noticed as the world undoing an edit.
+///
+/// Emptying is the whole of the discipline. Everything else about when to write
+/// is the caller's, and this says nothing about the contents.
+fn flush_buffer<S: Write>(stream: &mut S, out: &mut Vec<u8>) -> std::io::Result<()> {
+    stream.write_all(out)?;
+    stream.flush()?;
+    out.clear();
+    Ok(())
+}
+
 fn play(
     stream: &mut TcpStream,
     mut dec: FrameDecoder,
@@ -745,9 +762,21 @@ fn play(
 
     log.note(format!("sent {sent_count} chunks around the spawn"));
 
-    stream.write_all(&out)?;
-    stream.flush()?;
+    flush_buffer(stream, &mut out)?;
 
+    // Emptied by `flush_buffer` above, and that is the whole of a fault that
+    // took a long time to find. Without it, the second write below -- the one
+    // that puts the introductions on the wire, added after the chunk batch --
+    // carried everything the first write had as well, all of it again: the
+    // login packet, and every one of the chunks above.
+    //
+    // It looked like nothing for as long as it was there. A chunk arriving
+    // twice is the same chunk arriving twice, and a world made of chunks does
+    // not visibly object. What it does do is arrive late: those chunks reach a
+    // client that has already started playing, and by then some of them have
+    // been edited. The copy generated before the edit turns up afterwards and
+    // undoes it, so the block is whole on the server and gone in the client's
+    // hands.
     log.note("chunks sent; terrain generated, and it is not persisted");
 
     // 12. The other players, and telling them about this one.
@@ -852,8 +881,7 @@ fn play(
     // because that went out through the queue. One direction worked, the other
     // silently did not, and it looked like a rendering fault rather than a
     // missing write.
-    stream.write_all(&out)?;
-    stream.flush()?;
+    flush_buffer(stream, &mut out)?;
 
     // 13. Keep the connection alive, and follow the player.
     //

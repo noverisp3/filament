@@ -8,7 +8,7 @@ pub mod render;
 pub mod server;
 pub mod world;
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use server::StatusServer;
 use server::log;
@@ -60,6 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     print_build();
     log::note(format!("listening on {addr}"));
+    announce_reachability(&addr);
     log::note(format!("protocol {}", server::PROTOCOL_VERSION));
     log::note("max players 20");
     log::note("status, login, configuration and the start of play are implemented");
@@ -70,6 +71,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     server.serve_forever();
     Ok(())
+}
+
+/// Says who can reach this, when anyone other than this machine can.
+///
+/// Loopback by default, and that is deliberate: a server which is not finished
+/// should not be reachable from the network by accident. Binding to
+/// `0.0.0.0` is the switch, and the switch has a cost worth stating out loud
+/// rather than leaving to be found out about: there is no authentication, so
+/// anyone who reaches the port can join as any name they like, and the offline
+/// UUIDs are derived from the name rather than from an account.
+///
+/// The address printed is the one to hand out. Finding it is not something to
+/// ask the user to do, because the answer is in the machine and not in any
+/// config file: ask the routing table where a packet to the outside world would
+/// go, and take the local end of that route.
+fn announce_reachability(addr: &SocketAddr) {
+    let wildcard = match addr.ip() {
+        IpAddr::V4(ip) => ip.is_unspecified(),
+        IpAddr::V6(ip) => ip.is_unspecified(),
+    };
+
+    if !wildcard {
+        log::note("only this machine can reach that; pass --addr 0.0.0.0:25565 to share it");
+        return;
+    }
+
+    match local_network_address() {
+        Some(ip) => log::note(format!(
+            "reachable on this network at {ip}:{}",
+            addr.port(),
+        )),
+        None => log::note("reachable on every address this machine has"),
+    }
+
+    log::note("anyone who can reach the port can join as anyone: there is no sign-in yet");
+}
+
+/// The local address a packet to the outside world would leave from.
+///
+/// Binding a UDP socket and connecting it picks a route without sending
+/// anything: a connected UDP socket is given a destination and a source address
+/// by the kernel, and stays silent until something is written to it. Nothing
+/// here touches the network.
+///
+/// It is a heuristic and says so by having a way to fail: a machine with no
+/// route out, or no interface, answers with nothing and the caller prints a
+/// sentence that does not need an address to be true.
+fn local_network_address() -> Option<IpAddr> {
+    // Port zero, so this cannot collide with anything, and a destination that
+    // is only ever used to ask the routing question.
+    let probe = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    probe.connect("192.0.2.1:9").ok()?; // TEST-NET-1, never routed to anything
+
+    let local = probe.local_addr().ok()?;
+    if local.ip().is_unspecified() {
+        None
+    } else {
+        Some(local.ip())
+    }
 }
 
 /// Prints which build this is.

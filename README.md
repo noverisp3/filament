@@ -110,13 +110,43 @@ the game does and the reader takes the layout from that byte.
 ```text
 filament                # 127.0.0.1:25565
 filament --verbose      # and log every packet
-filament --addr 0.0.0.0:25566
+filament --addr 0.0.0.0:25565
 ```
 
+Loopback by default on purpose. A server that is not finished should not be
+reachable from the network by accident.
+
+`--addr 0.0.0.0:25565` is the switch, and the startup log then says what to hand
+out:
+
+```text
+0.0s  listening on 0.0.0.0:25565
+0.0s  reachable on this network at 192.168.55.106:25565
+0.0s  anyone who can reach the port can join as anyone: there is no sign-in yet
+```
+
+That middle line is the machine's own answer rather than a question for the
+user: it binds a UDP socket, connects it to a documentation address so the
+kernel picks a route, and reads back the local end. Nothing is sent.
+
+The warning is not ceremony. Login is offline, so there is no authentication and
+the UUID is derived from whatever name the client sends. Anyone who reaches the
+port can join as any name, including yours. On a network you control that is a
+testing convenience; do not point it at the open internet.
+
+**On Windows the firewall will usually block this first.** It needs a rule for
+the port, and the rule has to allow private networks rather than public ones:
+
+```powershell
+New-NetFirewallRule -DisplayName "filament 25565" -Direction Inbound `
+  -Protocol TCP -LocalPort 25565 -Action Allow -Profile Private
+```
+
+Once, from an elevated prompt. Nothing in the server can do this for itself, and
+the symptom when it has not been done is a connection that times out rather than
+one that is refused.
+
 Packet logging is off by default. A client waiting on chunks sends an empty
-packet twenty times a second, so leaving it on buries the lines that say anything
-in a wall of one-byte records. Without `--verbose` the log is the lifecycle:
-connections, phases, and errors.
 
 Timestamps are how long the server has been up, not the wall clock:
 

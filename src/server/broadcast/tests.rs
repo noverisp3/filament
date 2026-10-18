@@ -33,8 +33,126 @@ fn skip_varints(mut b: &[u8]) -> &[u8] {
     &b[1..]
 }
 
-#[test]
-fn a_player_arriving_is_told_about_the_ones_already_here() {
+/// Every packet that has reached this connection since the last call, as the
+/// packet ids in the order they arrived.
+fn drain(reg: &Registration) -> Vec<u8> {
+    let mut kinds = Vec::new();
+    while let Ok(body) = reg.inbox.try_recv() {
+        kinds.push(body[0]);
+    }
+    kinds
+}
+
+    #[test]
+    fn a_mover_is_never_told_about_their_own_movement() {
+        // Their client already knows where they are — it is the one deciding.
+        // Telling them anyway means their body advances a second time for every
+        // step, which is the same mistake the level event made at the start of
+        // this: a packet that is harmless for the sender and wrong for the
+        // sender.
+        let wire = Broadcast::new();
+        let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
+        let watcher = wire.register("watcher", [2u8; 16], 2, (0.0, 64.0, 0.0));
+        wire.note_told(watcher.id, mover.id, (0.0, 64.0, 0.0), 0.0, 0.0);
+
+        wire.update_pose(mover.id, (1.0, 64.0, 0.0), 0.0, 0.0);
+        wire.send_movement(mover.id, true);
+        wire.update_pose(mover.id, (1.0, 66.0, 0.0), 90.0, 0.0);
+        wire.send_movement(mover.id, false);
+
+        assert_eq!(
+            drain(&mover),
+            Vec::<u8>::new(),
+            "the player who moved gets nothing back, for a walk, a jump or a turn"
+        );
+        assert_eq!(
+            drain(&watcher).len(),
+            3,
+            "while the one watching gets a movement, a movement and a head"
+        );
+    }
+
+    #[test]
+    fn the_whole_ledger_of_a_player_walking_turning_and_leaving() {
+        // One place that states what a connection is entitled to see, for a
+        // sequence that covers every branch `send_movement` has.
+        //
+        // It exists because the three bugs it guards against were three
+        // separate reports of the same shape — a body that moved too fast, one
+        // that did not move vertically, and one that did not turn — and each
+        // was found by a person playing rather than by a test. Each of those is
+        // a count that came out wrong, and here all three counts are in one
+        // place, so a fourth wrong count has to get past this to reach anyone.
+        use crate::protocol::play::id;
+
+        let wire = Broadcast::new();
+        let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
+        let watcher = wire.register("watcher", [2u8; 16], 2, (0.0, 64.0, 0.0));
+        wire.note_told(watcher.id, mover.id, (0.0, 64.0, 0.0), 0.0, 0.0);
+
+        let move_ = id::MOVE_ENTITY_POS_ROT as u8;
+        let head = id::ROTATE_HEAD as u8;
+        let gone = id::REMOVE_ENTITIES as u8;
+        let back = id::ADD_ENTITY as u8;
+
+        // Standing still. Twenty of these is twenty times a second that nobody
+        // has any use for.
+        wire.update_pose(mover.id, (0.0, 64.0, 0.0), 0.0, 0.0);
+        wire.send_movement(mover.id, true);
+        assert_eq!(drain(&watcher), Vec::<u8>::new(), "standing still says nothing");
+
+        // Walking: one movement.
+        wire.update_pose(mover.id, (1.0, 64.0, 0.0), 0.0, 0.0);
+        wire.send_movement(mover.id, true);
+        assert_eq!(drain(&watcher), vec![move_], "a step is one packet");
+
+        // Jumping: one movement, on the axis that was never sent at all once.
+        wire.update_pose(mover.id, (1.0, 67.0, 0.0), 0.0, 0.0);
+        wire.send_movement(mover.id, false);
+        assert_eq!(drain(&watcher), vec![move_], "so is a jump");
+
+        // Turning on the spot: a movement and a head, because the movement
+        // packet carries the body's angle and nothing else.
+        wire.update_pose(mover.id, (1.0, 67.0, 0.0), 180.0, 0.0);
+        wire.send_movement(mover.id, false);
+        assert_eq!(
+            drain(&watcher),
+            vec![move_, head],
+            "a turn is two packets and neither of them is optional"
+        );
+
+        // Walking and turning at once: still two.
+        wire.update_pose(mover.id, (2.0, 67.0, 0.0), 270.0, 0.0);
+        wire.send_movement(mover.id, true);
+        assert_eq!(drain(&watcher), vec![move_, head], "and still two");
+
+        // Out of range: taken out of the world, not abandoned in it.
+        wire.update_pose(mover.id, (200.0, 67.0, 0.0), 270.0, 0.0);
+        wire.send_movement(mover.id, true);
+        assert_eq!(
+            drain(&watcher),
+            vec![gone],
+            "a body the client still holds would be a body standing in mid-air"
+        );
+
+        // And standing still out there says nothing more.
+        wire.send_movement(mover.id, true);
+        assert_eq!(drain(&watcher), Vec::<u8>::new(), "once is once");
+
+        // Back within sight, put down where they are.
+        wire.update_pose(mover.id, (5.0, 67.0, 0.0), 270.0, 0.0);
+        wire.send_movement(mover.id, true);
+        assert_eq!(
+            drain(&watcher),
+            vec![back],
+            "as a position, since the baseline is hundreds of blocks stale"
+        );
+
+        assert_eq!(drain(&mover), Vec::<u8>::new(), "and none of it went to the mover");
+    }
+
+    #[test]
+    fn a_player_arriving_is_told_about_the_ones_already_here() {
     let wire = std::sync::Arc::new(Broadcast::new());
     let first = wire.register("first", [1u8; 16], 7, (0.0, 64.0, 0.0));
     let second = wire.register("second", [2u8; 16], 9, (0.0, 64.0, 0.0));

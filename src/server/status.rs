@@ -972,6 +972,25 @@ fn play(
                 session.wire.send_swing(player_id, p::MAIN_HAND);
             }
 
+            // Which keys are down: one byte of flags, after the id.
+            //
+            // This is the whole of sneaking as far as the network is concerned.
+            // The client has already changed its own shape; everybody else has
+            // to be told, and the pose is how.
+            if id == p::id::SERVERBOUND_PLAYER_INPUT {
+                let mut body = &frame[..];
+                // Step over the id to reach the flags. Reading the id rather
+                // than assuming its length is the whole discipline: a packet id
+                // over 127 is two bytes and every field after it moves.
+                if crate::protocol::VarInt::read(&mut body).is_ok()
+                    && let Some((&flags, _)) = body.split_first()
+                {
+                    session
+                        .wire
+                        .set_crouching(player_id, flags & p::INPUT_SHIFT != 0);
+                }
+            }
+
             // Breaking a block.
             //
             // Three actions, and they do three different things. START is the

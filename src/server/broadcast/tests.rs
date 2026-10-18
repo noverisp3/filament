@@ -157,6 +157,92 @@ fn drain_raw(reg: &Registration) -> Vec<Vec<u8>> {
     }
 
     #[test]
+    fn a_crouch_is_a_pose_travelling_as_entity_metadata() {
+        use crate::protocol::play::id;
+
+        let wire = Broadcast::new();
+        let croucher = wire.register("croucher", [1u8; 16], 11, (0.0, 64.0, 0.0));
+        let watcher = wire.register("watcher", [2u8; 16], 12, (0.0, 64.0, 0.0));
+
+        wire.set_crouching(croucher.id, true);
+
+        let raw = drain_raw(&watcher);
+        assert_eq!(raw.len(), 1, "one packet, and not to the croucher");
+        let packet = &raw[0];
+
+        assert_eq!(packet[0], id::SET_ENTITY_DATA as u8, "it is entity metadata");
+        assert_eq!(packet[1], 11, "addressed to the croucher's entity");
+        assert_eq!(
+            packet[2],
+            crate::protocol::play::ENTITY_DATA_POSE,
+            "at the pose index, which is six and not five"
+        );
+        assert_eq!(
+            packet[3],
+            crate::protocol::play::ENTITY_DATA_SERIALIZER_POSE as u8,
+            "read by the pose serializer, which is twenty and not fifteen"
+        );
+        assert_eq!(
+            packet[4],
+            crate::protocol::play::POSE_CROUCHING as u8,
+            "and the pose is crouching"
+        );
+        assert_eq!(
+            packet[5],
+            crate::protocol::play::ENTITY_DATA_END,
+            "and the list is ended, because a metadata packet that is not \
+             ended is one the client is still waiting on"
+        );
+
+        assert_eq!(drain(&croucher), Vec::<u8>::new(), "not to themselves");
+    }
+
+    #[test]
+    fn standing_up_is_the_same_packet_with_the_other_pose() {
+        let wire = Broadcast::new();
+        let player = wire.register("player", [1u8; 16], 11, (0.0, 64.0, 0.0));
+        let watcher = wire.register("watcher", [2u8; 16], 12, (0.0, 64.0, 0.0));
+
+        wire.set_crouching(player.id, true);
+        wire.set_crouching(player.id, false);
+
+        let raw = drain_raw(&watcher);
+        assert_eq!(raw.len(), 2, "down and then up");
+        assert_eq!(raw[0][4], crate::protocol::play::POSE_CROUCHING as u8);
+        assert_eq!(
+            raw[1][4],
+            crate::protocol::play::POSE_STANDING as u8,
+            "the same shape with zero in it"
+        );
+        assert_eq!(raw[0].len(), raw[1].len(), "and the same length");
+    }
+
+    #[test]
+    fn a_key_held_down_is_not_a_pose_sent_two_hundred_times_a_second() {
+        // The client sends its keys every tick and shift stays down for as long
+        // as it is down. Sending the pose each time is a packet per observer per
+        // movement packet for a value that has not moved, and a client that
+        // receives them redraws the player each time.
+        let wire = Broadcast::new();
+        let player = wire.register("player", [1u8; 16], 11, (0.0, 64.0, 0.0));
+        let watcher = wire.register("watcher", [2u8; 16], 12, (0.0, 64.0, 0.0));
+
+        for _ in 0..20 {
+            wire.set_crouching(player.id, true);
+        }
+        assert_eq!(
+            drain(&watcher).len(),
+            1,
+            "twenty ticks of shift, and one packet"
+        );
+
+        for _ in 0..20 {
+            wire.set_crouching(player.id, false);
+        }
+        assert_eq!(drain(&watcher).len(), 1, "and one to stand back up");
+    }
+
+    #[test]
     fn a_swing_reaches_the_watchers_and_not_the_one_who_swung() {
         use crate::protocol::play::id;
 

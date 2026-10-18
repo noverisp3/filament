@@ -61,6 +61,10 @@ pub mod id {
     pub const BLOCK_UPDATE: i32 = 8;
     // A hand going through a swing, and a punch landing.
     pub const SWING_ANIMATION: i32 = 2;
+    // The entity's metadata, which is how a pose — and so a crouch — travels.
+    pub const SET_ENTITY_DATA: i32 = 101;
+    // Which keys are down. One byte of bit flags and nothing else.
+    pub const SERVERBOUND_PLAYER_INPUT: i32 = 43;
     // The same thing coming back the other way. It is a record with no fields,
     // so the packet is nothing but its id — which is worth knowing before
     // writing a decoder for it and finding nothing to read.
@@ -862,6 +866,63 @@ pub const SWING_WHACK: i32 = 1;
 /// the client ignores: the arm comes down on it, and a swing that says zero is
 /// an arm that does not move.
 pub const SWING_DURATION: i32 = 6;
+
+/// The bit in `player_input` that means shift is down.
+pub const INPUT_SHIFT: u8 = 32;
+
+/// Standing, and the first of the game's pose values.
+pub const POSE_STANDING: i32 = 0;
+/// Crouching, which is the sixth. A count from zero, so this is a number and
+/// not a flag.
+pub const POSE_CROUCHING: i32 = 5;
+
+/// Which piece of an entity's metadata the pose is.
+///
+/// Six, not five. It is counted by the order the fields are declared on the
+/// entity, and the decompiled source in `mc-ref` lists seven of them where the
+/// shipped jar has eight — a `DATA_CUSTOM_NAME` that is not in the source. Read
+/// out of the jar's static initialiser instead, where the order is the order
+/// they are actually assigned.
+pub const ENTITY_DATA_POSE: u8 = 6;
+
+/// Which serializer reads the pose, out of the table the game registers them in.
+///
+/// Twenty. Also from the jar's static initialiser, which is the only place the
+/// order exists: the table is filled by a method that is called from nowhere in
+/// the decompiled tree, and it is not a datapack registry, so it is in neither
+/// the source nor the capture. Counting the field declarations in the source
+/// gives fifteen, which is wrong — the table has two entries the declaration
+/// order hides, an optional component and a plural particles.
+pub const ENTITY_DATA_SERIALIZER_POSE: i32 = 20;
+
+/// Marks the end of an entity's metadata.
+///
+/// A byte, not a VarInt, and 255 rather than -1: the ids above it are unsigned
+/// bytes and this is the one value left over.
+pub const ENTITY_DATA_END: u8 = 255;
+
+/// Writes an entity's pose, which is how a crouch reaches other people.
+///
+/// ```text
+/// VarInt   the entity id
+/// byte     which piece of metadata this is
+/// VarInt   which serializer reads what follows
+/// VarInt   the pose
+/// byte     255, and nothing after it
+/// ```
+///
+/// One item per packet, and the end marker every time. Metadata is a list of
+/// updates terminated by a value that cannot be an index, and sending the marker
+/// is not optional: a packet that stops after the pose is a packet the client
+/// is still waiting on.
+pub fn write_entity_pose(out: &mut Vec<u8>, entity_id: i32, crouching: bool) {
+    VarInt(id::SET_ENTITY_DATA).write(out);
+    VarInt(entity_id).write(out);
+    out.push(ENTITY_DATA_POSE);
+    VarInt(ENTITY_DATA_SERIALIZER_POSE).write(out);
+    VarInt(if crouching { POSE_CROUCHING } else { POSE_STANDING }).write(out);
+    out.push(ENTITY_DATA_END);
+}
 
 /// Writes a `swing_animation`, so somebody else's swing is visible.
 ///

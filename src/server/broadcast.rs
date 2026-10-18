@@ -86,6 +86,9 @@ struct Sink {
     /// the range is bounded by *their* view distance because it is their
     /// client that has to hold the body.
     view_chunks: i32,
+    /// Whether they are crouching, so a key held down is not a pose sent over
+    /// and over.
+    crouching: bool,
     /// What this connection has been told about every other player, and where
     /// it was told they were.
     ///
@@ -219,6 +222,7 @@ impl Broadcast {
             yaw: 0.0,
             pitch: 0.0,
             view_chunks: 8,
+            crouching: false,
             seen: std::collections::HashMap::new(),
         });
 
@@ -250,6 +254,33 @@ impl Broadcast {
                 pitch: s.pitch,
             })
             .collect()
+    }
+
+    /// Tells everyone who can see them whether they are crouching.
+    ///
+    /// Only when it changes. The client's keys arrive twenty times a second and
+    /// shift is held for as long as it is held, so a client that sends a pose on
+    /// every input packet sends the same pose two hundred times a second to
+    /// everybody, and a client that receives them redraws the player every time.
+    pub fn set_crouching(&self, id: u64, crouching: bool) {
+        let mut sinks = self.sinks.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(sink) = sinks.iter_mut().find(|s| s.id == id) else {
+            return;
+        };
+        if sink.crouching == crouching {
+            return;
+        }
+        sink.crouching = crouching;
+        let entity_id = sink.entity_id;
+
+        let mut body = Vec::new();
+        crate::protocol::play::write_entity_pose(&mut body, entity_id, crouching);
+
+        for other in sinks.iter() {
+            if other.id != id {
+                let _ = other.out.send(body.clone());
+            }
+        }
     }
 
     /// Tells everyone who can see them that they swung.

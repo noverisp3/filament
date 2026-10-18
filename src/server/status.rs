@@ -810,6 +810,22 @@ fn play(
         log.note(format!("announced to the {} already here", others.len() - 1));
     }
 
+    // The buffer is flushed here and not after the chunk batch.
+    //
+    // Everything in step 12 that goes to the players already here is queued to
+    // them directly and is unaffected. What is missing otherwise is the other
+    // direction: the players *this* connection is told about are written into
+    // `out` by the same `send` the rest of this function uses, and `out` was
+    // last written to the socket a few lines ago, at the end of the chunk batch.
+    //
+    // So a player arriving second was written about everybody already here and
+    // never received it, while they received the new arrival perfectly well,
+    // because that went out through the queue. One direction worked, the other
+    // silently did not, and it looked like a rendering fault rather than a
+    // missing write.
+    stream.write_all(&out)?;
+    stream.flush()?;
+
     // 13. Keep the connection alive, and follow the player.
     //
     //     The client hangs up after thirty seconds of silence and reads silence

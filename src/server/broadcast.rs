@@ -353,8 +353,22 @@ impl Broadcast {
                     subject_pitch,
                 );
             }
-
             deliveries.push((sink.id, body));
+
+            // The head, which the movement packet does not carry.
+            //
+            // move_entity_pos_rot has exactly two angles on it, yRot and xRot,
+            // and the first of those is the body's. The head turns on its own
+            // and is a separate packet for that reason: a player can look
+            // sideways while walking in a straight line, and the body angle
+            // cannot say so. add_entity does carry a third angle for the head,
+            // which is why a body arrived facing the right way and then stopped
+            // turning once it started moving.
+            if subject_yaw != previous.yaw {
+                let mut head = Vec::new();
+                crate::protocol::play::write_rotate_head(&mut head, subject_entity_id, subject_yaw);
+                deliveries.push((sink.id, head));
+            }
 
             sink.seen.insert(
                 id,
@@ -828,6 +842,60 @@ mod tests {
                 name
             );
         }
+    }
+
+    #[test]
+    fn a_turn_sends_the_head_separately_from_the_body() {
+        // move_entity_pos_rot carries yRot and xRot, and yRot is the body's.
+        // The head is a different packet, and a player looking sideways while
+        // walking straight ahead is exactly the case that needs it.
+        let wire = Broadcast::new();
+        let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
+        let watcher = wire.register("watcher", [2u8; 16], 2, (0.0, 64.0, 0.0));
+        wire.note_told(watcher.id, mover.id, (0.0, 64.0, 0.0), 0.0, 0.0);
+
+        wire.update_pose(mover.id, (1.0, 64.0, 0.0), 180.0, 0.0);
+        wire.send_movement(mover.id, true);
+
+        let first = watcher.inbox.try_recv().expect("the movement");
+        assert_eq!(
+            first[0],
+            crate::protocol::play::id::MOVE_ENTITY_POS_ROT as u8,
+            "the body, carrying the body angle"
+        );
+
+        let second = watcher.inbox.try_recv().expect("and then the head");
+        assert_eq!(
+            second[0],
+            crate::protocol::play::id::ROTATE_HEAD as u8,
+            "the head, which the movement packet has no room for"
+        );
+        assert_eq!(
+            second[2], 128,
+            "pointing the other way: 180 degrees is 128"
+        );
+        assert!(watcher.inbox.try_recv().is_err(), "and only those two");
+    }
+
+    #[test]
+    fn a_straight_walk_does_not_send_a_head_packet() {
+        // The head only moves when the body angle changes, and a walk down a
+        // straight line does not change it. Sending one anyway would be a
+        // packet per observer per movement packet for nothing.
+        let wire = Broadcast::new();
+        let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
+        let watcher = wire.register("watcher", [2u8; 16], 2, (0.0, 64.0, 0.0));
+        wire.note_told(watcher.id, mover.id, (0.0, 64.0, 0.0), 90.0, 0.0);
+
+        wire.update_pose(mover.id, (1.0, 64.0, 0.0), 90.0, 0.0);
+        wire.send_movement(mover.id, true);
+
+        let body = watcher.inbox.try_recv().expect("the movement");
+        assert_eq!(body[0], crate::protocol::play::id::MOVE_ENTITY_POS_ROT as u8);
+        assert!(
+            watcher.inbox.try_recv().is_err(),
+            "and no head packet, because the body has not turned"
+        );
     }
 
     #[test]

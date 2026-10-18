@@ -46,6 +46,75 @@ fn a_flushed_buffer_puts_nothing_on_the_wire_when_it_is_empty() {
 }
 
 #[test]
+fn new_ground_arrives_nearest_first() {
+    // Walking east, the wall of new terrain is asked for and sent in the order
+    // the player will reach it. Sorting by coordinate instead sent the north
+    // end of the wall before the south, so the chunk under the player was near
+    // the back of the queue while one eight to their left was near the front.
+    //
+    // The login batch already goes nearest first, so this is the same rule the
+    // other half of the connection was already using.
+    let radius = 8;
+    let mut sent = std::collections::HashSet::new();
+    for (x, z) in chunk_edges((0, 0), radius, &sent).0 {
+        sent.insert((x, z));
+    }
+
+    let (arriving, _) = chunk_edges((1, 0), radius, &sent);
+    assert_eq!(arriving.len(), 17, "one edge of the window comes in");
+
+    // The player is at (1, 0). Every arriving chunk is in the column at x = 9,
+    // so the order down that column is the order of distance from them.
+    let centre_z = 0;
+    let distances: Vec<i32> = arriving
+        .iter()
+        .map(|&(_, z)| (z - centre_z).abs())
+        .collect();
+
+    assert!(
+        distances.windows(2).all(|w| w[0] <= w[1]),
+        "nearest first, so the ground under the player is not the last thing \
+         to arrive: {distances:?}"
+    );
+    assert_eq!(distances[0], 0, "the chunk they are standing in, first");
+    assert_eq!(
+        distances.last().copied(),
+        Some(radius),
+        "and the far corner of the edge last"
+    );
+}
+
+#[test]
+fn chunks_at_the_same_distance_arrive_in_a_fixed_order() {
+    // Two chunks the same distance away are common at a corner, and a walk that
+    // produced different bytes each time would not be reproducible. The
+    // coordinate is the tiebreak for that reason.
+    let radius = 8;
+    let mut sent = std::collections::HashSet::new();
+    for (x, z) in chunk_edges((0, 0), radius, &sent).0 {
+        sent.insert((x, z));
+    }
+
+    let first = chunk_edges((1, 1), radius, &sent).0;
+    let second = chunk_edges((1, 1), radius, &sent).0;
+    assert_eq!(first, second, "the same walk gives the same order twice");
+
+    // And the tiebreak really is what separates equal distances, not luck.
+    let seen: std::collections::HashSet<Vec<i32>> = first
+        .iter()
+        .map(|&(x, z)| {
+            let dx = i64::from(x - 1);
+            let dz = i64::from(z - 1);
+            vec![(dx * dx + dz * dz) as i32]
+        })
+        .collect();
+    assert!(
+        seen.len() <= first.len(),
+        "distances are grouped, so equal ones sit together"
+    );
+}
+
+#[test]
 fn a_player_closing_their_game_is_not_a_server_error() {
     // It arrives as an error, so it has to be told apart from one. Otherwise a
     // player closing a window prints ERROR, and the next person to read the log

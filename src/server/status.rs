@@ -576,10 +576,6 @@ fn configure(
 /// There are no chunks yet, so the client will sit on the loading screen. That
 /// is the honest state of the server: it can be joined, and the world is empty.
 ///
-/// Note the fresh output buffer. The configuration phase's buffer already went
-/// out on the wire; handing it here and writing it again made the client read
-/// 158 KB of configuration a second time while it was in the play phase, where
-/// registry id 7 means something else entirely.
 /// Sends the buffer and empties it.
 ///
 /// `write_all` sends the bytes and leaves them in the buffer it was given, so a
@@ -622,6 +618,20 @@ type ChunkCoord = (i32, i32);
 /// for the wider one it is allowed to forget from.
 type ChunkSquare = std::collections::HashSet<ChunkCoord>;
 
+/// Arrivals are sorted by distance from the player, so the ground nearest them
+/// is asked for first and arrives first.
+///
+/// This was sorted by coordinate, which is reproducible and wrong. A player
+/// walking east is handed a wall of new terrain, and sorting that wall by
+/// (x, z) sends its north end before its south, so the chunk at their feet is
+/// near the back of the queue and the chunk eight to their left is near the
+/// front. The login batch already goes nearest first, because it walks the
+/// rings outwards, so one player was given two different orders in a session
+/// and only one of them was the useful one.
+///
+/// The coordinate is the tiebreak rather than the other way round: two chunks
+/// at the same distance are common at a corner, and the bytes a walk produces
+/// should still come out in the same order every time.
 fn chunk_edges(
     player_chunk: (i32, i32),
     radius: i32,
@@ -641,9 +651,15 @@ fn chunk_edges(
     let wanted = square(radius);
     let keep = square(radius + 1);
 
-    let mut arriving: Vec<(i32, i32)> = wanted.difference(sent).copied().collect();
-    let mut leaving: Vec<(i32, i32)> = sent.difference(&keep).copied().collect();
-    arriving.sort_unstable();
+    let distance = |at: ChunkCoord| {
+        let dx = i64::from(at.0 - player_chunk.0);
+        let dz = i64::from(at.1 - player_chunk.1);
+        dx * dx + dz * dz
+    };
+
+    let mut arriving: Vec<ChunkCoord> = wanted.difference(sent).copied().collect();
+    arriving.sort_by_key(|&at| (distance(at), at));
+    let mut leaving: Vec<ChunkCoord> = sent.difference(&keep).copied().collect();
     leaving.sort_unstable();
     (arriving, leaving)
 }
@@ -1415,10 +1431,46 @@ fn play(
             // been sent is complete, so "17 chunks arrived" when none did is
             // worse than saying nothing.
             let mut ready: Vec<(crate::world::pos::ChunkPos, Vec<u8>)> = Vec::new();
+            let mut waiting = false;
             for (dx, dz) in &sorted {
                 let pos = crate::world::pos::ChunkPos { x: *dx, z: *dz };
                 if let Some(body) = session.world.want_chunk(pos) {
                     ready.push((pos, body));
+                } else {
+                    waiting = true;
+                }
+            }
+
+            // Pick up the tail of the wall before the batch is closed.
+            //
+            // The chunk the pool was still building when this pass started is
+            // usually ready by now, microseconds later, against the fifty a
+            // whole further pass would have cost. Taking it in the same batch
+            // rather than the next is what stops the log reading "16 chunks
+            // arrived" and then "1 chunks arrived", and the wire carrying a
+            // second batch pair wrapped around a single chunk.
+            //
+            // Bounded, and only while something is genuinely outstanding: this
+            // is the connection's own thread and it also has to answer keep
+            // alives, so waiting here is waiting for the player too.
+            if waiting {
+                let deadline = std::time::Instant::now() + CHUNK_TAIL_BUDGET;
+                while std::time::Instant::now() < deadline {
+                    let mut outstanding = false;
+                    for (dx, dz) in &sorted {
+                        let pos = crate::world::pos::ChunkPos { x: *dx, z: *dz };
+                        if sent.contains(&(pos.x, pos.z)) {
+                            continue;
+                        }
+                        match session.world.want_chunk(pos) {
+                            Some(body) => ready.push((pos, body)),
+                            None => outstanding = true,
+                        }
+                    }
+                    if !outstanding {
+                        break;
+                    }
+                    thread::sleep(CHUNK_TAIL_STEP);
                 }
             }
 
@@ -1564,6 +1616,18 @@ const KEEP_ALIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(15)
 /// One game tick. Long enough that an idle server is not spinning, short enough
 /// that a crack moves visibly.
 const LOOP_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// How long a connection will wait for the last chunk of an edge to finish being
+/// built, rather than sending what it has and waiting for the next pass.
+///
+/// Short on purpose. The next pass would cost fifty milliseconds and this costs
+/// at most a few, and it runs on the connection's own thread, which also has to
+/// answer keep alives and drain movement. A chunk that genuinely takes work to
+/// build gets the next pass, which is what it was getting before.
+const CHUNK_TAIL_BUDGET: std::time::Duration = std::time::Duration::from_millis(12);
+
+/// How long between looks at the pool while that budget is being spent.
+const CHUNK_TAIL_STEP: std::time::Duration = std::time::Duration::from_millis(2);
 
 /// Seconds of bare-handed breaking per point of hardness.
 ///

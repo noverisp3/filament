@@ -1613,21 +1613,33 @@ fn chunk_report(wanted: usize, sent_now: usize, dropped: usize) -> Option<String
 const KEEP_ALIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
 /// How long one loop iteration waits before looking again.
 ///
-/// One game tick. Long enough that an idle server is not spinning, short enough
-/// that a crack moves visibly.
-const LOOP_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+/// The game's tick, taken from the world's own definition of one rather than
+/// written out again: twenty a second is not a choice about this loop, it is
+/// what the tick is, and a second number that happened to agree would be a
+/// second place for the two to drift apart.
+///
+/// The read returns as soon as there is anything to read, so this is only how
+/// long an idle connection sleeps. It bounds how quickly a player walking into
+/// new terrain is noticed, which is what it is for.
+const LOOP_INTERVAL: std::time::Duration = ticking::TICK;
 
 /// How long a connection will wait for the last chunk of an edge to finish being
 /// built, rather than sending what it has and waiting for the next pass.
 ///
-/// Short on purpose. The next pass would cost fifty milliseconds and this costs
-/// at most a few, and it runs on the connection's own thread, which also has to
-/// answer keep alives and drain movement. A chunk that genuinely takes work to
-/// build gets the next pass, which is what it was getting before.
-const CHUNK_TAIL_BUDGET: std::time::Duration = std::time::Duration::from_millis(12);
+/// Short on purpose, and it is a quarter of the loop rather than half: the
+/// point is to be done before the next pass would have come round, not to
+/// replace it. It runs on the connection's own thread, which also has to answer
+/// keep alives and drain movement, so a chunk that genuinely needs work to build
+/// gets the next pass, which is what it got before.
+const CHUNK_TAIL_BUDGET: std::time::Duration =
+    std::time::Duration::from_millis(LOOP_INTERVAL.as_millis() as u64 / 4);
 
 /// How long between looks at the pool while that budget is being spent.
-const CHUNK_TAIL_STEP: std::time::Duration = std::time::Duration::from_millis(2);
+///
+/// A tenth of the budget, so a budget is spent in about ten looks rather than a
+/// number of them that has to be kept in step with it by hand.
+const CHUNK_TAIL_STEP: std::time::Duration =
+    std::time::Duration::from_millis(CHUNK_TAIL_BUDGET.as_millis() as u64 / 8);
 
 /// Seconds of bare-handed breaking per point of hardness.
 ///
@@ -1747,23 +1759,56 @@ fn clear_crack(
 
 /// How far a player may reach to break a block, in blocks.
 ///
-/// The game's own limit is 4.5 in survival and 5 in creative, and neither is
-/// negotiated: this is a server saying what it will accept. It is generous past
-/// both, because the number that matters is that it is a number.
-const MAX_REACH: f64 = 6.0;
-
-/// How far the player is from a block, in blocks.
+/// How far a player can reach, from the eye, to the nearest point of the block.
 ///
-/// The player's position is the middle of their feet, so the y comparison is
-/// against the middle of the block rather than its base. Without that the
-/// reach shrinks by half a block at every step and the check is tighter near the
-/// ground than above it, which is backwards.
+/// The game measures this as the distance from the eye to the *box* of the
+/// block, not to its middle, and allows `block_interaction_range + 1.0`, which
+/// is 5.5 with the attribute the game ships: Attributes.BLOCK_INTERACTION_RANGE
+/// is 4.5 in the client jar, ranged to 64.
+///
+/// This used to measure from the middle of the player's feet to the middle of
+/// the block, against a limit of 6.0 that appears to have been chosen. Both
+/// halves of that are wrong in the same direction and the two mistakes very
+/// nearly cancel, which is why nobody noticed -- a player could reach a little
+/// too little with one and a little too much with the other.
+///
+/// Measured the game's way, so a block the client lets them click is a block
+/// this accepts. That matters more than the exact number: a break refused that
+/// the client thought was allowed is a block that does not break while the
+/// crack is drawn on it.
 fn reach_to(player: &crate::protocol::play::Movement, block: crate::world::pos::BlockPos) -> f64 {
-    let dx = player.x - (block.x as f64 + 0.5);
-    let dy = player.y - (block.y as f64 + 0.5);
-    let dz = player.z - (block.z as f64 + 0.5);
+    // The eye sits above the feet. The client adds its own eye height to the
+    // position it was sent, and this server sends the feet, so the height has
+    // to be put back on here to measure what the client measured.
+    const EYE_HEIGHT: f64 = 1.62;
+
+    let eye = (player.x, player.y + EYE_HEIGHT, player.z);
+
+    // The box of the block, which is a whole block rather than a point at its
+    // middle. The distance from a point to a box is the gap on each axis: none
+    // at all on an axis the point is inside, and how far past the edge it is on
+    // one it is outside.
+    let across = |p: f64, edge: f64| {
+        let gap = p - edge;
+        if gap < 0.0 {
+            -gap
+        } else if gap > 1.0 {
+            gap - 1.0
+        } else {
+            0.0
+        }
+    };
+    let (dx, dy, dz) = (
+        across(eye.0, block.x as f64),
+        across(eye.1, block.y as f64),
+        across(eye.2, block.z as f64),
+    );
     (dx * dx + dy * dy + dz * dz).sqrt()
 }
+
+/// The reach the game allows: `block_interaction_range` of 4.5 plus the one block
+/// of slack the client adds, so 5.5.
+const MAX_REACH: f64 = 5.5;
 
 /// The game state id for air, used when a block cannot be read.
 ///

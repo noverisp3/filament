@@ -642,3 +642,119 @@ if bits == 0 {
     assert!(start + buffer_len <= packet.len(), "the buffer length is sane");
     out
 }
+#[test]
+fn reach_is_measured_from_the_eye_to_the_block_not_to_its_middle() {
+    // The game measures the eye to the box of the block, not to its middle, and
+    // allows block_interaction_range + 1.0. This measured feet to middle, which
+    // is wrong at both ends and wrong in opposite directions, so the two nearly
+    // cancelled and nothing looked broken.
+    fn at(x: f64, y: f64, z: f64) -> crate::protocol::play::Movement {
+        crate::protocol::play::Movement { x, y, z, ..Default::default() }
+    }
+    let on = |x: i32, y: i32, z: i32| crate::world::pos::BlockPos::new(x, y, z);
+
+    // Standing on the block: the eye is 1.62 above the feet and the top of the
+    // block is 1.0 above its own y, so the nearest point is 0.62 away. Within.
+    let standing = reach_to(&at(0.5, 0.0, 0.5), on(0, -1, 0));
+    assert!(
+        standing < MAX_REACH,
+        "the block underfoot is within reach: {standing}"
+    );
+    assert!(standing > 0.0, "and it is not the block itself: {standing}");
+
+// The eye at 0.5, 1.62, 0.5 is directly above the box of the block at the
+    // origin: inside on x and z, 0.62 above it on y. Measuring to the middle
+    // instead would have given 1.12 and a different verdict about what is
+    // within reach, which is the whole of the fault.
+    let above = reach_to(&at(0.5, 0.0, 0.5), on(0, 0, 0));
+    assert!(
+        (above - 0.62).abs() < 1e-9,
+        "to the top of the box, not to the middle of the block: {above}"
+    );
+
+    // Three blocks to the side. The eye is 0.5 inside x and z of the box and 0.62
+    // above it, so the distance is the diagonal of those two gaps rather than
+    // either on its own. Measuring to the block's middle would have added half
+    // a block to the x gap and half to the y, which is a different answer.
+    let across = reach_to(&at(-2.5, 0.0, 0.5), on(0, 0, 0));
+    let expected = (2.5f64 * 2.5 + 0.62 * 0.62).sqrt();
+    assert!(
+        (across - expected).abs() < 1e-9,
+        "both gaps at once: {across} against {expected}"
+    );
+}
+
+#[test]
+fn the_reach_is_the_number_the_game_uses() {
+    // Attributes.BLOCK_INTERACTION_RANGE is 4.5 in the client jar, ranged to
+    // 64, and Player.isWithinBlockInteractionRange adds one block of slack. So
+    // 5.5. This was 6.0, chosen rather than read, and chosen generously on
+    // purpose -- a reach that is too generous is invisible, a reach that is too
+    // tight refuses breaks the client thought were allowed.
+    assert!(
+        (MAX_REACH - 5.5).abs() < f64::EPSILON,
+        "4.5 from the attribute plus the one the client adds: {MAX_REACH}"
+    );
+}
+
+#[test]
+fn a_block_far_over_there_is_out_of_reach() {
+    fn at(x: f64, y: f64, z: f64) -> crate::protocol::play::Movement {
+        crate::protocol::play::Movement { x, y, z, ..Default::default() }
+    }
+    let far = reach_to(&at(0.5, 0.0, 0.5), crate::world::pos::BlockPos::new(9, 0, 0));
+    assert!(
+        far > MAX_REACH,
+        "a block eight away is refused, or the check is not a check: {far}"
+    );
+}
+
+#[test]
+fn the_numbers_that_were_guessed_are_now_tied_to_something() {
+    // Three numbers that used to be written down on their own, and the three
+    // things they are answers to.
+    //
+    // The reach is Attributes.BLOCK_INTERACTION_RANGE from the client jar plus
+    // the one block the client adds. The loop interval is the tick, which the
+    // world defines. The tail budget is a quarter of the loop, so it finishes
+    // before the pass it is saving would have come round.
+    //
+    // None of them is a preference dressed up as a measurement. A number that
+    // has no source is a number that will be wrong on somebody's machine, and
+    // the only way to notice is to have something that says where it came from.
+    assert!((MAX_REACH - 5.5).abs() < f64::EPSILON, "4.5 + the client's 1.0");
+
+    assert_eq!(
+        LOOP_INTERVAL,
+        crate::server::ticking::TICK,
+        "the loop waits one tick, taken from the world's own tick"
+    );
+    assert_eq!(
+        LOOP_INTERVAL.as_millis(),
+        50,
+        "and twenty a second, which is what the tick is"
+    );
+
+// A quarter of the loop, rounded down: 12 of 50, so the tail is done before
+    // the pass it is saving would have come round.
+    assert_eq!(
+        CHUNK_TAIL_BUDGET.as_millis(),
+        LOOP_INTERVAL.as_millis() / 4,
+        "a quarter of the pass, rounded down: {} of {}",
+        CHUNK_TAIL_BUDGET.as_millis(),
+        LOOP_INTERVAL.as_millis()
+    );
+    assert!(
+        CHUNK_TAIL_BUDGET * 2 < LOOP_INTERVAL,
+        "and never half of it, or it would be a second pass rather than a \
+         saving on one"
+    );
+    assert!(
+        CHUNK_TAIL_STEP * 4 <= CHUNK_TAIL_BUDGET,
+        "spent in a handful of looks rather than a number kept in step by hand"
+    );
+    assert!(
+        CHUNK_TAIL_BUDGET > CHUNK_TAIL_STEP,
+        "and a step is shorter than the budget it is spent in"
+    );
+}

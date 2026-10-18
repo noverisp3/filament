@@ -61,6 +61,8 @@ pub mod id {
     pub const BLOCK_UPDATE: i32 = 8;
     // How far through breaking a block the client should draw the crack.
     pub const BLOCK_DESTRUCTION: i32 = 5;
+    // A thing happening at a position: a sound, or a burst of particles.
+    pub const LEVEL_EVENT: i32 = 47;
     // The clientbound packet that tells the client to drop a chunk.
     pub const FORGET_LEVEL_CHUNK: i32 = 38;
 }
@@ -644,6 +646,39 @@ pub fn write_block_destruction(out: &mut Vec<u8>, breaker: i32, pos: (i32, i32, 
     out.push(stage as u8);
 }
 
+/// A level event is a thing that happened at a place: a sound, or a burst of
+/// particles.
+///
+/// The two event numbers this uses:
+///
+/// - `2001` is a block being destroyed. Its data is the **state id of the block
+///   that was there**, because the client looks the block up from that number to
+///   decide what the particles should look like. Sending air, or the id of the
+///   block that replaced it, draws nothing.
+/// - `2014` is the same without the sound.
+pub const BLOCK_DESTROYED: i32 = 2001;
+pub const BLOCK_DESTROYED_QUIET: i32 = 2014;
+
+/// Writes a `level_event`.
+///
+/// The type and the data are plain four byte ints, not VarInts. Nearly every
+/// other field in this file is a VarInt, which is exactly why these two are
+/// worth saying out loud: a VarInt here reads the first three bytes as a length
+/// and the client reports the rest as trailing garbage.
+pub fn write_level_event(
+    out: &mut Vec<u8>,
+    event: i32,
+    pos: (i32, i32, i32),
+    data: i32,
+    global: bool,
+) {
+    VarInt(id::LEVEL_EVENT).write(out);
+    out.extend_from_slice(&event.to_be_bytes());
+    out.extend_from_slice(&pack_block_pos(pos.0, pos.1, pos.2).to_be_bytes());
+    out.extend_from_slice(&data.to_be_bytes());
+    out.push(global as u8);
+}
+
 /// The stage that says "no crack here any more".
 pub const NO_CRACK: i8 = -1;
 
@@ -939,6 +974,46 @@ mod tests {
         assert_eq!(w[1], 19, "key length");
         assert_eq!(&w[2..21], b"minecraft:overworld");
         assert_eq!(w.len(), 37, "the capture's length for this packet");
+    }
+
+    #[test]
+    fn a_level_event_is_four_four_eight_four_one_bytes() {
+        let mut out = Vec::new();
+        write_level_event(&mut out, BLOCK_DESTROYED, (1, 2, 3), 7, false);
+
+        // One for the packet id, four for the event, eight for the position,
+        // four for the data, one for the flag.
+        assert_eq!(out.len(), 18);
+
+        assert_eq!(out[0], id::LEVEL_EVENT as u8);
+        assert_eq!(&out[1..5], &BLOCK_DESTROYED.to_be_bytes(), "a plain int");
+        assert_eq!(&out[5..13], &pack_block_pos(1, 2, 3).to_be_bytes());
+        assert_eq!(&out[13..17], &7i32.to_be_bytes(), "also a plain int");
+        assert_eq!(out[17], 0, "not global");
+    }
+
+    #[test]
+    fn a_level_event_that_was_a_varint_would_be_misshapen() {
+        // The check that earns its keep. Every other field in this file is a
+        // VarInt, and these two are not, so writing them as VarInts produces a
+        // packet the right length in the wrong place: the client reads the first
+        // bytes of the four as a length and calls the rest trailing.
+        let mut as_varint = Vec::new();
+        VarInt(BLOCK_DESTROYED).write(&mut as_varint);
+
+        assert_eq!(
+            as_varint.len(),
+            2,
+            "2001 is two bytes as a VarInt, where the wire wants four"
+        );
+
+        let mut right = Vec::new();
+        write_level_event(&mut right, BLOCK_DESTROYED, (0, 0, 0), 0, false);
+        assert_eq!(
+            right.len(),
+            18,
+            "and the packet it is written into is the size the client expects"
+        );
     }
 
     #[test]

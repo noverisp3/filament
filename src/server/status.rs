@@ -757,6 +757,10 @@ fn play(
     // does.
     let mut edits: Vec<Vec<u8>> = Vec::new();
 
+    // The dust and noise a break makes, as whole packets, kept apart from the
+    // edits because they are separate packets rather than part of the same one.
+    let mut effects: Vec<Vec<u8>> = Vec::new();
+
     loop {
         while let Some(frame) = dec.next_frame().map_err(io_err)? {
             let id = packet_id_of(&frame);
@@ -840,16 +844,43 @@ fn play(
 
                         p::PlayerAction::StopDestroy => {
                             clear_crack(&mut mining, last_stage, &session, player_id, entity_id);
+
+                            // What is there now, before it is gone.
+                            //
+                            // Read first because after the break the answer is
+                            // air, and air is what the particles would then be
+                            // told to draw. The level event carries the state id
+                            // of the block that was destroyed, so it has to be
+                            // remembered before the world forgets it.
+                            let was = session
+                                .world
+                                .block_at(pos)
+                                .flatten()
+                                .unwrap_or(AIR_STATE);
+
                             if session.world.break_block(pos).flatten().is_some() {
-                                let state = session
+                                let now = session
                                     .world
                                     .block_at(pos)
                                     .flatten()
                                     .unwrap_or(AIR_STATE);
 
                                 let mut body = Vec::new();
-                                p::write_block_update(&mut body, bx, by, bz, state);
+                                p::write_block_update(&mut body, bx, by, bz, now);
                                 edits.push(body);
+
+                                // The dust and the sound. Without this a block
+                                // is simply deleted rather than broken, which
+                                // looks like the server lost it.
+                                let mut effect = Vec::new();
+                                p::write_level_event(
+                                    &mut effect,
+                                    p::BLOCK_DESTROYED,
+                                    (bx, by, bz),
+                                    was,
+                                    false,
+                                );
+                                effects.push(effect);
 
                                 if super::log::verbose() {
                                     log.note(format!("broke the block at {bx} {by} {bz}"));
@@ -900,7 +931,7 @@ fn play(
         // side with that player's encoder.
         if !edits.is_empty() {
             let mut framed = Vec::new();
-            for body in &edits {
+            for body in edits.iter().chain(effects.iter()) {
                 session.wire.send_others(player_id, body.clone());
                 enc.encode(body, &mut framed).map_err(io_err)?;
             }

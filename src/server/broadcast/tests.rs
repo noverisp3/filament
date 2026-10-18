@@ -36,11 +36,16 @@ fn skip_varints(mut b: &[u8]) -> &[u8] {
 /// Every packet that has reached this connection since the last call, as the
 /// packet ids in the order they arrived.
 fn drain(reg: &Registration) -> Vec<u8> {
-    let mut kinds = Vec::new();
+    drain_raw(reg).iter().map(|b| b[0]).collect()
+}
+
+/// Every packet body that has reached this connection since the last call.
+fn drain_raw(reg: &Registration) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
     while let Ok(body) = reg.inbox.try_recv() {
-        kinds.push(body[0]);
+        out.push(body);
     }
-    kinds
+    out
 }
 
     #[test]
@@ -149,6 +154,60 @@ fn drain(reg: &Registration) -> Vec<u8> {
         );
 
         assert_eq!(drain(&mover), Vec::<u8>::new(), "and none of it went to the mover");
+    }
+
+    #[test]
+    fn a_swing_reaches_the_watchers_and_not_the_one_who_swung() {
+        use crate::protocol::play::id;
+
+        let wire = Broadcast::new();
+        let swinger = wire.register("swinger", [1u8; 16], 5, (0.0, 64.0, 0.0));
+        let watcher = wire.register("watcher", [2u8; 16], 6, (0.0, 64.0, 0.0));
+
+        wire.send_swing(swinger.id, crate::protocol::play::MAIN_HAND);
+
+        let body = drain(&watcher);
+        assert_eq!(body, vec![id::SWING_ANIMATION as u8], "the watcher sees it");
+
+        assert_eq!(
+            drain(&swinger),
+            Vec::<u8>::new(),
+            "and the one who swung does not: their client drew it when they \
+             clicked, and a second copy is an arm twitching"
+        );
+    }
+
+    #[test]
+    fn a_swing_addresses_the_entity_the_client_already_knows() {
+        use crate::protocol::play::id;
+
+        // The entity id is not the registration id. One is ours, the other is
+        // what this client's world calls the body, and sending the wrong one is
+        // a swing nobody performs.
+        let wire = Broadcast::new();
+        let swinger = wire.register("swinger", [1u8; 16], 41, (0.0, 64.0, 0.0));
+        let _watcher = wire.register("watcher", [2u8; 16], 42, (0.0, 64.0, 0.0));
+
+        wire.send_swing(swinger.id, crate::protocol::play::MAIN_HAND);
+
+        let raw = drain_raw(&_watcher);
+        assert_eq!(raw.len(), 1, "exactly one swing");
+        let packet = &raw[0];
+
+        assert_eq!(packet[0], id::SWING_ANIMATION as u8, "the packet id");
+        assert_eq!(packet[1], 41, "then the entity id, which is not the registration");
+
+        // Then the hand, the kind and the length: four VarInts, all one byte
+        // here because every value is small.
+        assert_eq!(packet.len(), 5, "four fields after the id, none needing two bytes");
+        assert_eq!(packet[2], crate::protocol::play::MAIN_HAND as u8);
+        assert_eq!(packet[3], crate::protocol::play::SWING_WHACK as u8);
+        assert_eq!(
+            packet[4],
+            crate::protocol::play::SWING_DURATION as u8,
+            "six ticks, which is the game's own default and the only reason \
+             the arm comes down"
+        );
     }
 
     #[test]

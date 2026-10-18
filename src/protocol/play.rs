@@ -59,6 +59,12 @@ pub mod id {
 
     // The clientbound packet that tells the client one block changed.
     pub const BLOCK_UPDATE: i32 = 8;
+    // A hand going through a swing, and a punch landing.
+    pub const SWING_ANIMATION: i32 = 2;
+    // The same thing coming back the other way. It is a record with no fields,
+    // so the packet is nothing but its id — which is worth knowing before
+    // writing a decoder for it and finding nothing to read.
+    pub const SERVERBOUND_PUNCH: i32 = 46;
     // How far through breaking a block the client should draw the crack.
     pub const BLOCK_DESTRUCTION: i32 = 5;
     // Putting another player into this client's world.
@@ -836,6 +842,54 @@ pub fn write_remove_entities(out: &mut Vec<u8>, entity_ids: &[i32]) {
     for id in entity_ids {
         VarInt(*id).write(out);
     }
+}
+
+/// The hand a swing came from. Zero is the one most people use.
+pub const MAIN_HAND: i32 = 0;
+/// The off hand, which is what a client sends when shift is held while swinging.
+pub const OFF_HAND: i32 = 1;
+
+/// How a swing looks.
+///
+/// Read out of `SwingAnimationType`, which is a small enum with an explicit id
+/// per value: none is zero, a sideways hit is one, and a straight stab is two.
+/// A player clicking empty air does the first thing in that list.
+pub const SWING_WHACK: i32 = 1;
+
+/// How long a swing lasts, in ticks.
+///
+/// The game's own default, from `SwingAnimation.DEFAULT`. It is not a duration
+/// the client ignores: the arm comes down on it, and a swing that says zero is
+/// an arm that does not move.
+pub const SWING_DURATION: i32 = 6;
+
+/// Writes a `swing_animation`, so somebody else's swing is visible.
+///
+/// The player's own client already plays their swing when they click, from the
+/// same packet that told us they clicked. This is the other half: what everyone
+/// watching sees.
+///
+/// ```text
+/// VarInt   the entity id
+/// VarInt   which hand
+/// VarInt   what the swing looks like
+/// VarInt   how long it lasts, in ticks
+/// ```
+///
+/// The last two are one field upstream, a record of a type and a duration, but
+/// on the wire they are two VarInts.
+pub fn write_swing_animation(
+    out: &mut Vec<u8>,
+    entity_id: i32,
+    hand: i32,
+    kind: i32,
+    duration: i32,
+) {
+    VarInt(id::SWING_ANIMATION).write(out);
+    VarInt(entity_id).write(out);
+    VarInt(hand).write(out);
+    VarInt(kind).write(out);
+    VarInt(duration).write(out);
 }
 
 /// Writes a `rotate_head`, so a client knows which way somebody is looking.

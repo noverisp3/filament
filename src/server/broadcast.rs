@@ -252,6 +252,37 @@ impl Broadcast {
             .collect()
     }
 
+    /// Tells everyone who can see them that they swung.
+    ///
+    /// Their own client has already drawn it — it is the one that decided to —
+    /// so this is the same shape as every other push here: to the others, never
+    /// back to the sender.
+    ///
+    /// Sending it to the sender as well is not a duplicate animation, because
+    /// the client's own click is what drew the first one, and this would be a
+    /// second swing a fraction of a second later. It reads as the arm twitching.
+    pub fn send_swing(&self, id: u64, hand: i32) {
+        let sinks = self.sinks.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(entity_id) = sinks.iter().find(|s| s.id == id).map(|s| s.entity_id) else {
+            return;
+        };
+
+        let mut body = Vec::new();
+        crate::protocol::play::write_swing_animation(
+            &mut body,
+            entity_id,
+            hand,
+            crate::protocol::play::SWING_WHACK,
+            crate::protocol::play::SWING_DURATION,
+        );
+
+        for sink in sinks.iter() {
+            if sink.id != id {
+                let _ = sink.out.send(body.clone());
+            }
+        }
+    }
+
     /// Records that one connection has been told where another player is.
     ///
     /// Called whenever an `add_entity` goes out, because that packet is where a

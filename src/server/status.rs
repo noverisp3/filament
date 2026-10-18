@@ -961,6 +961,17 @@ fn play(
                 }
             }
 
+            // A swing, or a punch. The packet is empty — upstream it is a
+            // record with no fields at all — so there is nothing to decode and
+            // the id is the whole message.
+            //
+            // Their own client has already drawn it. This is so that everybody
+            // *else* sees it too, which is the entire difference between two
+            // people on a server and two people in separate worlds.
+            if id == p::id::SERVERBOUND_PUNCH {
+                session.wire.send_swing(player_id, p::MAIN_HAND);
+            }
+
             // Breaking a block.
             //
             // Three actions, and they do three different things. START is the

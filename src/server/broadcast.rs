@@ -89,6 +89,16 @@ struct Seen {
     pos: (f64, f64, f64),
     yaw: f32,
     pitch: f32,
+    /// Whether the body is currently in this observer's world at all.
+    ///
+    /// Kept alongside the position rather than by removing the entry, because
+    /// the two mean different things. A missing entry is "this observer was
+    /// never introduced to that player", which happens in the window between
+    /// one connection registering and the other finishing its chunks, and
+    /// spawning a body into a client that has not been told the name yet is
+    /// its own fault. A present entry with this false is "we took it away
+    /// again because they walked off", and that one needs putting back.
+    visible: bool,
 }
 
 /// What a connection needs to know about another player to put them in its world.
@@ -232,7 +242,7 @@ impl Broadcast {
     pub fn note_told(&self, observer: u64, subject: u64, pos: (f64, f64, f64), yaw: f32, pitch: f32) {
         let mut sinks = self.sinks.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(sink) = sinks.iter_mut().find(|s| s.id == observer) {
-            sink.seen.insert(subject, Seen { pos, yaw, pitch });
+            sink.seen.insert(subject, Seen { pos, yaw, pitch, visible: true });
         }
     }
 
@@ -294,10 +304,55 @@ impl Broadcast {
             let ex = subject_pos.0 - sink.pos.0;
             let ey = subject_pos.1 - sink.pos.1;
             let ez = subject_pos.2 - sink.pos.2;
-            if ex * ex + ey * ey + ez * ez > RANGE * RANGE {
-                // Too far to see. Their baseline is left alone, so walking back
-                // into range sends one big delta rather than a series of small
-                // ones, which is right: they were not watching.
+            let too_far = ex * ex + ey * ey + ez * ez > RANGE * RANGE;
+
+            if too_far {
+                // Take the body out of their world rather than stopping the
+                // updates. Leaving it in place and going quiet looks the same
+                // from here — no more packets — and completely different from
+                // there: the client still holds the entity and keeps drawing
+                // it, so the player stands frozen in mid-air for as long as
+                // they care to walk away.
+                if previous.visible {
+                    let mut gone = Vec::new();
+                    crate::protocol::play::write_remove_entities(&mut gone, &[subject_entity_id]);
+                    deliveries.push((sink.id, gone));
+
+                    if let Some(entry) = sink.seen.get_mut(&id) {
+                        entry.visible = false;
+                    }
+                }
+                continue;
+            }
+
+            if !previous.visible {
+                // They walked back into range. Put them down again at where
+                // they actually are, rather than sending a delta from the far
+                // side of the world: the entry above holds where they were when
+                // they left, and that is hundreds of blocks stale.
+                let mut back = Vec::new();
+                crate::protocol::play::write_add_entity(
+                    &mut back,
+                    subject_entity_id,
+                    subject_uuid,
+                    crate::protocol::play::PLAYER_ENTITY_TYPE,
+                    subject_pos,
+                    subject_yaw,
+                    subject_pitch,
+                );
+                deliveries.push((sink.id, back));
+
+                // And the baseline moves with them, or the next delta is
+                // measured from where they were when they left.
+                sink.seen.insert(
+                    id,
+                    Seen {
+                        pos: subject_pos,
+                        yaw: subject_yaw,
+                        pitch: subject_pitch,
+                        visible: true,
+                    },
+                );
                 continue;
             }
 
@@ -376,6 +431,7 @@ impl Broadcast {
                     pos: subject_pos,
                     yaw: subject_yaw,
                     pitch: subject_pitch,
+                    visible: true,
                 },
             );
         }
@@ -798,7 +854,12 @@ mod tests {
 
         wire.update_pose(mover.id, (1.0, 64.0, 0.0), 0.0, 0.0);
         wire.send_movement(mover.id, true);
-        assert!(far.inbox.try_recv().is_err(), "a kilometre is past seeing");
+        assert_eq!(
+            far.inbox.try_recv().expect("the body is removed, which is news")
+                [0],
+            crate::protocol::play::id::REMOVE_ENTITIES as u8,
+            "a kilometre is past seeing, and past being in the world"
+        );
     }
 
     #[test]
@@ -895,6 +956,105 @@ mod tests {
         assert!(
             watcher.inbox.try_recv().is_err(),
             "and no head packet, because the body has not turned"
+        );
+    }
+
+    #[test]
+    fn walking_out_of_range_removes_the_body_rather_than_freezing_it() {
+        // Stopping the updates looks identical from the server and completely
+        // different from the client: the client still holds the entity and
+        // keeps drawing it, so the player stands frozen in mid-air for as long
+        // as they care to walk away. The body has to be taken away.
+        let wire = Broadcast::new();
+        let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
+        let watcher = wire.register("watcher", [2u8; 16], 2, (0.0, 64.0, 0.0));
+        wire.note_told(watcher.id, mover.id, (0.0, 64.0, 0.0), 0.0, 0.0);
+
+        wire.update_pose(mover.id, (100.0, 64.0, 0.0), 0.0, 0.0);
+        wire.send_movement(mover.id, true);
+
+        let gone = watcher
+            .inbox
+            .try_recv()
+            .expect("the body is taken away, not abandoned");
+        assert_eq!(
+            gone[0],
+            crate::protocol::play::id::REMOVE_ENTITIES as u8,
+            "so it is a remove_entities"
+        );
+    }
+
+    #[test]
+    fn going_still_out_of_range_does_not_keep_saying_it() {
+        let wire = Broadcast::new();
+        let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
+        let watcher = wire.register("watcher", [2u8; 16], 2, (0.0, 64.0, 0.0));
+        wire.note_told(watcher.id, mover.id, (0.0, 64.0, 0.0), 0.0, 0.0);
+
+        wire.update_pose(mover.id, (100.0, 64.0, 0.0), 0.0, 0.0);
+        wire.send_movement(mover.id, true);
+        assert!(watcher.inbox.try_recv().is_ok(), "the first crossing removes it");
+
+        for _ in 0..20 {
+            wire.send_movement(mover.id, true);
+        }
+        assert!(
+            watcher.inbox.try_recv().is_err(),
+            "and a player standing far away is not removed twenty times a second"
+        );
+    }
+
+    #[test]
+    fn walking_back_puts_them_down_where_they_actually_are() {
+        // Not a delta from where they left. That entry is hundreds of blocks
+        // stale by now, and a delta from it would put them somewhere neither
+        // of them has ever been.
+        let wire = Broadcast::new();
+        let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
+        let watcher = wire.register("watcher", [2u8; 16], 2, (0.0, 64.0, 0.0));
+        wire.note_told(watcher.id, mover.id, (0.0, 64.0, 0.0), 0.0, 0.0);
+
+        wire.update_pose(mover.id, (100.0, 64.0, 0.0), 0.0, 0.0);
+        wire.send_movement(mover.id, true);
+        watcher.inbox.try_recv().expect("removed");
+
+        wire.update_pose(mover.id, (10.0, 64.0, 0.0), 0.0, 0.0);
+        wire.send_movement(mover.id, true);
+
+        let back = watcher.inbox.try_recv().expect("and put back");
+        assert_eq!(
+            back[0],
+            crate::protocol::play::id::ADD_ENTITY as u8,
+            "as a position, not a movement"
+        );
+        // Entity id, then the uuid, then the type: the x coordinate follows.
+        let x = f64::from_be_bytes(back[2 + 16 + 2..2 + 16 + 2 + 8].try_into().unwrap());
+        assert_eq!(x, 10.0, "and it is where they are now");
+
+        // And the next movement is measured from there.
+        wire.update_pose(mover.id, (11.0, 64.0, 0.0), 0.0, 0.0);
+        wire.send_movement(mover.id, true);
+        assert_eq!(
+            read_delta_x(&watcher.inbox.try_recv().unwrap()),
+            1.0,
+            "not from where they were when they left"
+        );
+    }
+
+    #[test]
+    fn a_player_who_was_never_introduced_is_not_spawned_into_a_client_that_has_not_been_told_their_name() {
+        // The window between one connection registering and the other
+        // finishing its chunks. Distinct from having been removed.
+        let wire = Broadcast::new();
+        let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
+        let stranger = wire.register("stranger", [2u8; 16], 2, (0.0, 64.0, 0.0));
+
+        wire.update_pose(mover.id, (1.0, 64.0, 0.0), 0.0, 0.0);
+        wire.send_movement(mover.id, true);
+
+        assert!(
+            stranger.inbox.try_recv().is_err(),
+            "nothing at all, rather than a body with no name"
         );
     }
 

@@ -111,7 +111,7 @@ Grouped by what they are about, not by when they were done.
 - [ ] Mobs
 - [ ] Authentication
 
-597 tests. A client connects, negotiates, and gets a world of generated terrain:
+612 tests. A client connects, negotiates, and gets a world of generated terrain:
 grass on top, dirt under it, stone below, hills from two octaves of value noise.
 A second client joins the same world and sees the first one walk about.
 

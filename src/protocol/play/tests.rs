@@ -898,6 +898,53 @@ fn the_play_ids_are_the_ones_the_game_uses() {
     /// other number in this module, and a constant that is renamed or given the
     /// wrong number fails rather than costing somebody a crash report.
     #[test]
+    fn an_acknowledged_change_is_the_update_followed_by_the_ack() {
+        // The order is the whole of it. The client draws the change straight
+        // away and keeps the shape the block used to have until the ack says
+        // otherwise, so an ack that arrives before the update settles nothing,
+        // and an ack that never arrives leaves a block that is invisible and
+        // still solid.
+        let mut body = Vec::new();
+        write_block_update(&mut body, 1, 2, 3, 0);
+        write_block_changed_ack(&mut body, 1);
+
+        let mut b = &body[..];
+        assert_eq!(take_varint(&mut b), id::BLOCK_UPDATE, "the change first");
+        // A block position is a fixed eight byte long and not three VarInts.
+        // Compared against the project's own packing rather than a constant
+        // worked out by hand, since what this test is about is the order of the
+        // two packets and not how a position is laid out.
+        assert_eq!(
+            &b[..8],
+            &pack_block_pos(1, 2, 3).to_be_bytes()[..],
+            "which is its position"
+        );
+        b = &b[8..];
+        assert_eq!(take_varint(&mut b), 0, "and the state it became, which is air");
+
+        assert_eq!(take_varint(&mut b), id::BLOCK_CHANGED_ACK, "then the ack");
+        assert_eq!(take_varint(&mut b), 1, "and the sequence it settles");
+        assert!(b.is_empty(), "and nothing else");
+    }
+
+    #[test]
+    fn the_sequence_goes_up() {
+        // The client reads it as a counter. What it must not do is repeat, or
+        // go backwards, because either of those reads as an old change being
+        // settled again.
+        let mut last = 0;
+        for step in 1..=5 {
+            let mut body = Vec::new();
+            write_block_changed_ack(&mut body, step);
+            let mut b = &body[..];
+            assert_eq!(take_varint(&mut b), id::BLOCK_CHANGED_ACK);
+            let sequence = take_varint(&mut b);
+            assert!(sequence > last, "{sequence} must be above {last}");
+            last = sequence;
+        }
+    }
+
+    #[test]
     fn every_id_here_is_the_one_the_generator_reports() {
         let report = include_str!("../../../extracted/packets.json");
 
@@ -922,6 +969,7 @@ fn the_play_ids_are_the_ones_the_game_uses() {
         // (our constant, the name the generator knows it by, clientbound)
         let cases: &[(i32, &str, bool)] = &[
             (id::BLOCK_UPDATE, "block_update", true),
+            (id::BLOCK_CHANGED_ACK, "block_changed_ack", true),
             (id::BLOCK_DESTRUCTION, "block_destruction", true),
             (id::ADD_ENTITY, "add_entity", true),
             (id::REMOVE_ENTITIES, "remove_entities", true),

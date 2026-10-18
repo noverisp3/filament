@@ -59,6 +59,11 @@ pub mod id {
 
     // The clientbound packet that tells the client one block changed.
     pub const BLOCK_UPDATE: i32 = 8;
+    // And that this one is settled, not a guess.
+    //
+    // Clientbound only: there is no serverbound one, so the server opens this
+    // and the client has nothing to reply with.
+    pub const BLOCK_CHANGED_ACK: i32 = 4;
     // A hand going through a swing.
     //
     // 123, and not 2. Two is `animate`, a different packet that happens to
@@ -958,6 +963,26 @@ pub fn write_swing_animation(
     VarInt(hand).write(out);
     VarInt(kind).write(out);
     VarInt(duration).write(out);
+}
+
+/// Writes a `block_changed_ack`, which is how a block change stops being a guess.
+///
+/// The client applies a block change straight away -- it draws the block gone
+/// before the player has finished swinging, which is the whole point of the
+/// prediction. What it does not do straight away is throw away the shape the
+/// block used to have. That is settled when this arrives, and until it does the
+/// block is invisible and still solid: a player stands on air and walks into a
+/// wall that is not drawn.
+///
+/// It exists in only one direction. There is no serverbound packet of this name,
+/// so the server sends it and the client has nothing to answer with.
+///
+/// One VarInt, a sequence number counting the changes this connection has been
+/// told are final. The client reads it as a counter and not as a position or an
+/// id, so what matters is that it goes up.
+pub fn write_block_changed_ack(out: &mut Vec<u8>, sequence: i32) {
+    VarInt(id::BLOCK_CHANGED_ACK).write(out);
+    VarInt(sequence).write(out);
 }
 
 /// Writes a `rotate_head`, so a client knows which way somebody is looking.

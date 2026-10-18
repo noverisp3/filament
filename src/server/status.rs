@@ -896,6 +896,13 @@ fn play(
     // of it looking like nothing happened.
     let mut last_stage: Option<i8> = None;
 
+    // How many block changes this connection has been told are final.
+    //
+    // Per connection rather than per world, because it is a counter the client
+    // reads as going up and not as meaning anything, and two players being told
+    // the same sequence numbers is not a thing worth avoiding.
+    let mut block_sequence: i32 = 0;
+
     // Where the player is, updated by the movement packets. The spawn is where
     // the teleport above put it.
     let mut player = spawn;
@@ -1075,6 +1082,26 @@ fn play(
                                 let mut body = Vec::new();
                                 p::write_block_update(&mut body, bx, by, bz, now);
                                 edits.push(body);
+
+                                // And that the change is settled.
+                                //
+                                // The block is drawn gone the moment the update
+                                // arrives, but the shape it used to have is
+                                // kept until it is acknowledged, and until then
+                                // it is invisible and still solid: a player
+                                // stands on air and walks into a wall that is
+                                // not drawn. It only comes right when the
+                                // chunk is sent again from the server, which
+                                // is why it looked like the world was only
+                                // right after reconnecting.
+                                //
+                                // The sequence counts the changes this
+                                // connection has been told are final, so it
+                                // goes up and never repeats.
+                                block_sequence += 1;
+                                let mut ack = Vec::new();
+                                p::write_block_changed_ack(&mut ack, block_sequence);
+                                edits.push(ack);
 
                                 // The dust and the sound. Without this a block
                                 // is simply deleted rather than broken, which

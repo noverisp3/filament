@@ -203,15 +203,6 @@ impl World {
         &self.terrain
     }
 
-    /// The block registered under this name, if the world has one.
-    ///
-    /// The registry names are bare — `dirt`, not `minecraft:dirt` — because
-    /// they are what this world's palette was registered with, and a name the
-    /// world has never heard of is `None` rather than a default.
-    pub fn block_by_name(&self, name: &str) -> Option<BlockId> {
-        self.registry.id(name)
-    }
-
     /// Chunk positions in a stable order, so rebuilds are deterministic.
     pub fn chunk_positions(&self) -> Vec<ChunkPos> {
         let mut positions: Vec<ChunkPos> = self.chunks.keys().copied().collect();

@@ -102,14 +102,6 @@ pub enum Command {
     Forget { pos: ChunkPos },
     /// The terrain palette, which is five block ids and never changes.
     TerrainBlocks { reply: Sender<TerrainBlocks> },
-    /// The world's block for a name, so an item in a hand can become a block.
-    ///
-    /// The registry is on the world thread and the item id is not a block id, so
-    /// the two have to be joined somewhere. Here is the somewhere.
-    BlockByName {
-        name: String,
-        reply: Sender<Option<BlockId>>,
-    },
     /// How many chunks the world is holding.
     ChunkCount { reply: Sender<usize> },
     /// Every remembered block edit, by the chunk it was made in.
@@ -230,22 +222,6 @@ impl WorldHandle {
     /// the caller, and the lock is on the other side of a channel.
     pub fn terrain_blocks(&self) -> Option<TerrainBlocks> {
         self.ask(|reply| Command::TerrainBlocks { reply })
-    }
-
-    /// The world's block for a name, or `None` if this world has no such block.
-    ///
-    /// An item id is not a block id and the two registries are numbered
-    /// differently, so an item has to be turned into a name and the name into a
-    /// block. An item with no block — a torch is a block but a stick is not —
-    /// is `None` rather than a guess.
-    pub fn block_by_name(&self, name: &str) -> Option<BlockId> {
-        // `ask` answers with an `Option` because the world thread might not
-        // reply at all, so the answer itself being optional is a second one.
-        self.ask(|reply| Command::BlockByName {
-            name: name.to_string(),
-            reply,
-        })
-        .flatten()
     }
 
     /// Drops a chunk the player has walked away from.
@@ -561,10 +537,6 @@ fn apply(world: &mut World, command: Command, pool: &Pool) {
             let _ = reply.send(*world.terrain_blocks());
         }
 
-        Command::BlockByName { name, reply } => {
-            let _ = reply.send(world.block_by_name(&name));
-        }
-
         Command::Forget { pos } => {
             world.forget_chunk(pos);
             pool.dropped(pos);
@@ -652,6 +624,28 @@ pub fn to_state_name(block: BlockId, terrain: &TerrainBlocks) -> &'static str {
     } else {
         panic!("the terrain generator produced a block this cannot name")
     }
+}
+
+/// The block this palette puts on the wire under this name, if it has one.
+///
+/// The inverse of [`to_state_name`], and written as the inverse of it on
+/// purpose. An item is named the way the game names it -- `minecraft:
+/// grass_block` -- and the registry's own names are shorter (`grass`), so
+/// looking an item up in the registry directly finds nothing for the one block
+/// whose names differ, and the refusal reads like the item is not a block.
+///
+/// Asking the other direction means the two cannot drift: whatever
+/// `to_state_name` sends is exactly what this accepts back.
+pub fn block_for_name(terrain: &TerrainBlocks, name: &str) -> Option<BlockId> {
+    [
+        terrain.air,
+        terrain.grass,
+        terrain.dirt,
+        terrain.stone,
+        terrain.glowstone,
+    ]
+    .into_iter()
+    .find(|block| to_state_name(*block, terrain) == name)
 }
 
 /// Maps one of the world's block ids onto the game's state id.

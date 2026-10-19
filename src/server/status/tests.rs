@@ -1077,8 +1077,51 @@ fn the_round_trip_is_smoothed_rather_than_jumping() {
 }
 
 #[test]
-fn the_faces_are_numbered_the_way_the_game_numbers_them() {
-    // Placed on the wrong face, a block still goes somewhere -- just the wrong
+fn an_item_name_finds_the_block_the_world_will_send_for_it() {
+    // The refusal this fixes read as "not a block this world has" for a block
+    // the world very well has. The registry calls it `grass` and the game calls
+    // it `minecraft:grass_block`, and looking the item's name up in the
+    // registry found nothing -- for exactly one block, because every other one
+    // happens to have the same name in both places. That is the worst way a
+    // name can be wrong: it looks right everywhere it has been looked at.
+    let terrain = crate::world::terrain::register_terrain(&mut crate::world::block::BlockRegistry::new());
+
+    for name in [
+        "minecraft:air",
+        "minecraft:grass_block",
+        "minecraft:dirt",
+        "minecraft:stone",
+        "minecraft:glowstone",
+    ] {
+        let block = crate::server::ticking::block_for_name(&terrain, name)
+            .unwrap_or_else(|| panic!("{name} is a block this world has"));
+        assert_eq!(
+            crate::server::ticking::to_state_name(block, &terrain),
+            name,
+            "{name} round trips"
+        );
+    }
+
+    // The grass case is the one that was broken, and it is the one that differs
+    // from the registry's own name.
+    assert_ne!(
+        crate::server::ticking::to_state_name(terrain.grass, &terrain),
+        "grass",
+        "the game does not call the block grass"
+    );
+    assert!(crate::server::ticking::block_for_name(&terrain, "minecraft:grass_block").is_some());
+
+    // And things that are items but not blocks this world has.
+    for name in ["minecraft:stick", "minecraft:diamond_pickaxe", "grass_block", ""] {
+        assert!(
+            crate::server::ticking::block_for_name(&terrain, name).is_none(),
+            "{name} is not a block to put down here"
+        );
+    }
+}
+
+#[test]
+fn the_faces_are_numbered_the_way_the_game_numbers_them() {    // Placed on the wrong face, a block still goes somewhere -- just the wrong
     // somewhere, which is the quietest kind of wrong there is.
     //
     //   DOWN (0) new Vec3i( 0, -1,  0)

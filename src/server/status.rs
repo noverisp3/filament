@@ -439,10 +439,24 @@ fn configure(
 
     let mut out = Vec::new();
 
-    // 1. No feature flags: a client does not require any particular one, and
-    //    sending one it does not know about is worse than sending none.
+    // 1. The feature flags this world runs with.
+    //
+    //    ```java
+    //    VANILLA = builder.createVanilla("vanilla");
+    //    VANILLA_SET = FeatureFlagSet.of(VANILLA);
+    //    DEFAULT_FLAGS = VANILLA_SET;
+    //    ```
+    //    (`FeatureFlags.java:31-42`) and `createVanilla` is
+    //    `Identifier.withDefaultNamespace(name)`, so the one that ships is
+    //    `minecraft:vanilla` (`FeatureFlagRegistry.java:87-88`).
+    //
+    //    An empty list is not "no requirement" -- it is "nothing is enabled",
+    //    and every item whose prototype asks for a flag then reads as disabled
+    //    and says so on its tooltip. Sending one the client has not heard of
+    //    would be worse, so this is the game's own default rather than a
+    //    guess.
     let mut body = Vec::new();
-    write_update_enabled_features(&mut body, &[]);
+    write_update_enabled_features(&mut body, &["minecraft:vanilla"]);
     enc.encode(&body, &mut out).map_err(io_err)?;
     log.out_packet("update_enabled_features", "configuration", body.len());
 
@@ -1333,17 +1347,21 @@ fn place_block(
         });
     };
 
-    // An item id is not a block id. The name is the join, and an item with no
-    // block behind it -- a torch is a block but a stick is not -- is refused
-    // rather than mapped onto something nearby.
+    // An item id is not a block id, and the game's names are not the registry's
+    // names -- `minecraft:grass_block` against `grass`. The join goes through
+    // the same table that turns a block into the name the wire uses, so the two
+    // cannot drift apart.
     let Some(name) = crate::generated::item_name(item.item as u32) else {
         return Some(Placement::Refused {
             why: "not an item this registry has",
         });
     };
-    let block = name
-        .strip_prefix("minecraft:")
-        .and_then(|n| world.block_by_name(n));
+    let Some(terrain) = world.terrain_blocks() else {
+        return Some(Placement::Refused {
+            why: "the world has no terrain palette",
+        });
+    };
+    let block = ticking::block_for_name(&terrain, name);
     let Some(block) = block else {
         return Some(Placement::Refused {
             why: "not a block this world has",

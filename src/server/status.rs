@@ -166,6 +166,17 @@ impl StatusServer {
 /// server is not spinning.
 const POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
+/// How far a player may claim to have moved in one poll without being put back.
+///
+/// The game's own check is one hundred blocks per tick against the velocity it
+/// already knows; this runs per poll rather than per tick, and takes the same
+/// hundred blocks as a floor. A real client cannot cross it -- sprinting is
+/// five and a half -- while a teleport or a lag spike of any size can.
+const MAX_MOVE_PER_POLL: f64 = 100.0;
+
+/// The edge of the world, as the game itself clamps it.
+const MAX_COORD: f64 = 3.0e7;
+
 /// Answers one connection's handshake and status exchange.
 ///
 /// Deliberately does not implement login: the point here is to be visible in
@@ -1105,6 +1116,9 @@ fn play(
     // Where the player is, updated by the movement packets. The spawn is where
     // the teleport above put it.
     let mut player = spawn;
+    // The join teleport was id 1; corrections made against a too-fast move
+    // count up from there so no two asks are ever the same number.
+    let mut teleport_seq: i32 = 1;
 
     // What they are carrying, which starts empty and is filled by what they
     // break.
@@ -1189,11 +1203,48 @@ fn play(
                 }
 
                 if let (Some(x), Some(y), Some(z)) = (moved.x, moved.y, moved.z) {
-                    player.x = x;
-                    player.y = y;
-                    player.z = z;
-                    session.wire.update_pose(player_id, (x, y, z), player.yaw, player.pitch);
-                    session.wire.send_movement(player_id, true);
+                    // The two checks the game's own listener runs, in the same
+                    // order: numbers that are not numbers at all, and a move
+                    // that is too far to have happened since the last one.
+                    //
+                    // A NaN or an infinity is a broken or malicious client,
+                    // and writing it into the pose would poison every packet
+                    // built from it -- the position field of an entity packet
+                    // is not checked by anyone downstream.
+                    if !x.is_finite() || !y.is_finite() || !z.is_finite() {
+                        log.note("refused a move that was not a number");
+                    } else if dist_squared(player.x, player.y, player.z, x, y, z)
+                        > MAX_MOVE_PER_POLL * MAX_MOVE_PER_POLL
+                    {
+                        // Too fast to be real. The position is not taken, and
+                        // the client is put back where it was: the game's own
+                        // answer is a teleport, which the client obeys without
+                        // asking, and the correction carries a fresh id so a
+                        // client that ignored one is asked again.
+                        teleport_seq += 1;
+                        let mut fix = Vec::new();
+                        p::write_player_position(&mut fix, teleport_seq, &player);
+                        enc.encode(&fix, &mut out).map_err(io_err)?;
+                        log.note(format!(
+                            "refused a move to {x:.1} {y:.1} {z:.1}, too fast from {:.1} {:.1} {:.1}",
+                            player.x, player.y, player.z
+                        ));
+                    } else {
+                        // The game clamps to its own world border of three
+                        // times ten to the seven; anything past that is not a
+                        // place, and broadcasting it would overflow nothing
+                        // here but everything on the client.
+                        player.x = x.clamp(-MAX_COORD, MAX_COORD);
+                        player.y = y.clamp(-MAX_COORD, MAX_COORD);
+                        player.z = z.clamp(-MAX_COORD, MAX_COORD);
+                        session.wire.update_pose(
+                            player_id,
+                            (player.x, player.y, player.z),
+                            player.yaw,
+                            player.pitch,
+                        );
+                        session.wire.send_movement(player_id, true);
+                    }
                 } else {
                     // Turned without moving: the pose still moved, so anybody
                     // told about it needs telling again.
@@ -2606,6 +2657,14 @@ fn clear_crack(
 /// this accepts. That matters more than the exact number: a break refused that
 /// the client thought was allowed is a block that does not break while the
 /// crack is drawn on it.
+/// Squared distance between two points, for the too-fast move check.
+fn dist_squared(ax: f64, ay: f64, az: f64, bx: f64, by: f64, bz: f64) -> f64 {
+    let dx = bx - ax;
+    let dy = by - ay;
+    let dz = bz - az;
+    dx * dx + dy * dy + dz * dz
+}
+
 fn reach_to(player: &crate::protocol::play::Movement, block: crate::world::pos::BlockPos) -> f64 {
     // The eye sits above the feet. The client adds its own eye height to the
     // position it was sent, and this server sends the feet, so the height has

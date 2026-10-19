@@ -92,6 +92,51 @@ fn the_experience_is_progress_level_and_total() {
 }
 
 #[test]
+fn a_respawn_carries_the_spawn_information_and_what_to_keep() {
+    // The tail is the same as the login packet's, and the byte after it says
+    // what the client keeps: three is all of it.
+    let mut body = Vec::new();
+    write_respawn(
+        &mut body,
+        &SpawnInfo {
+            dimension: "minecraft:overworld",
+            seed: 7,
+            game_type: 0,
+            is_flat: true,
+            portal_cooldown: 0,
+            sea_level: -64,
+        },
+        true,
+    );
+
+    let mut r = &body[..];
+    let (VarInt(packet), _) = VarInt::read(&mut r).expect("a packet id");
+    assert_eq!(packet, id::RESPAWN);
+    // The dimension holder: a zero byte, then the key.
+    assert_eq!(r[0], 0, "the holder is sent by key");
+    let (VarInt(len), _) = VarInt::read(&mut &r[1..]).expect("the key length");
+    assert_eq!(&r[2..2 + len as usize], b"minecraft:overworld");
+    assert_eq!(
+        *r.last().expect("a last byte"),
+        3,
+        "and the client keeps everything"
+    );
+}
+
+#[test]
+fn a_hurt_flash_is_the_entity_and_the_direction() {
+    let mut body = Vec::new();
+    write_hurt_animation(&mut body, 42, 90.0);
+
+    let mut r = &body[..];
+    let (VarInt(packet), _) = VarInt::read(&mut r).expect("a packet id");
+    assert_eq!(packet, id::HURT_ANIMATION);
+    let (VarInt(entity), _) = VarInt::read(&mut r).expect("an entity id");
+    assert_eq!(entity, 42);
+    assert_eq!(f32::from_be_bytes(r[..4].try_into().unwrap()), 90.0);
+}
+
+#[test]
 fn an_angle_is_a_two_hundred_and_fifty_sixth_of_a_turn() {    assert_eq!(angle_byte(0.0), 0);
     assert_eq!(angle_byte(90.0), 64);
     assert_eq!(angle_byte(180.0), 128);

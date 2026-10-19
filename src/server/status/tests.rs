@@ -2,6 +2,18 @@ use crate::server::ticking::{state_id, to_state_id};
 use super::*;
 
 #[test]
+fn three_blocks_of_falling_are_free_and_the_rest_is_not() {
+    // The game's own numbers: the safe distance is three, and the damage is
+    // what is left of the fall after those three, floored.
+    assert_eq!(fall_damage(0.0), 0.0);
+    assert_eq!(fall_damage(3.0), 0.0, "three blocks are free");
+    assert_eq!(fall_damage(3.5), 0.0, "and half a block is nothing either");
+    assert_eq!(fall_damage(4.0), 1.0);
+    assert_eq!(fall_damage(5.9), 2.0, "the fraction does not count");
+    assert_eq!(fall_damage(20.0), 17.0);
+}
+
+#[test]
 fn a_flushed_buffer_does_not_send_its_contents_twice() {
     // `write_all` sends the bytes and leaves them where they were. A buffer
     // written twice therefore sends everything it held, twice, and the second

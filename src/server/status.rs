@@ -202,6 +202,12 @@ const MAX_HEALTH: f32 = 20.0;
 const MAX_FOOD: i32 = 20;
 const MAX_SATURATION: f32 = 5.0;
 
+/// How far a player can fall without being hurt.
+///
+/// The game's own figure: `Attributes.SAFE_FALL_DISTANCE` is three, and the
+/// damage is what is left of the fall after those three blocks are taken off.
+const SAFE_FALL_DISTANCE: f64 = 3.0;
+
 /// Answers one connection's handshake and status exchange.
 ///
 /// Deliberately does not implement login: the point here is to be visible in
@@ -1178,6 +1184,19 @@ fn play(
     // count up from there so no two asks are ever the same number.
     let mut teleport_seq: i32 = 1;
 
+    // The player's health, and whether they are past it.
+    //
+    // The client's own health is a guess until the server says otherwise, so
+    // the server keeps the number and sends it whenever it changes. A player
+    // whose health reaches zero is dead, and the client asks to come back.
+    let mut health: f32 = MAX_HEALTH;
+    let mut dead = false;
+    // How far the player has fallen since they were last on the ground.
+    let mut fall_distance: f64 = 0.0;
+    // Where the player comes back to. The world's own spawn, asked for again
+    // here because a respawn needs it and the world is the one that knows.
+    let spawn_at = session.world.spawn_point().unwrap_or((0, 64, 0));
+
     // How many chunks a batch may carry, and how fast the client would like
     // them.
     //
@@ -1303,6 +1322,7 @@ fn play(
                         // times ten to the seven; anything past that is not a
                         // place, and broadcasting it would overflow nothing
                         // here but everything on the client.
+                        let drop = player.y - y;
                         player.x = x.clamp(-MAX_COORD, MAX_COORD);
                         player.y = y.clamp(-MAX_COORD, MAX_COORD);
                         player.z = z.clamp(-MAX_COORD, MAX_COORD);
@@ -1313,6 +1333,30 @@ fn play(
                             player.pitch,
                         );
                         session.wire.send_movement(player_id, true);
+
+                        // Falling. The distance is added up while the player
+                        // is off the ground, and the landing is what hurts:
+                        // the game counts the drop and takes three blocks off
+                        // it, because three is the distance a player can fall
+                        // without being hurt.
+                        if moved.on_ground {
+                            if !dead {
+                                let damage = fall_damage(fall_distance);
+                                if damage > 0.0 {
+                                    hurt(
+                                        &mut health,
+                                        damage,
+                                        &mut out,
+                                        &enc,
+                                        &log,
+                                        entity_id,
+                                    )?;
+                                }
+                            }
+                            fall_distance = 0.0;
+                        } else if drop > 0.0 {
+                            fall_distance += drop;
+                        }
                     }
                 } else {
                     // Turned without moving: the pose still moved, so anybody
@@ -1331,6 +1375,70 @@ fn play(
             // people on a server and two people in separate worlds.
             if id == p::id::SERVERBOUND_PUNCH {
                 session.wire.send_swing(player_id, p::MAIN_HAND);
+            }
+
+            // The client asking to come back to life, or for its statistics.
+            //
+            // The action is an enum on the wire as a number: zero is to
+            // respawn. The game refuses a respawn from a player who is not
+            // dead, and so does this: a client that asks to come back while
+            // it is perfectly well is not a client to oblige.
+            if id == p::id::SERVERBOUND_CLIENT_COMMAND {
+                let body = p::serverbound_body(&frame, p::id::SERVERBOUND_CLIENT_COMMAND)
+                    .map_err(|e| io_err(FrameError::Decode(e)))?;
+                let mut r = body;
+                let (action, _) = VarInt::read(&mut r)
+                    .map_err(|e| io_err(FrameError::Decode(e)))?;
+                if action.0 == 0 && dead {
+                    dead = false;
+                    health = MAX_HEALTH;
+                    fall_distance = 0.0;
+
+                    // The world is put back together in front of the client:
+                    // the respawn packet, the place to stand, the spawn point
+                    // and the hearts. The order is the game's own, from
+                    // `PlayerList.respawn`.
+                    let mut body = Vec::new();
+                    p::write_respawn(
+                        &mut body,
+                        &p::SpawnInfo {
+                            dimension: "minecraft:overworld",
+                            seed: 0,
+                            game_type: 0,
+                            is_flat: true,
+                            portal_cooldown: 0,
+                            sea_level: -64,
+                        },
+                        true,
+                    );
+                    enc.encode(&body, &mut out).map_err(io_err)?;
+
+                    teleport_seq += 1;
+                    let mut body = Vec::new();
+                    p::write_player_position(&mut body, teleport_seq, &player);
+                    enc.encode(&body, &mut out).map_err(io_err)?;
+
+                    let mut body = Vec::new();
+                    p::write_set_default_spawn(
+                        &mut body,
+                        "minecraft:overworld",
+                        spawn_at.0,
+                        spawn_at.1,
+                        spawn_at.2,
+                    );
+                    enc.encode(&body, &mut out).map_err(io_err)?;
+
+                    let mut body = Vec::new();
+                    p::write_set_health(&mut body, health, MAX_FOOD, MAX_SATURATION);
+                    enc.encode(&body, &mut out).map_err(io_err)?;
+
+                    // The client threw the world away when it read the
+                    // respawn, so the chunks have to go again. The set of
+                    // what was sent is the server's memory of the client's
+                    // world, and it is now out of date.
+                    sent.clear();
+                    log.note("the player is back");
+                }
             }
 
             // The answer to a keep alive: one long.
@@ -2844,6 +2952,48 @@ fn clear_crack(
 /// this accepts. That matters more than the exact number: a break refused that
 /// the client thought was allowed is a block that does not break while the
 /// crack is drawn on it.
+/// The damage a fall does, the game's own way.
+///
+/// `LivingEntity.calculateFallPower` is the fall less the safe distance, and
+/// the damage is that number floored. Three blocks are free, which is what
+/// `Attributes.SAFE_FALL_DISTANCE` says.
+fn fall_damage(fall_distance: f64) -> f64 {
+    if fall_distance <= SAFE_FALL_DISTANCE {
+        return 0.0;
+    }
+    (fall_distance - SAFE_FALL_DISTANCE).floor()
+}
+
+/// Takes health off a player and tells them about it.
+///
+/// The health is the server's own number, and the client is told twice: once
+/// with the new number, which is the bar of hearts, and once with the flash,
+/// which is the red that goes across the screen. The game sends both, and the
+/// flash without the number is a picture of a hurt that did not happen.
+fn hurt(
+    health: &mut f32,
+    damage: f64,
+    out: &mut Vec<u8>,
+    enc: &FrameEncoder,
+    log: &ConnLog,
+    entity_id: i32,
+) -> std::io::Result<()> {
+    *health = (*health as f64 - damage).max(0.0) as f32;
+
+    let mut body = Vec::new();
+    crate::protocol::play::write_set_health(&mut body, *health, MAX_FOOD, MAX_SATURATION);
+    enc.encode(&body, out).map_err(io_err)?;
+
+    // The flash, and the way the hit came from: a fall comes from above, so
+    // straight ahead is the honest answer.
+    let mut body = Vec::new();
+    crate::protocol::play::write_hurt_animation(&mut body, entity_id, 0.0);
+    enc.encode(&body, out).map_err(io_err)?;
+
+    log.note(format!("hurt for {damage}, {health} health left"));
+    Ok(())
+}
+
 /// Squared distance between two points, for the too-fast move check.
 fn dist_squared(ax: f64, ay: f64, az: f64, bx: f64, by: f64, bz: f64) -> f64 {
     let dx = bx - ax;

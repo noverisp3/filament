@@ -92,6 +92,13 @@ pub mod id {
     // The same for experience: how far into the level, the level, and the
     // total.
     pub const SET_EXPERIENCE: i32 = 105;
+    // The player coming back to life. The client throws the world away and
+    // asks for it again when this arrives.
+    pub const RESPAWN: i32 = 84;
+    // The red flash when a player is hurt: which entity, and which way.
+    pub const HURT_ANIMATION: i32 = 43;
+    // The client asking to come back to life, and asking for its statistics.
+    pub const SERVERBOUND_CLIENT_COMMAND: i32 = 12;
     // And that this one is settled, not a guess.
     //
     // Clientbound only: there is no serverbound one, so the server opens this
@@ -254,12 +261,14 @@ pub fn write_login(out: &mut Vec<u8>, login: &Login<'_>) {
 
     write_spawn_info(
         out,
-        dimension,
-        seed,
-        game_type,
-        is_flat,
-        portal_cooldown,
-        sea_level,
+        &SpawnInfo {
+            dimension,
+            seed,
+            game_type,
+            is_flat,
+            portal_cooldown,
+            sea_level,
+        },
     );
 
     // onlineMode, enforcesSecureChat. Both false: there is no session on an
@@ -268,22 +277,37 @@ pub fn write_login(out: &mut Vec<u8>, login: &Login<'_>) {
     out.push(0);
 }
 
-/// The tail of `ClientboundLoginPacket`, which upstream calls
+/// The spawn information a client is given about the world it is joining.
+///
+/// The same shape in the login packet and in the respawn packet: the game
+/// calls it `CommonPlayerSpawnInfo` and it holds the dimension, the seed and
+/// the rules of the world rather than a position.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpawnInfo<'a> {
+    pub dimension: &'a str,
+    pub seed: i64,
+    pub game_type: u8,
+    pub is_flat: bool,
+    pub portal_cooldown: i32,
+    pub sea_level: i32,
+}
+
+/// Writes the tail of `ClientboundLoginPacket`, which upstream calls
 /// `CommonPlayerSpawnInfo`.
 ///
 /// Despite the name this holds no position. The dimension is a holder, written
 /// as a zero byte followed by the registry key; the zero is what marks the
 /// holder as being sent by key rather than by inline contents, and writing the
 /// key without it makes the client read the length as part of the payload.
-fn write_spawn_info(
-    out: &mut Vec<u8>,
-    dimension: &str,
-    seed: i64,
-    game_type: u8,
-    is_flat: bool,
-    portal_cooldown: i32,
-    sea_level: i32,
-) {
+fn write_spawn_info(out: &mut Vec<u8>, info: &SpawnInfo<'_>) {
+    let SpawnInfo {
+        dimension,
+        seed,
+        game_type,
+        is_flat,
+        portal_cooldown,
+        sea_level,
+    } = *info;
     out.push(0);
     VarInt(dimension.len() as i32).write(out);
     out.extend_from_slice(dimension.as_bytes());
@@ -654,6 +678,25 @@ pub fn write_set_experience(out: &mut Vec<u8>, progress: f32, level: i32, total:
     out.extend_from_slice(&progress.to_be_bytes());
     VarInt(level).write(out);
     VarInt(total).write(out);
+}
+
+pub fn write_hurt_animation(out: &mut Vec<u8>, entity_id: i32, yaw: f32) {
+    VarInt(id::HURT_ANIMATION).write(out);
+    VarInt(entity_id).write(out);
+    // Which way the hit came from, in degrees. Zero is straight ahead, which
+    // is what a fall from above looks like.
+    out.extend_from_slice(&yaw.to_be_bytes());
+}
+
+/// Writes the packet that puts a dead player back in the world.
+///
+/// The tail is the same spawn information the login packet carries, and the
+/// byte after it says what the client should keep: the game keeps the
+/// attributes and the entity data, which is all of it.
+pub fn write_respawn(out: &mut Vec<u8>, info: &SpawnInfo<'_>, keep_all_data: bool) {
+    VarInt(id::RESPAWN).write(out);
+    write_spawn_info(out, info);
+    out.push(if keep_all_data { 3 } else { 0 });
 }
 
 pub fn write_player_position(out: &mut Vec<u8>, teleport_id: i32, move_to: &Movement) {

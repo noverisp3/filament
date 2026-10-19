@@ -2,6 +2,26 @@ use crate::server::ticking::{state_id, to_state_id};
 use super::*;
 
 #[test]
+fn a_second_position_in_one_tick_is_too_soon() {
+    // The client sends one position a tick and no more. Two inside one tick is
+    // a client that is not playing by the rules.
+    assert!(
+        !move_came_too_soon(None),
+        "the first position is never too soon"
+    );
+    assert!(
+        move_came_too_soon(Some(std::time::Instant::now())),
+        "but a second one right after it is"
+    );
+    assert!(
+        !move_came_too_soon(Some(
+            std::time::Instant::now() - std::time::Duration::from_millis(80)
+        )),
+        "and one a few ticks later is not"
+    );
+}
+
+#[test]
 fn a_command_the_server_does_not_know_is_answered_not_ignored() {
     // The player's own words: "Unknown command or insufficient
     // permissions", from `commands.help.failed`. A command that is not

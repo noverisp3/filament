@@ -110,10 +110,24 @@ fn main() {
     // running at all once the sources changed.
     //
     // Saying "the banner depends on src, Cargo.toml and build.rs" is dull and
-    // correct, which is the whole requirement.
+    // correct, which is the whole requirement -- with one omission that was not
+    // dull, it was wrong.
+    //
+    // Git was missing. A commit changes no source file, so cargo had no reason
+    // to run this script, and the banner kept printing the commit from before
+    // the commit: it said `40cf2cb+dirty` over a binary that had `6ac72d1` in
+    // it. A build stamp that names the wrong build is worse than none, because
+    // it is believed. The evidence that settled it was the build *time* staying
+    // put too -- the same instant, across two commits.
+    //
+    // Tracking `.git/HEAD` is enough for the commit. It cannot see the tree
+    // becoming dirty, because a dirty tree is the absence of a change and cargo
+    // only re-runs on changes; `+dirty` can therefore lag by one build, which
+    // is the smaller half of the lie.
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
 
     let (sha, dirty) = commit();

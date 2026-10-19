@@ -145,6 +145,39 @@ pub fn from_vanilla_words(bits: u8, src: &[i64], len: usize) -> Vec<u64> {
     out
 }
 
+/// The index array for one section, at the width the chunk format uses.
+///
+/// Not the same as the width the array happens to be using. A section with
+/// four distinct blocks is stored in memory in two bits, and the format has no
+/// two-bit strategy: it starts at four. Writing the in-memory layout straight
+/// out produces a file that reads back as a different chunk, and this build's
+/// own reader is the first thing to notice.
+fn encode_section(blocks: &super::palette::Paletted<BlockId>) -> (u8, Vec<i64>) {
+    let len = blocks.len();
+    let (internal, words) = blocks.bits_and_words();
+    if internal == 0 {
+        // Uniform: the palette holds one entry and there is no array at all.
+        return (0, Vec::new());
+    }
+
+    let bits = block_bits_for_palette_len(blocks.palette_len());
+    if bits == internal {
+        return (bits, to_vanilla_words(bits, &words, len));
+    }
+
+    let native = to_vanilla_words(internal, &words, len);
+    let source = super::bitpack::BitArray::from_words(
+        from_vanilla_words(internal, &native, len),
+        internal,
+        len,
+    );
+    let mut widened = super::bitpack::BitArray::new(len, bits);
+    for index in 0..len {
+        widened.set(index, source.get(index));
+    }
+    (bits, to_vanilla_words(bits, widened.words(), len))
+}
+
 /// One block as the palette entry the game stores.
 ///
 /// Written as a bare string, which is what a real chunk holds for every block
@@ -260,7 +293,7 @@ pub fn write(chunk: &Chunk, registry: &BlockRegistry, last_update: u64, inhabite
     let mut sections = Vec::with_capacity(SECTIONS_PER_CHUNK);
     for (slot, section) in chunk.sections().iter().enumerate() {
         let blocks = section.blocks();
-        let (bits, words) = blocks.bits_and_words();
+        let (bits, words) = encode_section(blocks);
         let palette = blocks
             .palette()
             .iter()
@@ -271,7 +304,7 @@ pub fn write(chunk: &Chunk, registry: &BlockRegistry, last_update: u64, inhabite
         // `set` rather than chained on.
         let mut block_states = Compound::new().put("palette", Tag::list(palette));
         if bits != 0 {
-            block_states.set("data", Tag::LongArray(to_vanilla_words(bits, &words, SECTION_VOLUME)));
+            block_states.set("data", Tag::LongArray(words));
         }
 
         let biomes = Compound::new().put("palette", Tag::list(vec![Tag::String(BIOME.to_string())]));
@@ -326,14 +359,50 @@ pub fn write(chunk: &Chunk, registry: &BlockRegistry, last_update: u64, inhabite
         )
 }
 
+/// Reads a chunk, registering blocks that turn up rather than refusing them.
+///
+/// A world the game saved has hundreds of block types in it. Filament starts
+/// with five. Refusing the chunk would mean every one of them is unloadable,
+/// and the alternative -- mapping them all to air -- turns a mountain into a
+/// hole and then writes that hole back to disk next time.
+///
+/// `appearance` says how to draw a block that turns up -- opaque, and a
+/// colour -- so that a world written by something else can be loaded instead
+/// of refused. It is presentation only: what goes back on disk is the name,
+/// not the colour.
+pub fn read_lenient(
+    tag: &Compound,
+    registry: &mut BlockRegistry,
+    appearance: &dyn Fn(&str) -> (bool, [f32; 3]),
+) -> Option<Chunk> {
+    read_with(tag, &mut |name| match registry.id(name) {
+        Some(id) => Some(id),
+        None => {
+            let (opaque, color) = appearance(name);
+            Some(registry.register(name, opaque, color))
+        }
+    })
+}
+
 /// Reads a chunk back out of a stored compound.
 ///
 /// `None` when the compound is not a chunk at all, or names a block this build
 /// has never heard of. Half a chunk is worse than none: it would look loaded
-/// and be wrong in a place nobody thought to look.
+/// and be wrong in a place nobody thought to look. [`read_lenient`] is the one
+/// to use for a world written by something else.
 pub fn read(tag: &Compound, registry: &BlockRegistry) -> Option<Chunk> {
+    read_with(tag, &mut |name| registry.id(name))
+}
+
+fn read_with(
+    tag: &Compound,
+    resolve: &mut dyn FnMut(&str) -> Option<BlockId>,
+) -> Option<Chunk> {
     let pos = ChunkPos::new(tag.int("xPos")?, tag.int("zPos")?);
-    let air = registry.id("air")?;
+    // Air is the fill for a section that is not in the file. It has to come
+    // from the resolver like any other block rather than being looked up by
+    // name here, so a registry that spells it differently still works.
+    let air = resolve(registry_name("minecraft:air")?)?;
     let mut chunk = Chunk::uniform(pos, air);
 
     for entry in tag.list("sections")? {
@@ -348,14 +417,16 @@ pub fn read(tag: &Compound, registry: &BlockRegistry) -> Option<Chunk> {
         }
 
         let states = section_tag.compound("block_states")?;
-        let palette = states
-            .list("palette")?
-            .iter()
-            .map(|entry| {
-                let name = palette_name(entry)?;
-                registry.id(registry_name(name)?)
-            })
-            .collect::<Option<Vec<BlockId>>>()?;
+        let mut palette = Vec::new();
+        for entry in states.list("palette")? {
+            // Owned before it is looked up: `resolve` may need the registry,
+            // and holding a borrow into the tag across that call would stop it.
+            let name = palette_name(entry)?.to_string();
+            // `minecraft:stone` is `stone` here, and `minecraft:grass_block` is
+            // the one name that is not just its prefix.
+            let short = registry_name(&name)?.to_string();
+            palette.push(resolve(&short)?);
+        }
         if palette.is_empty() {
             return None;
         }

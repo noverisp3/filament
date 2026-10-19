@@ -1,4 +1,4 @@
-//! The world: chunks, the block registry, and the queries that read them.
+﻿//! The world: chunks, the block registry, and the queries that read them.
 //!
 //! This sits between storage and rendering. The renderer never owns world
 //! data; it borrows a `&World` when it needs geometry, which keeps the rule
@@ -84,6 +84,9 @@ pub struct World {
     /// Separate from `edits`, which is the whole history and is never drained:
     /// this is only what has happened since someone last asked.
     tick_changes: Vec<(BlockPos, BlockId)>,
+
+    /// Where the world came from and will go back to. None means memory only.
+    store: Option<super::storage::WorldStore>,
 }
 
 impl BlockEdit {
@@ -121,6 +124,9 @@ impl Clone for World {
             day_time: self.day_time,
             ticks: self.ticks.clone(),
             tick_changes: Vec::new(),
+            // A clone has no folder of its own; sharing one would mean two
+            // worlds writing the same region files.
+            store: None,
         }
     }
 }
@@ -133,6 +139,14 @@ impl World {
     /// shape from where the player walks, so it needs a world that starts with
     /// nothing and grows.
     pub fn empty() -> Self {
+        Self::with_store(None)
+    }
+
+    /// A world backed by a folder on disk.
+    ///
+    /// `None` is a world that lives only as long as the process does, which is
+    /// what every test wants and what a server without a folder gets.
+    pub fn with_store(store: Option<super::storage::WorldStore>) -> Self {
         let mut registry = BlockRegistry::new();
         let terrain = register_terrain(&mut registry);
         Self {
@@ -144,12 +158,57 @@ impl World {
             day_time: 0,
             ticks: crate::world::ticks::BlockTicks::new(),
             tick_changes: Vec::new(),
+            store,
         }
+    }
+
+    /// Writes every chunk that has been loaded back to its region file.
+    ///
+    /// The whole world rather than what changed, because the alternative is a
+    /// dirty set and a second thing to get wrong: a chunk edited and then
+    /// unloaded before the flush would silently not be saved, and the only
+    /// sign would be a hole that filled itself in.
+    pub fn flush(&mut self) -> std::io::Result<usize> {
+        let game_time = self.game_time;
+        let Some(store) = self.store.as_mut() else {
+            return Ok(0);
+        };
+        let positions: Vec<ChunkPos> = self.chunks.keys().copied().collect();
+        let mut written = 0;
+        for pos in positions {
+            let chunk = self.chunks.get(&pos).expect("position came from this map");
+            match store.save(pos, chunk, &self.registry, game_time) {
+                Ok(()) => written += 1,
+                Err(e) => eprintln!("cannot save chunk {},{}: {e}", pos.x, pos.z),
+            }
+        }
+        Ok(written)
+    }
+
+    /// Writes `level.dat`, if there is a world folder to write it into.
+    pub fn write_level(&self) -> std::io::Result<()> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(());
+        };
+        store.write_level(&super::storage::default_level(store.name(), self.game_time))
     }
 
     /// Ticks since the world began.
     pub fn game_time(&self) -> u64 {
         self.game_time
+    }
+
+    /// How many block types are registered, which grows as a world is loaded.
+    ///
+    /// Five at the start. A world written by the game has hundreds, and this
+    /// is how a caller can see that it read one rather than generated it.
+    pub fn registry_len(&self) -> usize {
+        self.registry.len()
+    }
+
+    /// The registry name of a block, for printing.
+    pub fn block_name(&self, id: BlockId) -> &str {
+        self.registry.name(id)
     }
 
     /// Where the sun is, in ticks, wrapping at a full day.
@@ -286,6 +345,18 @@ impl World {
         if self.chunks.contains_key(&pos) {
             return true;
         }
+        // Disk first. The generator is deterministic, so it is always able to
+        // answer -- which is exactly why it has to be the second choice and not
+        // the first: asked first, it answers every chunk in the world and the
+        // files on disk are never opened at all.
+        if let Some(chunk) = self
+            .store
+            .as_mut()
+            .and_then(|store| store.load(pos, &mut self.registry))
+        {
+            self.store_chunk(pos, chunk);
+            return true;
+        }
         let chunk = generate_chunk(pos, &self.terrain);
         self.store_chunk(pos, chunk);
         false
@@ -364,6 +435,7 @@ impl World {
             registry,
             terrain,
             chunks,
+            store: None,
             edits: HashMap::new(),
             game_time: 0,
             day_time: 0,
@@ -446,7 +518,7 @@ impl World {
         }
     }
 
-    /// The 3×3×3 block of sections around `section_pos`, with their light.
+    /// The 3Ã—3Ã—3 block of sections around `section_pos`, with their light.
     ///
     /// Six face neighbours are not enough: shading a face corner reads the
     /// diagonal block, so a face on a section boundary reaches into edge and

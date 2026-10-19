@@ -417,12 +417,27 @@ fn put_payload(out: &mut Vec<u8>, t: &Tag) {
 /// then an empty name, then the payload. There is no leading zero -- an empty
 /// root compound is four bytes, `0A 00 00 00`, and the last of them is the
 /// payload's own terminator.
-pub fn write(root: &Compound) -> Vec<u8> {
+/// Writes a root tag under a name.
+///
+/// `level.dat` is a compound named `Data`; a chunk inside a region file is an
+/// unnamed one. The name is the only difference, and a reader looking for an
+/// unnamed root finds nothing at all in a level file -- it does not complain,
+/// it just has no keys.
+pub fn write_named(root: &Compound, name: &str) -> Vec<u8> {
     let mut out = Vec::new();
     out.push(tag::COMPOUND);
-    put_string(&mut out, "");
+    put_string(&mut out, name);
     put_payload(&mut out, &Tag::Compound(root.clone()));
+    // The game writes a lone End tag after the root and stops. Nothing reads
+    // it, but a file without it is one byte short of what everything else
+    // expects, and that is the kind of difference that only shows up when
+    // something else opens the file.
+    out.push(tag::END);
     out
+}
+
+pub fn write(root: &Compound) -> Vec<u8> {
+    write_named(root, "")
 }
 
 #[cfg(test)]
@@ -435,11 +450,11 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_file_is_four_bytes_and_no_more() {
-        // `0A` compound, `00 00` the empty name, `00` the compound's own end.
-        // Getting this wrong is the difference between a file the game reads and
-        // one it silently treats as empty, so the length is pinned exactly.
-        assert_eq!(write(&Compound::new()), vec![0x0A, 0x00, 0x00, 0x00]);
+    fn an_empty_file_is_five_bytes_and_no_more() {
+        // `0A` compound, `00 00` the empty name, `00` the compound's own end,
+        // `00` the end of the stream. The last one is what the game writes
+        // after every file and what a real `level.dat` ends with.
+        assert_eq!(write(&Compound::new()), vec![0x0A, 0x00, 0x00, 0x00, 0x00]);
         assert_eq!(round_trip(Compound::new()), Compound::new());
     }
 

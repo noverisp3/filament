@@ -39,6 +39,7 @@ use std::time::{Duration, Instant};
 use crate::world::block::BlockId;
 use crate::world::pos::{BlockPos, ChunkPos};
 use crate::world::section;
+use crate::world::storage::WorldStore;
 use crate::world::terrain::TerrainBlocks;
 use crate::world::world::World;
 
@@ -303,7 +304,14 @@ fn worker_count(cores: usize) -> usize {
 /// without reaching into the runtime.
 pub fn spawn() -> WorldHandle {
     let (to_world, from_connections) = channel();
-    let world = World::empty();
+    let world = World::with_store(
+        std::env::var("FILAMENT_WORLD")
+            .ok()
+            .map(WorldStore::open)
+            .transpose()
+            .ok()
+            .flatten(),
+    );
     let terrain = *world.terrain_blocks();
 
     let (work_tx, work_rx) = channel();
@@ -519,6 +527,18 @@ pub fn run(
         if due == MAX_CATCH_UP && next_tick < now {
             next_tick = now + TICK;
         }
+    }
+
+    // Last thing this thread does. The handles are gone, which means the
+    // server has stopped accepting and every connection has closed, so nothing
+    // can be editing the world while it is written out.
+    match world.flush() {
+        Ok(0) => {}
+        Ok(chunks) => crate::log::note(format!("saved {chunks} chunks")),
+        Err(e) => eprintln!("could not save the world: {e}"),
+    }
+    if let Err(e) = world.write_level() {
+        eprintln!("could not save level.dat: {e}");
     }
 
     ticks

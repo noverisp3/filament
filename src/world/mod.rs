@@ -49,3 +49,4 @@ pub mod terrain;
 // alternative name is worse. See re-exports below.
 #[allow(clippy::module_inception)]
 pub mod world;
+pub mod storage;

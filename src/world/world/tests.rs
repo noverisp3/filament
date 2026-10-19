@@ -232,3 +232,61 @@ fn unloaded_space_is_not_solid() {
     assert!(!world.is_solid(BlockPos::new(100_000, 0, 0)));
     assert_eq!(world.block(BlockPos::new(100_000, 0, 0)), None);
 }
+///
+/// The whole reason `WorldStore` exists: a block dug out, the world saved and
+/// reopened, and the hole still there. The generator would fill solid ground
+/// back in if the chunk came from it rather than from disk, and that mistake is
+/// precisely what this test has to catch.
+#[test]
+fn an_edit_survives_a_save_and_a_reopen() {
+    let dir = std::env::temp_dir().join(format!(
+        "filament-persist-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+    ));
+    std::fs::create_dir_all(&dir).expect("a scratch world folder");
+
+    let mut world =
+        World::with_store(Some(crate::world::storage::WorldStore::open(&dir).unwrap()));
+    let air = world.registry().id("air").expect("registered");
+
+    // Solid ground somewhere in the first chunk, so the test does not care
+    // where the generator put its surface. The chunk is loaded first, since
+    // reading does not bring one in by itself.
+    world.ensure_chunk(ChunkPos::new(0, 0));
+    let target = (-40..320)
+        .find_map(|y| {
+            let pos = BlockPos::new(7, y, 7);
+            match world.block(pos) {
+                Some(id) if id != air => Some(pos),
+                _ => None,
+            }
+        })
+        .expect("terrain keeps a solid cell below y=64");
+    assert!(world.set_block_quiet(target, air), "the dig itself must land");
+    world.flush().expect("the folder is writable");
+    let stop = dir
+        .join("dimensions")
+        .join("minecraft")
+        .join("overworld")
+        .join("region");
+    let wrote = std::fs::read_dir(&stop).map(|rd| rd.count()).unwrap_or(0);
+    assert!(wrote > 0, "flush must leave region files on disk");
+    drop(world);
+
+    let mut world = World::with_store(Some(crate::world::storage::WorldStore::open(&dir).unwrap()));
+    world.ensure_chunk(ChunkPos::new(0, 0));
+    let after = world
+        .block(target)
+        .expect("the chunk came from somewhere, and here it is");
+    assert_eq!(
+        world.block_name(after),
+        "air",
+        "the dug cell at {target:?} must stay a hole across the reopen"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}

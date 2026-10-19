@@ -148,6 +148,15 @@ impl ChunkKey {
         format!("r.{}.{}.mca", self.region_x, self.region_z)
     }
 
+    /// The chunk's position inside its own region, which is what the header
+    /// is indexed by: 0..32, never negative.
+    pub fn local_of(x: i32, z: i32) -> (i32, i32) {
+        (
+            x.rem_euclid(CHUNKS_ACROSS),
+            z.rem_euclid(CHUNKS_ACROSS),
+        )
+    }
+
     /// Where this region lives inside a world folder.
     pub fn path_in(self, root: &Path) -> PathBuf {
         root.join("region").join(self.name())

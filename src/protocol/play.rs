@@ -48,6 +48,17 @@ pub mod id {
     pub const SERVERBOUND_CLIENT_TICK_END: i32 = 13;
     pub const SERVERBOUND_PLAYER_LOADED: i32 = 44;
 
+    // The client answers a teleport with the position it ended up at: an id,
+    // three doubles and two floats. Ignoring it leaves the server believing
+    // the player is still where the teleport said, which is not the same place
+    // once the client has fallen.
+    pub const SERVERBOUND_ACCEPT_TELEPORTATION: i32 = 0;
+    // The client pings the server every tick, to time the round trip for the
+    // debug screen. The answer is the same eight bytes, sent back.
+    pub const SERVERBOUND_PING_REQUEST: i32 = 38;
+    // And the answer to it.
+    pub const PONG_RESPONSE: i32 = 63;
+
     // The four movement packets share one class upstream, which is why their
     // bodies are near identical: three doubles and two floats, and each subclass
     // dropping the fields it does not carry. The ids are consecutive because the
@@ -593,6 +604,14 @@ pub fn write_block_update(out: &mut Vec<u8>, x: i32, y: i32, z: i32, state: i32)
     // position.
     out.extend_from_slice(&pack_block_pos(x, y, z).to_be_bytes());
     VarInt(state).write(out);
+}
+
+pub fn write_pong_response(out: &mut Vec<u8>, time: i64) {
+    VarInt(id::PONG_RESPONSE).write(out);
+    // The same eight bytes the client sent, unchanged: the payload is a fixed
+    // long on both sides, and the client works the round trip out of the
+    // difference between the two.
+    out.extend_from_slice(&time.to_be_bytes());
 }
 
 pub fn write_player_position(out: &mut Vec<u8>, teleport_id: i32, move_to: &Movement) {

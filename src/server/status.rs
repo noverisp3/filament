@@ -1320,6 +1320,58 @@ fn play(
                 }
             }
 
+            // The client's own ping, which it sends every tick to time the
+            // round trip for the debug screen. The answer is the same eight
+            // bytes back, unchanged; a server that stays quiet leaves the
+            // latency reading blank.
+            if id == p::id::SERVERBOUND_PING_REQUEST {
+                let body = p::serverbound_body(&frame, p::id::SERVERBOUND_PING_REQUEST)
+                    .map_err(|e| io_err(FrameError::Decode(e)))?;
+                if body.len() >= 8 {
+                    let time = i64::from_be_bytes(body[..8].try_into().expect("eight"));
+                    let mut pong = Vec::new();
+                    p::write_pong_response(&mut pong, time);
+                    enc.encode(&pong, &mut out).map_err(io_err)?;
+                }
+            }
+
+            // The client answering a teleport with the position it ended up
+            // at. The server believes the player is where it put them until
+            // this arrives, and the player is somewhere else the moment they
+            // fall.
+            if id == p::id::SERVERBOUND_ACCEPT_TELEPORTATION {
+                let body = p::serverbound_body(&frame, p::id::SERVERBOUND_ACCEPT_TELEPORTATION)
+                    .map_err(|e| io_err(FrameError::Decode(e)))?;
+                // A VarInt id, then three doubles and two floats. The id is
+                // read rather than skipped, because a VarInt is however many
+                // bytes it needs and the position follows it.
+                let mut rest = body;
+                let (_teleport_id, used) = VarInt::read(&mut rest)
+                    .map_err(|e| io_err(FrameError::Decode(e)))?;
+                if rest.len() >= 24 + 8 {
+                    let x = f64::from_be_bytes(rest[0..8].try_into().expect("eight"));
+                    let y = f64::from_be_bytes(rest[8..16].try_into().expect("eight"));
+                    let z = f64::from_be_bytes(rest[16..24].try_into().expect("eight"));
+                    let yaw = f32::from_be_bytes(rest[24..28].try_into().expect("four"));
+                    let pitch = f32::from_be_bytes(rest[28..32].try_into().expect("four"));
+                    let _ = used;
+                    if x.is_finite() && y.is_finite() && z.is_finite() {
+                        player.x = x.clamp(-MAX_COORD, MAX_COORD);
+                        player.y = y.clamp(-MAX_COORD, MAX_COORD);
+                        player.z = z.clamp(-MAX_COORD, MAX_COORD);
+                        player.yaw = yaw;
+                        player.pitch = pitch;
+                        session.wire.update_pose(
+                            player_id,
+                            (player.x, player.y, player.z),
+                            player.yaw,
+                            player.pitch,
+                        );
+                        session.wire.send_movement(player_id, true);
+                    }
+                }
+            }
+
             // Putting a block down.
             //
             // The order here is the game's, and the order is most of the

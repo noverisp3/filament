@@ -17,8 +17,26 @@ fn take_varint(b: &mut &[u8]) -> i32 {
 }
 
 #[test]
-fn an_angle_is_a_two_hundred_and_fifty_sixth_of_a_turn() {
-    assert_eq!(angle_byte(0.0), 0);
+fn the_pong_carries_the_ping_back_unchanged() {
+    // The client pings every tick and works the round trip out of the
+    // difference between the two. The payload is a fixed long on both sides,
+    // so a VarLong here would be one byte and the client would read the
+    // rest of the packet as part of it.
+    let mut body = Vec::new();
+    write_pong_response(&mut body, 0x0102_0304_0506_0708);
+
+    let mut rest = &body[..];
+    let id = take_varint(&mut rest);
+    assert_eq!(id, id::PONG_RESPONSE);
+    assert_eq!(rest.len(), 8, "eight bytes of long and nothing else");
+    assert_eq!(
+        i64::from_be_bytes(rest.try_into().unwrap()),
+        0x0102_0304_0506_0708
+    );
+}
+
+#[test]
+fn an_angle_is_a_two_hundred_and_fifty_sixth_of_a_turn() {    assert_eq!(angle_byte(0.0), 0);
     assert_eq!(angle_byte(90.0), 64);
     assert_eq!(angle_byte(180.0), 128);
     assert_eq!(angle_byte(-90.0), 192);

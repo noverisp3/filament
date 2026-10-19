@@ -15,7 +15,7 @@ use crate::protocol::handshake::{ClientIntent, ClientIntention, ServerStatus, st
 use crate::protocol::item::{self, slots, Inventory, ItemStack};
 use crate::protocol::container as c;
 use crate::world::pos::Direction;
-use crate::protocol::{VarInt, VarLong};
+use crate::protocol::VarInt;
 
 use super::log::{next_connection_id, packet_name, ConnLog};
 use super::log;
@@ -2779,14 +2779,22 @@ fn serve_status(
                     log.out_packet("status_response", "status", out.len());
                 }
                 // Ping: echo it back so the client can measure latency.
+                //
+                // The payload is a fixed eight-byte long in both directions
+                // (`ServerboundPingRequestPacket` reads a long, the pong writes
+                // one), not a VarLong: reading it as one leaves seven bytes
+                // behind in the frame, the pong answers with the wrong number,
+                // and the client sits on "Pinging..." forever because the
+                // round trip never matches.
                 1 => {
-                    let payload = r.to_vec();
-                    let value = VarLong::read(&mut &payload[..])
-                        .map(|(v, _)| v)
-                        .unwrap_or(VarLong(0));
+                    let mut time = [0u8; 8];
+                    if r.len() < 8 {
+                        continue;
+                    }
+                    time.copy_from_slice(&r[..8]);
                     let mut body = Vec::new();
                     VarInt(1).write(&mut body);
-                    value.write(&mut body);
+                    body.extend_from_slice(&time);
 
                     let mut wire = Vec::new();
                     enc.encode(&body, &mut wire).map_err(io_err)?;

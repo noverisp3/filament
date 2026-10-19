@@ -59,6 +59,11 @@ pub mod id {
     // And the answer to it.
     pub const PONG_RESPONSE: i32 = 63;
 
+    // Chat. The client sends what was typed and the server sends what
+    // everyone sees.
+    pub const SERVERBOUND_CHAT: i32 = 9;
+    pub const SYSTEM_CHAT: i32 = 124;
+
     // The four movement packets share one class upstream, which is why their
     // bodies are near identical: three doubles and two floats, and each subclass
     // dropping the fields it does not carry. The ids are consecutive because the
@@ -612,6 +617,18 @@ pub fn write_pong_response(out: &mut Vec<u8>, time: i64) {
     // long on both sides, and the client works the round trip out of the
     // difference between the two.
     out.extend_from_slice(&time.to_be_bytes());
+}
+
+/// Writes a line of chat.
+///
+/// The content is a component, and a component in a packet is one NBT tag:
+/// a plain text one is a string tag, which is what a whole line of chat is.
+/// The byte after it says whether the line is an overlay above the world
+/// rather than in the chat box, and it is not one.
+pub fn write_system_chat(out: &mut Vec<u8>, text: &str) {
+    VarInt(id::SYSTEM_CHAT).write(out);
+    crate::world::nbt::write_string_tag(out, text);
+    out.push(0);
 }
 
 pub fn write_player_position(out: &mut Vec<u8>, teleport_id: i32, move_to: &Movement) {

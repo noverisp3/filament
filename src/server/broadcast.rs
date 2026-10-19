@@ -585,6 +585,19 @@ impl Broadcast {
         }
     }
 
+    /// Sends one packet body to every player, the sender included.
+    ///
+    /// Chat is the case that needs this: the person who typed a line sees it
+    /// too, and everyone else sees it at the same time.
+    pub fn send_all(&self, body: Vec<u8>) {
+        let sinks = self.sinks.lock().unwrap_or_else(|e| e.into_inner());
+        for sink in sinks.iter() {
+            // A send that fails means the player has gone; one failure is not
+            // a reason to stop telling everybody else.
+            let _ = sink.out.send(body.clone());
+        }
+    }
+
     /// How many players are listening.
     pub fn player_count(&self) -> usize {        self.sinks
             .lock()

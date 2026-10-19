@@ -440,6 +440,18 @@ pub fn write(root: &Compound) -> Vec<u8> {
     write_named(root, "")
 }
 
+/// Writes a string as one tag on its own, the way a packet carries it.
+///
+/// A component in a packet is a whole NBT tag with no name in front of it,
+/// and a plain text one is a string tag: the id, the byte count, the bytes.
+/// The file form cannot be used here, because that writes a root with a name
+/// and an end tag after it, and the reader in a packet expects one tag and
+/// stops.
+pub fn write_string_tag(out: &mut Vec<u8>, text: &str) {
+    out.push(tag::STRING);
+    put_string(out, text);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

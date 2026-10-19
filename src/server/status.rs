@@ -1380,6 +1380,39 @@ fn play(
                 }
             }
 
+            // Something was typed. The message is the first field of the
+            // packet and the rest of it is the signature and the last-seen
+            // list, which this server has no use for: what it cannot check,
+            // it does not claim to have checked.
+            //
+            // The line is sent back as a system message rather than as a
+            // player chat, because a player chat carries the signature and
+            // the session the client never got. The client shows both the
+            // same way, in the chat box.
+            if id == p::id::SERVERBOUND_CHAT {
+                let body = p::serverbound_body(&frame, p::id::SERVERBOUND_CHAT)
+                    .map_err(|e| io_err(FrameError::Decode(e)))?;
+                let mut r = body;
+                let (VarInt(len), _) = VarInt::read(&mut r)
+                    .map_err(|e| io_err(FrameError::Decode(e)))?;
+                // The game allows two hundred and fifty-six characters.
+                if len >= 0 && len as usize <= r.len() && len <= 256 {
+                    match std::str::from_utf8(&r[..len as usize]) {
+                        Ok(text) if !text.is_empty() => {
+                            let line = format!("<{player_name}> {text}");
+                            let mut chat = Vec::new();
+                            p::write_system_chat(&mut chat, &line);
+                            let mut wire = Vec::new();
+                            enc.encode(&chat, &mut wire).map_err(io_err)?;
+                            session.wire.send_all(wire);
+                            log.note(format!("{player_name} said {text}"));
+                        }
+                        Ok(_) => {}
+                        Err(_) => log.note("ignored a chat line that was not text"),
+                    }
+                }
+            }
+
             // Putting a block down.
             //
             // The order here is the game's, and the order is most of the

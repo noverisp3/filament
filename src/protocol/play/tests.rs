@@ -36,6 +36,26 @@ fn the_pong_carries_the_ping_back_unchanged() {
 }
 
 #[test]
+fn a_line_of_chat_is_a_tag_and_a_byte() {
+    // The content of a chat line is a component, and a component in a packet
+    // is one NBT tag with no name in front of it. A plain text one is a
+    // string tag: the id, the byte count, the bytes. The last byte says the
+    // line is not an overlay.
+    let mut body = Vec::new();
+    write_system_chat(&mut body, "hi");
+
+    let mut r = &body[..];
+    let (VarInt(packet), _) = VarInt::read(&mut r).expect("a packet id");
+    assert_eq!(packet, id::SYSTEM_CHAT);
+
+    assert_eq!(r[0], 0x08, "a string tag");
+    let len = u16::from_be_bytes([r[1], r[2]]) as usize;
+    assert_eq!(&r[3..3 + len], b"hi");
+    assert_eq!(r[3 + len], 0, "not an overlay");
+    assert_eq!(r.len(), 4 + len, "and nothing else");
+}
+
+#[test]
 fn an_angle_is_a_two_hundred_and_fifty_sixth_of_a_turn() {    assert_eq!(angle_byte(0.0), 0);
     assert_eq!(angle_byte(90.0), 64);
     assert_eq!(angle_byte(180.0), 128);

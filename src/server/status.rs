@@ -128,6 +128,12 @@ impl StatusServer {
             }
         }
 
+        // Waiting here, behind the connections being cut, is what makes the
+        // save real rather than raced: shutdown is a command whose body is the
+        // write, answered only once the files are closed.
+        let ticks = self.world.shutdown();
+        log::note(format!("the world saved, {} ticks run", ticks));
+
         // The connections are not waited for. A connection thread runs until its
         // client goes away, and there is no way yet to tell one to finish, so
         // joining here would hang for as long as anybody stayed connected, which
@@ -909,7 +915,11 @@ fn play(
     // been edited. The copy generated before the edit turns up afterwards and
     // undoes it, so the block is whole on the server and gone in the client's
     // hands.
-    log.note("chunks sent; terrain generated, and it is not persisted");
+    log.note(if std::env::var_os("FILAMENT_WORLD").is_some() {
+        "chunks sent, and edits land in the world folder"
+    } else {
+        "chunks sent; terrain generated, and it is not persisted"
+    });
 
     // 12. The other players, and telling them about this one.
     //
@@ -1052,6 +1062,7 @@ fn play(
     stream.set_read_timeout(Some(LOOP_INTERVAL))?;
     let mut keep_alive = KeepAlive::new();
     let mut last_keep_alive = std::time::Instant::now();
+    let mut last_clock = std::time::Instant::now();
     let mut latency_logged = false;
 
     // The block this player is currently breaking, if any.
@@ -2078,6 +2089,26 @@ fn place_block(
             stream.flush()?;
         }
 
+        // The clock, once a second. Sent on arrival and then left to the
+        // client is the one leak that shows up as something a player can see:
+        // their sun creeping off the server's real time of day, and a rejoin
+        // snapping it back. Corrected here rather than trusted.
+        if last_clock.elapsed() >= CLOCK_EVERY
+            && let Some((game_time, day_time)) = session.world.clock()
+        {
+            let mut body = Vec::new();
+            p::write_set_time(&mut body, game_time as i64, day_time as i64);
+            let mut wire = Vec::new();
+            enc.encode(&body, &mut wire).map_err(io_err)?;
+            stream.write_all(&wire)?;
+            stream.flush()?;
+            last_clock = std::time::Instant::now();
+
+            if super::log::verbose() {
+                log.out_packet("set_time", "play", body.len());
+            }
+        }
+
         match keep_alive.tick(last_keep_alive.elapsed(), KEEP_ALIVE_EVERY) {
             KeepAliveTick::Silent => {}
             KeepAliveTick::Send(id) => {
@@ -2230,6 +2261,13 @@ fn chunk_report(wanted: usize, sent_now: usize, dropped: usize) -> Option<String
 /// Fifteen seconds against a thirty second client timeout, so one can be lost
 /// without the connection going.
 const KEEP_ALIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// How often the clock is sent again. Once on arrival, the client guesses a
+/// tick every fiftieth of a second from there on, and any difference between
+/// its guess and the real clock grows for as long as the session lasts: what
+/// a rejoin shows as a different time of day. Vanilla does not trust the
+/// guess either and refreshes twenty ticks apart, which this matches.
+const CLOCK_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// What the keep alive exchange wants done.
 ///

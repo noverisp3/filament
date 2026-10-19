@@ -66,6 +66,15 @@ const MAX_CATCH_UP: u32 = 5;
 pub enum Command {
     /// One chunk, as the body of a `level_chunk_with_light` packet.
     Chunk { pos: ChunkPos, reply: Sender<Vec<u8>> },
+    /// Writes every loaded chunk and `level.dat` out to the world folder.
+    ///
+    /// Sent while the server is still alive, so the save is waited on rather
+    /// than raced: a process that exits halfway through writing is the one
+    /// case where "the disk decides" is not good enough.
+    Flush { reply: Sender<usize> },
+    /// The same save, and then the thread stops. Distinguished from `Flush`
+    /// because "saved" and "no more ticks after this" are one decision here.
+    Shutdown { reply: Sender<usize> },
     /// One chunk, but only if it is already here.
     ///
     /// Distinct from `Chunk` because the difference is the whole point: `Chunk`
@@ -125,7 +134,9 @@ pub enum Command {
 /// Cheap to clone, and the clone is another way to ask rather than another world.
 /// The old shared world was an `Arc<Mutex<World>>` and cloning it handed out a
 /// second way to reach the world; here the only thing reachable is the channel.
-#[derive(Clone)]
+//
+// Cloned by hand rather than derived, because `done` is one-shot: a clone gets
+// none, and only the handle the server itself holds may wait for the last save.
 pub struct WorldHandle {
     to_world: Sender<Command>,
     /// Where chunks to build are handed over. Closed when every handle is
@@ -133,6 +144,20 @@ pub struct WorldHandle {
     work: Sender<ChunkPos>,
     /// The queue of chunks to build, and the world's record of what it has.
     pool: Pool,
+    /// How to learn that the world thread's last work is done. Taken once,
+    /// when the server waits for the final flush.
+    done: Mutex<Option<Receiver<u32>>>,
+}
+
+impl Clone for WorldHandle {
+    fn clone(&self) -> Self {
+        Self {
+            to_world: self.to_world.clone(),
+            work: self.work.clone(),
+            pool: self.pool.clone(),
+            done: Mutex::new(None),
+        }
+    }
 }
 
 /// A chunk a worker finished, on its way into the world.
@@ -141,6 +166,28 @@ type Pending = (ChunkPos, Chunk);
 /// Positions queued or being built, so a second request for one does not pay
 /// for it twice and a worker finishing one lets the next request through.
 impl WorldHandle {
+    /// Waits for the world thread to finish its last work.
+    ///
+    /// Callers come here through [`WorldHandle::shutdown`], which first tells
+    /// the thread to save and stop; waiting alone would hang, because the
+    /// thread ends only when every handle is gone and this one keeps its copy.
+    pub fn wait(&self) -> u32 {
+        let receiver = self
+            .done
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        receiver.and_then(|r| r.recv().ok()).unwrap_or(0)
+    }
+
+    /// Saves the world and ends the thread that owns it, reporting ticks run.
+    pub fn shutdown(&self) -> u32 {
+        let (reply, answer) = channel();
+        let _ = self.to_world.send(Command::Shutdown { reply });
+        let _ = answer.recv();
+        self.wait()
+    }
+
     /// Sends a command and waits for its answer.
     ///
     /// `None` means the thread that owns the world has gone, which happens when
@@ -319,14 +366,20 @@ pub fn spawn() -> WorldHandle {
     let pending: Arc<Mutex<Vec<Pending>>> = Arc::new(Mutex::new(Vec::new()));
     let pool = Pool::default();
 
+    let (done_tx, done_rx) = channel();
     std::thread::Builder::new()
         .name("world".to_string())
         .spawn({
             let pending = Arc::clone(&pending);
             let pool = pool.clone();
-            move || run(world, from_connections, pending, pool, |w| {
-                w.tick();
-            })
+            move || {
+                let ticks = run(world, from_connections, pending, pool, |w| {
+                    w.tick();
+                });
+                // Sent after `run` returns, and so after its own final flush:
+                // whoever is waiting by then knows the files are closed.
+                let _ = done_tx.send(ticks);
+            }
         })
         .expect("a thread can be spawned");
 
@@ -399,6 +452,7 @@ pub fn spawn() -> WorldHandle {
         to_world,
         work: work_tx,
         pool,
+        done: Mutex::new(Some(done_rx)),
     }
 }
 
@@ -505,7 +559,16 @@ pub fn run(
         }
 
         match commands.recv_timeout(wait) {
-            Ok(command) => apply(&mut world, command, &pool),
+            Ok(command) => {
+                if let Command::Shutdown { reply } = command {
+                    // The save is the body of this command, and answering it
+                    // is what the caller waited on. A world being written by
+                    // a thread nobody can reach is a world nobody can edit.
+                    save_all(&mut world, reply);
+                    break;
+                }
+                apply(&mut world, command, &pool);
+            }
             Err(RecvTimeoutError::Timeout) => {}
             // Every handle is gone, so nobody is left to ask anything.
             Err(RecvTimeoutError::Disconnected) => break,
@@ -544,16 +607,36 @@ pub fn run(
     ticks
 }
 
+/// Saves every loaded chunk and `level.dat`, then reports how many chunks.
+///
+/// Both commands that save go through here, so that the two cannot start to
+/// differ about which is written first.
+fn save_all(world: &mut World, reply: Sender<usize>) {
+    let written = world.flush().unwrap_or(0);
+    if let Err(e) = world.write_level() {
+        eprintln!("could not save level.dat: {e}");
+    }
+    let _ = reply.send(written);
+}
+
 /// Answers one command.
 fn apply(world: &mut World, command: Command, pool: &Pool) {
     match command {
-        Command::Chunk { pos, reply } => {
-            let body = chunk_body(world, pos);
-            pool.stored(pos);
-            // A receiver that has gone is a connection that gave up waiting,
-            // which is ordinary. The work was done either way.
-            let _ = reply.send(body);
-        }
+Command::Chunk { pos, reply } => {
+  let body = chunk_body(world, pos);
+  pool.stored(pos);
+  // A receiver that has gone is a connection that gave up waiting,
+  // which is ordinary. The work was done either way.
+  let _ = reply.send(body);
+  }
+  // Order inside this command: the chunks first, then level.dat, since a
+  // half-written level.dat that names a Time the chunks do not match is a
+  // worse restart than one a few seconds behind.
+  Command::Flush { reply } => save_all(world, reply),
+  // Reached only if a second shutdown is asked after the first was
+  // answered and the thread already stopped; answering it the same way
+  // keeps a second ask from getting no answer at all.
+  Command::Shutdown { reply } => save_all(world, reply),
         Command::StoredChunk { pos, reply } => {
             // Only if it is here. Generating is somebody else's job now, and so
             // is writing it out: the body was built with the chunk and is only

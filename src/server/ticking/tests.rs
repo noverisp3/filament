@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 
 /// The surface of a column, worked out the way the generator does it.
 ///
@@ -101,6 +101,7 @@ fn orphan_after_shutdown() -> Option<usize> {
         to_world: channel().0,
         work: channel().0,
         pool: pool.clone(),
+        done: Mutex::new(None),
     };
     // Run the loop with a closed channel, as it is after every handle goes.
     run(World::empty(), from_connections, Arc::new(Mutex::new(Vec::new())), pool, |_| {});
@@ -226,7 +227,7 @@ fn orphan_after_shutdown() -> Option<usize> {
     // terrain it has not got must not stand there waiting for it. It got
     // this far by having no way to ask without waiting, which meant a player
     // walking into new ground stopped answering their socket while the
-    // ground was built — and a player who is not answering is a player
+    // ground was built â€” and a player who is not answering is a player
     // everybody watching sees standing still.
     let (to_world, from_connections) = channel();
     let (pool, work) = no_pool();
@@ -243,6 +244,7 @@ fn orphan_after_shutdown() -> Option<usize> {
         to_world,
         work,
         pool,
+        done: Mutex::new(None),
     };
 
     let start = Instant::now();
@@ -277,6 +279,7 @@ fn a_chunk_that_has_been_built_comes_back_the_second_time_it_is_asked_for() {
         to_world,
         work,
         pool,
+        done: Mutex::new(None),
     };
 
     let pos = ChunkPos { x: 7, z: -3 };
@@ -308,7 +311,7 @@ fn the_real_pool_actually_hands_chunks_over() {
     //
     // Without this the failure mode is silent and total. A world whose pool
     // never hands anything over does not error, does not log, and does not
-    // crash — it leaves every player on the loading screen for ever, because
+    // crash â€” it leaves every player on the loading screen for ever, because
     // the join waits for the whole batch and the batch never completes.
     let handle = spawn();
 
@@ -335,7 +338,7 @@ fn the_real_pool_actually_hands_chunks_over() {
 #[test]
 fn the_real_pool_builds_more_than_one_chunk_at_once() {
     // Four workers, asked for four corners of a ring. If they ran one after
-    // another this would still pass, just slower — so it checks that all
+    // another this would still pass, just slower â€” so it checks that all
     // four arrive, not how fast, and the speed claim is left to a
     // measurement rather than asserted as a wall clock in a unit test.
     let handle = spawn();
@@ -362,7 +365,7 @@ fn the_real_pool_builds_more_than_one_chunk_at_once() {
 fn asking_about_a_chunk_the_world_has_not_got_does_not_reach_the_world() {
     // The round trip is what was expensive. The world's thread is asleep in
     // a receive, so every question about a chunk that is not there wakes it
-    // up to say no — and a connection walking into new ground asks about a
+    // up to say no â€” and a connection walking into new ground asks about a
     // whole ring, every pass, for as long as the pool takes.
     //
     // Measured by how long it takes, not by what it returns: both versions
@@ -630,3 +633,26 @@ fn air_is_not_something_a_player_can_be_handed() {
     assert_eq!(held_item(air), None, "and it is still never given out");
 }
 
+
+/// Shutdown is a command whose body is the save: answering it means the files
+/// are closed, and the tick count the answer carries is how much world the
+/// thread saw on its way down. A shutdown that never answered would hang the
+/// accept loop forever, which is what this has to catch.
+#[test]
+fn shutdown_saves_answers_and_ends_the_thread() {
+    // No `FILAMENT_WORLD` here, so the save is a no-op with a store that does
+    // not exist: what is under test is the plumbing, not the files.
+    unsafe { std::env::remove_var("FILAMENT_WORLD") };
+    let handle = spawn();
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    let lines_before = handle.chunk_count().expect("the world thread runs so far");
+
+    let ticks = handle.shutdown();
+    assert!(ticks >= 5, "400ms is eight-ish ticks, got {ticks}");
+    assert!(ticks <= 60, "and not hundreds: no burst catch-up");
+    assert_eq!(lines_before, 0, "nothing asked, nothing loaded");
+
+    // After shutdown the thread is gone, so the same question is refused
+    // rather than answered by a corpse.
+    assert_eq!(handle.chunk_count(), None);
+}

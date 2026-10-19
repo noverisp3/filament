@@ -162,6 +162,55 @@ fn orphan_after_shutdown() -> Option<usize> {
     }
 
     #[test]
+    fn digging_a_hole_moves_the_light_and_the_client_is_told() {
+        // The client keeps the light it was given with the chunk, so a hole
+        // dug in a lit room is still lit on its screen until somebody says
+        // otherwise. This is that somebody.
+        let handle = spawn();
+        let pos = ChunkPos { x: 0, z: 0 };
+        let at = |y: i32| BlockPos::new(8, y, 8);
+
+        // The chunk, so that there is something to dig into.
+        handle.chunk(pos).expect("the chunk builds");
+
+        let air = World::empty().terrain_blocks().air;
+        let mut surface = None;
+        for y in (crate::world::chunk::MIN_BLOCK_Y..200).rev() {
+            if handle
+                .world_block(at(y))
+                .flatten()
+                .is_some_and(|b| b != air)
+            {
+                surface = Some(y);
+                break;
+            }
+        }
+        let surface = surface.expect("there is ground to break");
+
+        // Nothing has moved yet.
+        assert!(
+            handle.light_changes().is_empty(),
+            "a world nobody changed has no light to report"
+        );
+
+        handle
+            .break_block(at(surface))
+            .expect("a chunk was there")
+            .expect("something was there to break");
+
+        let changes = handle.light_changes();
+        assert!(
+            !changes.is_empty(),
+            "digging a hole in the ground moves the light, and the client \
+             has to be told or the hole stays lit on its screen"
+        );
+        // And what it is told is the light of a section, in the shape the
+        // game packs it: two thousand and forty-eight bytes.
+        let (_, _, _, bytes) = &changes[0];
+        assert_eq!(bytes.len(), 2048, "a section of light");
+    }
+
+    #[test]
     fn an_untouched_chunk_comes_back_identical_and_answers_to_nothing() {
         // The journal grows with what players have done, not with where they
         // have walked. A server nobody edited has an empty one.

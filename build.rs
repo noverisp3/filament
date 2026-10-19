@@ -127,8 +127,8 @@ fn main() {
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
+    watch_the_branch();
 
     let (sha, dirty) = commit();
 
@@ -138,6 +138,36 @@ fn main() {
     println!("cargo:rustc-env=FILAMENT_TARGET={}", target());
     println!("cargo:rustc-env=FILAMENT_BUILT_AT={}", built_at());
     println!("cargo:rustc-env=FILAMENT_RUSTC={}", rustc_version());
+}
+
+/// Watches the ref the current branch points at, so a commit rebuilds.
+///
+/// Adding `.git/HEAD` was the wrong fix and looked right for a while. A commit
+/// does not touch `HEAD` -- that file holds the text `ref: refs/heads/master`,
+/// and a commit moves the ref that line points at, leaving the line alone. So
+/// `HEAD`'s timestamp sat still through several commits while the banner
+/// cheerfully named a build that had never existed, which is the one thing a
+/// build stamp must never do.
+///
+/// `packed-refs` goes alongside because a packed branch has no loose file: the
+/// ref path does not exist and the packing is what changes instead. Neither is
+/// watched inside `.git/worktrees`, where a linked checkout puts them
+/// elsewhere, which is a gap left open rather than papered over -- the banner
+/// degrades to the commit it was built at, which is what it does anyway.
+fn watch_the_branch() {
+    if let Some(packed) = git(&["rev-parse", "--git-path", "packed-refs"]) {
+        if !packed.is_empty() {
+            println!("cargo:rerun-if-changed={packed}");
+        }
+    }
+    let Some(symbolic) = git(&["symbolic-ref", "HEAD"]) else {
+        return;
+    };
+    if let Some(path) = git(&["rev-parse", "--git-path", &symbolic]) {
+        if !path.is_empty() {
+            println!("cargo:rerun-if-changed={path}");
+        }
+    }
 }
 
 /// The compiler that built this, and its own commit and release date.

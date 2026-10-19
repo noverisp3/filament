@@ -58,6 +58,21 @@ New-NetFirewallRule -DisplayName "filament 25565" -Direction Inbound `
 
 Once, from an elevated prompt.
 
+### A world folder
+
+Point `FILAMENT_WORLD` at a folder the game wrote and the server opens it: the
+ground is read before it is generated, and what players change is written back
+when the server stops. The level file is edited, not replaced, so the seed,
+the game rules, the spawn and the day of the year stay the game's own.
+
+```text
+set FILAMENT_WORLD=C:\Users\Me\world
+filament
+```
+
+Without it the world is generated on the spot and lives only as long as the
+process does.
+
 ## Milestones
 
 Grouped by what they are about, not by when they were done.
@@ -103,6 +118,8 @@ Grouped by what they are about, not by when they were done.
 - [x] Chunks sent, and generated on the fly
 - [x] Chunks follow the player as they walk
 - [x] A chunk that is dropped and rebuilt keeps what was changed in it
+- [x] A real world folder, read and written in the game's own format
+- [x] Chunks sent at the rate the client asks for
 
 ### Two players on one server
 
@@ -114,6 +131,7 @@ Grouped by what they are about, not by when they were done.
 - [x] Swinging and punching
 - [x] Crouching, which in 26.3 is a pose rather than a flag
 - [x] Bodies come and go with the observer's view distance
+- [x] Chat, to everyone at once
 
 ### Running one
 
@@ -121,6 +139,9 @@ Grouped by what they are about, not by when they were done.
 - [x] Readable logs, and a clean Ctrl+C
 - [x] Terrain built in parallel, so walking does not freeze a player
 - [x] Every packet id checked against the data generator's report
+- [x] The server's name in the debug screen, and a ping it answers
+- [x] Movement checked rather than believed
+- [x] The server list says who is on and how many
 
 ### Not yet
 
@@ -137,10 +158,12 @@ Grouped by what they are about, not by when they were done.
       the client authoritative for *arrangement*.
 - [ ] Authentication
 
-866 tests. A client connects, negotiates, and gets a world of generated terrain:
-grass on top, dirt under it, stone below, hills from two octaves of value noise.
-A second client joins the same world and sees the first one walk about, break and
-place blocks, and have the change appear on both screens at once.
+886 tests. A client connects, negotiates, and gets a world: either one the
+game saved, read out of its own folder, or one generated on the spot — grass
+on top, dirt under it, stone below, hills from two octaves of value noise. A
+second client joins the same world and sees the first one walk about, break and
+place blocks, and have the change appear on both screens at once, and the two
+of them can talk.
 
 The world ticks at twenty a second. It counts the game clock, runs scheduled work
 from a budgeted queue, and has one rule so far: dirt with grass beneath it and air
@@ -149,9 +172,10 @@ instead of leaving a bare stripe across it. What the world changes by itself is
 drained by the connections and sent to everyone in range, because a block that
 turned to grass because something above it was mined is not one player's news.
 
-Two things are worth knowing about the terrain. It is generated on request, and a
-chunk is thrown away when the last player walks away from it, so nothing about it
-survives being dropped — what does survive is a journal of the blocks players have
-changed, replayed onto a chunk as it comes back. And the generator's five-block
-registry and the game's thirty-five thousand block states are unrelated, so blocks
-are mapped between them on the way out.
+Three things are worth knowing about the world. A chunk is thrown away when the
+last player walks away from it, and what survives that is a journal of the
+blocks players changed, replayed onto a chunk as it comes back. The generator's
+five-block registry and the game's thirty-five thousand block states are
+unrelated, so blocks are mapped between them on the way out. And a world folder
+is **read, not replaced**: a server that wrote its own level file over the
+game's would reset a player's world without saying so.

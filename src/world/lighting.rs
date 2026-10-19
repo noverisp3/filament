@@ -105,8 +105,7 @@ impl World {
                         for ly in (0..SECTION_DIM).rev() {
                             let local = LocalPos::from_array([lx as u8, ly as u8, lz as u8]);
                             if registry.is_opaque(section.get(local)) {
-                                stop =
-                                    (MIN_SECTION + slot as i32) * SECTION_DIM as i32 + ly as i32;
+                                stop = (MIN_SECTION + slot as i32) * SECTION_DIM + ly;
                                 break 'outer;
                             }
                         }
@@ -125,8 +124,8 @@ impl World {
         for slot in 0..SECTIONS_PER_CHUNK {
             let section_y = MIN_SECTION + slot as i32;
             let section_pos = SectionPos::new(pos.x, section_y, pos.z);
-            let base_y = section_y * SECTION_DIM as i32;
-            let top = base_y + SECTION_DIM as i32;
+            let base_y = section_y * SECTION_DIM;
+            let top = base_y + SECTION_DIM;
 
             // The sun stops at the opaque block itself, so everything above it
             // is lit and everything from it down is not.
@@ -151,7 +150,7 @@ impl World {
                 for lx in 0..SECTION_DIM {
                     let stop = stops[lz as usize * SECTION_DIM as usize + lx as usize];
                     for ly in 0..SECTION_DIM {
-                        let y = base_y + ly as i32;
+                        let y = base_y + ly;
                         let value = if y > stop { MAX_LIGHT } else { 0 };
                         light.set_sky(
                             LocalPos::from_array([lx as u8, ly as u8, lz as u8]),

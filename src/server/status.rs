@@ -1623,17 +1623,18 @@ fn place_block(
                             // underneath the crack cannot change its pace
                             // halfway through, because the duration is carried
                             // from here.
-                            let duration = {
-                                let Some(terrain) = session.world.terrain_blocks() else {
-                                    return Ok(());
+                                let duration = {
+                                    let Some(terrain) = session.world.terrain_blocks() else {
+                                        return Ok(());
+                                    };
+                                    let registry = session.world.registry();
+                                    let mined = session
+                                        .world
+                                        .world_block(pos)
+                                        .flatten()
+                                        .unwrap_or(terrain.air);
+                                    break_time(mined, &terrain, registry.as_ref())
                                 };
-                                let mined = session
-                                    .world
-                                    .world_block(pos)
-                                    .flatten()
-                                    .unwrap_or(terrain.air);
-                                break_time(mined, &terrain)
-                            };
 
                             mining = Some(Mining {
                                 pos,
@@ -2454,14 +2455,58 @@ const SECONDS_PER_HARDNESS: f64 = 1.5;
 /// tool in. With a tool the client finishes before the crack does, and the crack
 /// is still cut short. That is the remaining half of this, and it waits on the
 /// inventory.
-fn break_time(block: crate::world::block::BlockId, terrain: &crate::world::terrain::TerrainBlocks) -> std::time::Duration {
-    let hardness = crate::server::ticking::hardness_of(block, terrain)
-        // Nothing in the table is ever a negative number the crack can use, and
-        // a negative hardness means the block cannot be broken at all.
+fn break_time(
+    block: crate::world::block::BlockId,
+    terrain: &crate::world::terrain::TerrainBlocks,
+    registry: Option<&crate::world::block::BlockRegistry>,
+) -> std::time::Duration {
+    // Map the block to its minecraft name, the same way the chunk encoder
+    // does, so loaded blocks get their real hardness rather than the
+    // terrain-only fallback.
+    let name = if block == terrain.air {
+        "minecraft:air"
+    } else if block == terrain.grass {
+        "minecraft:grass_block"
+    } else if block == terrain.dirt {
+        "minecraft:dirt"
+    } else if block == terrain.stone {
+        "minecraft:stone"
+    } else if block == terrain.glowstone {
+        "minecraft:glowstone"
+    } else if let Some(reg) = registry {
+        // leak-free: build an owned string is not possible for hardness_of
+        // (it takes &str). Look the hardness up directly instead.
+        let n = reg.name(block);
+        // hardness_of needs a &str living long enough; the generated table
+        // holds static strings, so compare against the table here.
+        let full = if n.contains(':') {
+            n.to_string()
+        } else {
+            format!("minecraft:{}", n)
+        };
+        // Fall through with a sentinel; handled below.
+        return duration_for(&full);
+    } else {
+        "minecraft:air"
+    };
+
+    duration_for(name)
+}
+
+fn duration_for(name: &str) -> std::time::Duration {
+    let hardness = crate::generated::hardness_of(name)
         .filter(|h| *h > 0.0)
         .unwrap_or(FALLBACK_HARDNESS);
-
-    std::time::Duration::from_secs_f64(f64::from(hardness) * SECONDS_PER_HARDNESS)
+    let requires_tool = crate::generated::requires_tool(name);
+    // Bare hand: speed 1.0. can-harvest blocks use the 30 denominator
+    // (hardness * 1.5s); tool-gated blocks use the 100 denominator
+    // (hardness * 5s).
+    let seconds = if requires_tool {
+        f64::from(hardness) * 5.0
+    } else {
+        f64::from(hardness) * SECONDS_PER_HARDNESS
+    };
+    std::time::Duration::from_secs_f64(seconds)
 }
 
 /// The hardness used when the table has nothing.

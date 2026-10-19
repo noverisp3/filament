@@ -541,19 +541,19 @@ fn break_times_are_the_games_own_numbers() {
     // server using different ones gets its crack cut short.
     let t = terrain();
 
-    assert_eq!(break_time(t.dirt, &t), DIRT_BREAK);
+    assert_eq!(break_time(t.dirt, &t, None), DIRT_BREAK);
     assert_eq!(
-        break_time(t.stone, &t),
-        DIRT_BREAK * 3,
-        "stone is three times dirt"
+        break_time(t.stone, &t, None),
+        DIRT_BREAK * 10,
+        "stone is ten times dirt when broken by hand"
     );
 
     // Halfway cases are where an f32 shows up, so the tenths are compared
     // as tenths rather than as exact seconds.
-    let tenths = |block| (break_time(block, &t).as_secs_f64() * 10.0).round() as i64;
+    let tenths = |block| (break_time(block, &t, None).as_secs_f64() * 10.0).round() as i64;
     assert_eq!(tenths(t.dirt), 8, "0.75s");
     assert_eq!(tenths(t.grass), 9, "0.9s");
-    assert_eq!(tenths(t.stone), 23, "2.25s, three times dirt");
+    assert_eq!(tenths(t.stone), 75, "7.5s, ten times dirt by hand");
     assert_eq!(tenths(t.glowstone), 5, "0.45s");
 }
 
@@ -570,7 +570,7 @@ fn a_block_that_cannot_be_broken_does_not_pace_a_crack() {
 
     let t = terrain();
     assert!(
-        break_time(t.air, &t) > std::time::Duration::ZERO,
+        break_time(t.air, &t, None) > std::time::Duration::ZERO,
         "and air falls back rather than going negative"
     );
 }

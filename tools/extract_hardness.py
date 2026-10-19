@@ -60,6 +60,7 @@ IDENTIFIER = re.compile(r"Block(?:Item)?Ids\.(\w+)")
 # strength(a) or strength(a, b); the first argument is the hardness.
 STRENGTH = re.compile(r"\.strength\(\s*(-?[\d.]+)F?\s*(?:,\s*(-?[\d.]+)F?\s*)?\)")
 INSTANT = re.compile(r"\.instanterbreak\(\)")
+REQUIRES_TOOL = re.compile(r"\.requiresCorrectToolForDrops\(\)")
 
 # The Properties factories: `private static BlockBehaviour.Properties logProperties(...) {`
 HELPER_DECLARATION = re.compile(
@@ -129,19 +130,21 @@ def properties_of(args, helpers, depth=0):
     three, which is deeper than this file goes, and stops rather than looping if
     something ever does.
     """
+    requires = bool(REQUIRES_TOOL.search(args))
     strength = STRENGTH.search(args)
     if strength:
-        return float(strength.group(1))
+        return float(strength.group(1)), requires
     if INSTANT.search(args):
-        return 0.0
+        return 0.0, requires
 
     if depth < 3:
         for call in HELPER_CALL.finditer(args):
             helper = helpers.get(call.group(1))
             if helper is not None:
-                return properties_of(helper, helpers, depth + 1)
+                h, r = properties_of(helper, helpers, depth + 1)
+                return h, r or requires
 
-    return 0.0
+    return 0.0, requires
 
 
 def helper_bodies(source):
@@ -178,38 +181,44 @@ def mine(source):
                 base = parts[1].split(",", 1)[0].strip()
                 inherited = base
             # Hardness comes from the base, which is resolved in a second pass.
-            names[constant] = (identifier.group(1), inherited, None)
+            names[constant] = (identifier.group(1), inherited, None, False)
             continue
 
-        names[constant] = (identifier.group(1), None, properties_of(args, helpers))
+        h, r = properties_of(args, helpers)
+        names[constant] = (identifier.group(1), None, h, r)
 
+    requires_tool = {}
     # Resolve the derived blocks now that every base is known.
-    for constant, (identifier, inherited, value) in names.items():
+    for constant, (identifier, inherited, value, req) in names.items():
         if value is not None:
             hardness[identifier] = value
+            requires_tool[identifier] = req
             continue
         base_value = None
+        base_req = False
         seen = set()
         while inherited and inherited not in seen:
             seen.add(inherited)
             entry = names.get(inherited)
             if entry is None:
                 break
-            _, next_base, next_value = entry
+            _, next_base, next_value, next_req = entry
             if next_value is not None:
                 base_value = next_value
+                base_req = next_req
                 break
             inherited = next_base
         hardness[identifier] = 0.0 if base_value is None else base_value
+        requires_tool[identifier] = base_req
 
-    return hardness
+    return hardness, requires_tool
 
 
 def rust_name(identifier):
     return identifier.lower()
 
 
-def emit(hardness, source_path):
+def emit(hardness, requires_tool, source_path):
     lines = [
         "//! How long each block takes to break, generated from the decompiled source.",
         "//!",
@@ -241,8 +250,26 @@ def emit(hardness, source_path):
         literal = repr(float(value)) + "f32"
         lines.append(f'    ("minecraft:{rust_name(identifier)}", {literal}),')
 
+    # Emit the requires-tool list before the hardness lookup.
+    rt_lines = []
+    for identifier in sorted(requires_tool, key=rust_name):
+        if requires_tool[identifier]:
+            rt_lines.append(f'    "minecraft:{rust_name(identifier)}",')
     lines += [
         "];",
+        "",
+        "/// Blocks that need the right tool to be harvested at all. A bare hand",
+        "/// breaks them on the 100 denominator rather than the 30 one.",
+        "pub const REQUIRES_TOOL: &[&str] = &[",
+    ]
+    lines += rt_lines
+    lines += [
+        "];",
+        "",
+        "/// Whether a block needs the right tool to be harvested at all.",
+        "pub fn requires_tool(name: &str) -> bool {",
+        "    REQUIRES_TOOL.binary_search(&name).is_ok()",
+        "}",
         "",
         "/// The hardness of a block, or `None` if it is not in the table.",
         "///",
@@ -263,7 +290,7 @@ def emit(hardness, source_path):
 def main():
     path = blocks_file()
     source = path.read_text(encoding="utf-8")
-    hardness = mine(source)
+    hardness, requires_tool = mine(source)
 
     unbreakable = [k for k, v in hardness.items() if v < 0]
     print(f"read {path}")
@@ -274,7 +301,7 @@ def main():
         got = hardness.get(check.upper() if check.upper() in hardness else None)
         print(f"  {check:<14} {got}")
 
-    emit(hardness, path)
+    emit(hardness, requires_tool, path)
     print(f"wrote {OUT.relative_to(REPO)}")
 
 

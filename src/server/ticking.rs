@@ -112,6 +112,8 @@ pub enum Command {
     Forget { pos: ChunkPos },
     /// The terrain palette, which is five block ids and never changes.
     TerrainBlocks { reply: Sender<TerrainBlocks> },
+    /// The block registry, for mapping a block id to its name.
+    Registry { reply: Sender<crate::world::block::BlockRegistry> },
     /// What the world changed on its own since anyone last asked.
     ///
     /// A tick runs on the world thread with no connection to look out of, so
@@ -282,6 +284,10 @@ impl WorldHandle {
     /// the caller, and the lock is on the other side of a channel.
     pub fn terrain_blocks(&self) -> Option<TerrainBlocks> {
         self.ask(|reply| Command::TerrainBlocks { reply })
+    }
+
+    pub fn registry(&self) -> Option<crate::world::block::BlockRegistry> {
+        self.ask(|reply| Command::Registry { reply })
     }
 
     /// What the world has changed by itself since this was last asked.
@@ -682,6 +688,10 @@ Command::Chunk { pos, reply } => {
 
         Command::TerrainBlocks { reply } => {
             let _ = reply.send(*world.terrain_blocks());
+        }
+
+        Command::Registry { reply } => {
+            let _ = reply.send(world.registry().clone());
         }
 
         Command::TickChanges { reply } => {

@@ -29,7 +29,7 @@ mod tags;
 pub use blocks::{
     BlockDef, BlockState, Property, BLOCKS, BLOCK_COUNT, BLOCK_STATE_COUNT,
 };
-pub use hardness::{HARDNESS, hardness_of};
+pub use hardness::{HARDNESS, REQUIRES_TOOL, hardness_of, requires_tool};
 pub use items::{ITEMS, item_id, item_name};
 pub use registries::{REGISTRY_DATA_COUNT, REGISTRY_DATA_FRAMES};
 pub use tags::{TAG_COUNTS, TAG_TOTAL, UPDATE_TAGS_BODY};

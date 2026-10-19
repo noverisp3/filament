@@ -290,3 +290,82 @@ fn an_edit_survives_a_save_and_a_reopen() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn a_chunk_that_was_walked_away_from_is_read_back_and_not_made_again() {
+    // The case that loses a world. A chunk is loaded, edited and then thrown
+    // out because the player walked away. At the save it is no longer in
+    // memory, and building it from the noise would write the generator's
+    // ground over the ground the game saved.
+    let dir = std::env::temp_dir().join(format!(
+        "filament-unloaded-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+    ));
+    std::fs::create_dir_all(&dir).expect("a scratch world folder");
+
+    let pos = ChunkPos::new(0, 0);
+    let mut world =
+        World::with_store(Some(crate::world::storage::WorldStore::open(&dir).unwrap()));
+    let air = world.registry().id("air").expect("registered");
+
+    // Dig a hole and save it, so the file on disk is not what the generator
+    // would make.
+    world.ensure_chunk(pos);
+    let target = (-40..320)
+        .find_map(|y| {
+            let at = BlockPos::new(7, y, 7);
+            match world.block(at) {
+                Some(id) if id != air => Some(at),
+                _ => None,
+            }
+        })
+        .expect("terrain keeps a solid cell below y=64");
+    world.set_block(target, air).expect("the dig itself must land");
+    world.flush().expect("the folder is writable");
+    drop(world);
+
+    // Open it again, edit it once more, and walk away from it.
+    let mut world =
+        World::with_store(Some(crate::world::storage::WorldStore::open(&dir).unwrap()));
+    world.ensure_chunk(pos);
+    let second = (-40..320)
+        .find_map(|y| {
+            let at = BlockPos::new(9, y, 7);
+            match world.block(at) {
+                Some(id) if id != air => Some(at),
+                _ => None,
+            }
+        })
+        .expect("terrain keeps a solid cell below y=64");
+    world.set_block(second, air).expect("the second dig must land");
+    world.forget_chunk(pos);
+    assert!(
+        world.chunk(pos).is_none(),
+        "the chunk is out of memory now, which is the whole point"
+    );
+
+    // The save.
+    world.flush().expect("the folder is writable");
+    drop(world);
+
+    // And what is on the disk is the ground that was there, hole and all.
+    let mut world =
+        World::with_store(Some(crate::world::storage::WorldStore::open(&dir).unwrap()));
+    world.ensure_chunk(pos);
+    assert_eq!(
+        world.block_name(world.block(target).expect("a block")),
+        "air",
+        "the first hole must still be a hole"
+    );
+    assert_eq!(
+        world.block_name(world.block(second).expect("a block")),
+        "air",
+        "and the second hole must have been written too"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}

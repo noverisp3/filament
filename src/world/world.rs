@@ -28,6 +28,20 @@ pub struct BlockEdit {
     pub sections: Vec<SectionPos>,
 }
 
+/// Puts a chunk's remembered edits back onto it.
+///
+/// The journal outlives the chunk on purpose: a chunk that was thrown away
+/// when the last player walked away comes back from the folder without the
+/// changes, and this is what puts them back.
+fn replay_edits(chunk: &mut Chunk, edits: Option<&Vec<(BlockPos, BlockId)>>) {
+    let Some(edits) = edits else {
+        return;
+    };
+    for (at, block) in edits {
+        chunk.set_block(*at, *block);
+    }
+}
+
 impl BlockEdit {
     pub fn touches(&self, section: SectionPos) -> bool {
         self.sections.contains(&section)
@@ -198,15 +212,23 @@ impl World {
         let dirty: Vec<ChunkPos> = self.dirty.iter().copied().collect();
         let mut written = 0;
         for pos in dirty {
+            // The chunk as it stands. If it is still here, that is the answer.
+            // If it is not -- a player walked away and it was thrown out --
+            // then it has to come back from the folder, because that is where
+            // the ground the game saved is. Building it from the noise
+            // instead would write the generator's ground over the ground
+            // that was there, which is the one mistake this whole layer
+            // exists to avoid.
             let chunk = if let Some(chunk) = self.chunks.get(&pos) {
                 chunk.clone()
+            } else if let Some(mut chunk) = store.load(pos, &mut self.registry) {
+                replay_edits(&mut chunk, self.edits.get(&pos));
+                chunk
             } else {
+                // Nothing on disk either: this is a chunk the world made, and
+                // the generator is the only thing that can make it again.
                 let mut chunk = crate::world::terrain::generate_chunk(pos, &self.terrain);
-                if let Some(edits) = self.edits.get(&pos) {
-                    for (at, block) in edits {
-                        chunk.set_block(*at, *block);
-                    }
-                }
+                replay_edits(&mut chunk, self.edits.get(&pos));
                 chunk
             };
             match store.save(pos, &chunk, &self.registry, game_time) {

@@ -757,6 +757,15 @@ fn play(
     p::write_set_held_slot(&mut body, 0);
     send(&mut out, &body, "set_held_slot", &log)?;
 
+    // 5. The clock, so the sun is where the world says it is. The client runs
+    //    this itself once told, so this is sent on arrival and not again --
+    //    twenty corrections a second for a clock that is already right.
+    if let Some((game_time, day_time)) = session.world.clock() {
+        let mut body = Vec::new();
+        p::write_set_time(&mut body, game_time as i64, day_time as i64);
+        send(&mut out, &body, "set_time", &log)?;
+    }
+
     // 5. The spawn, on the actual surface of the terrain rather than at a
     //    fixed height. See `terrain::spawn_point`: the old constant was forty
     //    to eighty blocks in the air over this terrain, so every player fell on

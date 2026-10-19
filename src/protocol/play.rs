@@ -714,18 +714,79 @@ pub fn write_set_default_spawn(out: &mut Vec<u8>, dimension: &str, x: i32, y: i3
     out.extend_from_slice(&0.0f32.to_be_bytes());
 }
 
-/// Not written: `ClientboundSetTimePacket`.
+/// `ClientboundSetTimePacket`, round-tripped by hand.
 ///
-/// Left unimplemented on purpose rather than sent wrong. The 26.3 packet is
-/// thirty-two bytes for a capture that starts with a long and then carries a map
-/// of world clock states, and the record does not make the shape obvious from
-/// the outside. Sending an approximation would move the failure to the next
-/// packet along and cost another round trip to find, whereas omitting it leaves
-/// the client with its own clock, which is the lesser problem.
-///
-/// The id stays declared so the log can name the packet when it is needed.
-#[allow(dead_code)]
-fn set_time_is_not_implemented() {}
+/// It was left unimplemented on purpose rather than sent wrong: the map of world
+/// clock states is not obvious from the outside, and an approximation would have
+/// moved the failure to the next packet along. Reading the reference is how it
+/// stopped being a guess -- `ClientboundSetTimePacket`, `ClockNetworkState`,
+/// and `ClientClockManager`, which is where the client was found to run the
+/// clock itself between packets.
+#[test]
+fn set_time_carries_the_game_clock_and_where_the_sun_is() {
+    // The two numbers are not the same number, and the failure mode of sending
+    // one where two belong is a sky stuck at dawn forever.
+    let mut out = Vec::new();
+    write_set_time(&mut out, 12_345, 6_000);
+
+    // An explicit cursor rather than re-slicing, because `VarInt::read` takes
+    // `&mut &[u8]` and advances it itself -- re-slicing by the length it
+    // returns skips a second time, which is a silent off-by-one that reads the
+    // next field and blames it.
+    fn var_int(out: &[u8], at: &mut usize) -> i32 {
+        let (v, n) = VarInt::read(&mut &out[*at..]).expect("varint");
+        *at += n;
+        v.0
+    }
+
+    let mut at = 0usize;
+    assert_eq!(var_int(&out, &mut at), id::SET_TIME, "the packet");
+
+    let mut eight = [0u8; 8];
+    eight.copy_from_slice(&out[at..at + 8]);
+    at += 8;
+    assert_eq!(i64::from_be_bytes(eight), 12_345, "how long the world has run");
+
+    assert_eq!(var_int(&out, &mut at), 1, "one world clock, the overworld");
+    assert_eq!(
+        var_int(&out, &mut at),
+        WORLD_CLOCK_OVERWORLD,
+        "keyed by registry id, and the overworld is 0"
+    );
+
+    let (stored, n) = VarLong::read(&mut &out[at..]).expect("sun position");
+    at += n;
+    // `VarLong` is a plain varlong -- a magnitude, no sign -- so what comes back
+    // is still folded. Folding doubles a small number, and folding is what keeps
+    // -1 at one byte instead of ten.
+    assert_eq!(stored.0, 12_000, "zigzagged on the way out");
+    assert_eq!(stored.0 / 2, 6_000, "which folds back to the sun's position");
+
+    let mut four = [0u8; 4];
+    four.copy_from_slice(&out[at..at + 4]);
+    at += 4;
+    assert_eq!(
+        f32::from_be_bytes(four),
+        0.0,
+        "no sub-tick, because the server has none to report"
+    );
+
+    four.copy_from_slice(&out[at..at + 4]);
+    at += 4;
+    assert_eq!(f32::from_be_bytes(four), 1.0, "and time is moving");
+
+    assert_eq!(at, out.len(), "and nothing else trails it");
+}
+
+#[test]
+fn zigzag_keeps_the_numbers_near_zero_small() {
+    // A clock that has just been set sits near zero, and -1 costing ten bytes
+    // is what a plain varlong does to it.
+    assert_eq!(VarLong::zigzag(0).written_size(), 1);
+    assert_eq!(VarLong::zigzag(-1).written_size(), 1, "not ten");
+    assert_eq!(VarLong::zigzag(1).written_size(), 1);
+    assert_eq!(VarLong::zigzag(23_999).written_size(), 3, "the length of a day");
+}
 
 /// Writes a `block_destruction`: how far through breaking a block is.
 ///
@@ -1213,6 +1274,40 @@ pub const NO_CRACK: i8 = -1;
 pub fn write_keep_alive(out: &mut Vec<u8>, id: i64) {
     VarInt(id::KEEP_ALIVE).write(out);
     out.extend_from_slice(&id.to_be_bytes());
+}
+
+/// `world_clock` registry id of `minecraft:overworld`.
+///
+/// Ordinals come from registration order, and `WorldClocks.bootstrap` registers
+/// the overworld before the end.
+const WORLD_CLOCK_OVERWORLD: i32 = 0;
+
+/// Writes `ClientboundSetTimePacket`: the game clock, and where the sun is.
+///
+/// Two parts, and they are not the same number. `game_time` is how long the
+/// world has been running and only ever goes up. The map is the world's own
+/// clocks, keyed by registry id, and the overworld's total is the sun's
+/// position -- the part that wraps at twenty-four thousand.
+///
+/// Sent once when a player arrives and then only when the time is changed,
+/// because the client runs this clock itself from whatever it is told
+/// (`ClientLevel.tickTime`). Sending it every tick would be correcting a clock
+/// that is already right, twenty times a second, forever.
+pub fn write_set_time(out: &mut Vec<u8>, game_time: i64, day_time: i64) {
+    VarInt(id::SET_TIME).write(out);
+    out.extend_from_slice(&game_time.to_be_bytes());
+
+    // A map is a count and then that many entries.
+    VarInt(1).write(out);
+    VarInt(WORLD_CLOCK_OVERWORLD).write(out);
+    VarLong::zigzag(day_time).write(out);
+    // Partial tick is the fraction into the current tick. Zero here because the
+    // server has no sub-tick to report, and inventing one would make the sun
+    // jitter by up to a tick against everything else that happens on a tick.
+    out.extend_from_slice(&0.0f32.to_be_bytes());
+    // Rate one: real time is real time. Zero is what a paused world sends, and
+    // this one is not paused.
+    out.extend_from_slice(&1.0f32.to_be_bytes());
 }
 
 /// Writes `ClientboundPlayerAbilitiesPacket`.

@@ -170,6 +170,16 @@ impl VarLong {
 
         w.len() - start
     }
+
+    /// The value a `VAR_LONG` field carries for `v`.
+    ///
+    /// Zigzag, because a variable-length integer spends its bits on a magnitude
+    /// and `-1` would otherwise need ten bytes. Folding the sign into the last
+    /// bit doubles small values instead and keeps -1 at one byte, which matters
+    /// for a field like a clock that has just been set and is near zero.
+    pub const fn zigzag(v: i64) -> Self {
+        Self((v << 1) ^ (v >> 63))
+    }
 }
 
 impl fmt::Display for VarLong {

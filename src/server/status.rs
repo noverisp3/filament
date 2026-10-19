@@ -476,6 +476,15 @@ fn configure(
 
     let mut out = Vec::new();
 
+    // 0. The brand, which the game sends first thing in this phase
+    //    (`startConfiguration` opens with it). The client keeps it and shows
+    //    it in the debug screen as the server's name, so a server that says
+    //    nothing is a null server there.
+    let mut body = Vec::new();
+    crate::protocol::configuration::write_brand(&mut body, "filament");
+    enc.encode(&body, &mut out).map_err(io_err)?;
+    log.out_packet("custom_payload", "configuration", body.len());
+
     // 1. The feature flags this world runs with.
     //
     //    ```java
@@ -1346,7 +1355,7 @@ fn play(
                 // read rather than skipped, because a VarInt is however many
                 // bytes it needs and the position follows it.
                 let mut rest = body;
-                let (_teleport_id, used) = VarInt::read(&mut rest)
+                let (_teleport_id, _) = VarInt::read(&mut rest)
                     .map_err(|e| io_err(FrameError::Decode(e)))?;
                 if rest.len() >= 24 + 8 {
                     let x = f64::from_be_bytes(rest[0..8].try_into().expect("eight"));
@@ -1354,7 +1363,6 @@ fn play(
                     let z = f64::from_be_bytes(rest[16..24].try_into().expect("eight"));
                     let yaw = f32::from_be_bytes(rest[24..28].try_into().expect("four"));
                     let pitch = f32::from_be_bytes(rest[28..32].try_into().expect("four"));
-                    let _ = used;
                     if x.is_finite() && y.is_finite() && z.is_finite() {
                         player.x = x.clamp(-MAX_COORD, MAX_COORD);
                         player.y = y.clamp(-MAX_COORD, MAX_COORD);

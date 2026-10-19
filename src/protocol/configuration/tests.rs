@@ -143,3 +143,27 @@ fn the_tag_summary_names_what_is_being_sent() {
     assert!(summary.contains("15 registries"), "{summary}");
     assert!(summary.contains("773 tags"), "{summary}");
 }
+
+#[test]
+fn the_brand_is_a_custom_payload_with_a_channel_and_a_name() {
+    // The channel is written as a string and the brand as another one, both
+    // with their byte count in front. The client reads the channel first and
+    // then hands the rest to the brand codec, so a missing count is a channel
+    // that never matches.
+    let mut body = Vec::new();
+    write_brand(&mut body, "filament");
+
+    let mut r = &body[..];
+    let (VarInt(packet), _) = VarInt::read(&mut r).expect("a packet id");
+    assert_eq!(packet, id::CUSTOM_PAYLOAD);
+
+    let (VarInt(len), _) = VarInt::read(&mut r).expect("a channel length");
+    assert_eq!(len, "minecraft:brand".len() as i32);
+    assert_eq!(&r[..len as usize], b"minecraft:brand");
+    r = &r[len as usize..];
+
+    let (VarInt(len), _) = VarInt::read(&mut r).expect("a brand length");
+    assert_eq!(len, "filament".len() as i32);
+    assert_eq!(&r[..len as usize], b"filament");
+    assert!(r.len() == len as usize, "and nothing after the name");
+}

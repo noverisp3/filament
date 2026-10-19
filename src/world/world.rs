@@ -286,8 +286,12 @@ impl World {
     /// under a budget, and what does not fit waits for the next tick rather than
     /// being dropped or paid for all at once here.
     pub fn tick(&mut self) -> BlockEdit {
-        self.game_time = self.game_time.wrapping_add(1);
-        self.day_time = (self.day_time + 1) % Self::DAY_LENGTH;
+    // The clock runs on without being wrapped, which is what the game does:
+    // the client takes the day itself out of the count when it works out where
+    // the sun is, so wrapping here would send a sky that jumps backwards at
+    // every day's end. `DAY_LENGTH` is the day's length, not the clock's cap.
+    self.game_time = self.game_time.wrapping_add(1);
+    self.day_time = self.day_time.wrapping_add(1);
 
         let mut edit = BlockEdit {
             chunks: Vec::new(),

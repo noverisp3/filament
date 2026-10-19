@@ -29,29 +29,31 @@ fn a_tick_moves_the_clock_on_by_one() {
 }
 
 #[test]
-fn the_sun_wraps_and_the_age_does_not() {
-    // Two numbers answering two questions. A server that kept one of them for
-    // both sends a sky that has been running since the world was made.
+fn the_clock_keeps_counting_with_the_age() {
+    // The game's own clock is a plain count: where the sun is comes out of it
+    // client-side, a day at a time. A server that wrapped the count at day's
+    // end sent a sky that stepped backwards once every twenty minutes, which
+    // is the sort of thing nobody can talk you out of seeing.
     let mut world = test_world();
     for _ in 0..World::DAY_LENGTH {
         world.tick();
     }
     assert_eq!(
         world.day_time(),
-        0,
-        "a full day on brings the sun back to the start"
+        World::DAY_LENGTH,
+        "a day on leaves the clock a day on, not back at dawn"
     );
     assert_eq!(
         world.game_time(),
         World::DAY_LENGTH,
-        "while the world is a day older, not the same age as before"
+        "and the age follows it"
     );
 
     for _ in 0..World::DAY_LENGTH * 2 {
         world.tick();
     }
-    assert_eq!(world.day_time(), 0, "and it wraps again");
-    assert_eq!(world.game_time(), World::DAY_LENGTH * 3, "and keeps counting");
+    assert_eq!(world.day_time(), World::DAY_LENGTH * 3, "and it keeps going");
+    assert_eq!(world.game_time(), World::DAY_LENGTH * 3);
 }
 
 #[test]

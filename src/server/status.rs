@@ -130,9 +130,19 @@ impl StatusServer {
 
         // Waiting here, behind the connections being cut, is what makes the
         // save real rather than raced: shutdown is a command whose body is the
-        // write, answered only once the files are closed.
+        // write, answered only once the files are closed. Whether anything
+        // was saved is a matter of whether a world folder was opened at all:
+        // an empty save reported as a save is a line the next reader trusts
+        // for nothing.
         let ticks = self.world.shutdown();
-        log::note(format!("the world saved, {} ticks run", ticks));
+        if std::env::var_os("FILAMENT_WORLD").is_some() {
+            log::note(format!("the world saved, {} ticks run", ticks));
+        } else {
+            log::note(format!(
+                "nothing saved -- no world folder was opened (FILAMENT_WORLD); {} ticks run",
+                ticks
+            ));
+        }
 
         // The connections are not waited for. A connection thread runs until its
         // client goes away, and there is no way yet to tell one to finish, so
@@ -775,6 +785,15 @@ fn play(
     let mut body = Vec::new();
     if let Some((game_time, day_time)) = session.world.clock() {
         p::write_set_time(&mut body, game_time as i64, day_time as i64);
+        // The number on the log, so a sky a player calls wrong can be checked
+        // against the world's own count rather than argued about: a day is
+        // twenty-four thousand ticks, and the clock runs on unbounded.
+        log.note(format!(
+            "clock sync: age {}, day count {} ({:.1}% through a day)",
+            game_time,
+            day_time,
+            (day_time % 24000) as f64 / 240.0
+        ));
     } else {
         p::write_set_time(&mut body, 0, 0);
     }

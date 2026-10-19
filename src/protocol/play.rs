@@ -115,6 +115,31 @@ pub mod id {
     pub const SET_CHUNK_CACHE_RADIUS: i32 = 97;
 }
 
+/// Steps over the packet id of a serverbound frame and returns what is left.
+///
+/// The frame a decoder is handed still carries its id, because that is what the
+/// wire carries and what `FrameEncoder::encode` wants back. Every serverbound
+/// decoder here has to step over it first, and every one that forgot was wrong in
+/// the same way: the id is a small number, so it parses as a perfectly ordinary
+/// first field, and nothing fails until two or three fields later, where the
+/// complaint is about something that was never wrong.
+///
+/// Three separate decoders made this mistake, so it is written once here rather
+/// than left to be remembered four times. Checking the id as well as stepping
+/// over it means a packet that is not the one being decoded is refused rather
+/// than decoded as if it were.
+pub fn serverbound_body(frame: &[u8], expected: i32) -> Result<&[u8], DecodeError> {
+    let mut body = frame;
+    let (id, _) = VarInt::read(&mut body)?;
+    if id.0 != expected {
+        return Err(DecodeError::UnexpectedEof {
+            wanted: "the expected packet",
+            got: id.0.unsigned_abs() as usize,
+        });
+    }
+    Ok(body)
+}
+
 /// Writes `set_chunk_cache_radius`, telling the client how far the world goes.
 ///
 /// Without it the client is never told how many chunks to hold, and falls back
@@ -472,14 +497,7 @@ pub struct PlayerActionPacket {
 impl PlayerActionPacket {
     /// Decodes a `player_action` frame.
     pub fn read(frame: &[u8]) -> Result<Self, DecodeError> {
-        let mut r: &[u8] = frame;
-        let (id, _) = VarInt::read(&mut r)?;
-        if id.0 != id::SERVERBOUND_PLAYER_ACTION {
-            return Err(DecodeError::UnexpectedEof {
-                wanted: "player_action",
-                got: id.0 as usize,
-            });
-        }
+        let mut r = serverbound_body(frame, id::SERVERBOUND_PLAYER_ACTION)?;
 
         // The action is an enum, which travels as a VarInt.
         let (raw, _) = VarInt::read(&mut r)?;

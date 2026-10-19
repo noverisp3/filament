@@ -1075,3 +1075,77 @@ fn the_round_trip_is_smoothed_rather_than_jumping() {
     );
     assert!(ka.latency_ms() > 0, "and not to nothing, because it is smoothed");
 }
+
+#[test]
+fn a_keep_alive_answer_is_eight_bytes_after_the_packet_id() {
+    // Built from the writer the server actually uses, so this is the bytes the
+    // client was asked to echo and then echoed. Both halves of the frame are
+    // pinned: the id in front, and the eight-byte long behind it.
+    //
+    // This is the second time a serverbound decoder read from byte zero and got
+    // the packet id. 28 is `serverbound_keep_alive`, it is a small ordinary
+    // number, it parsed as an answer, and every connection was dropped a quarter
+    // of a minute after joining for being rude about it.
+    let mut asked = Vec::new();
+    crate::protocol::play::write_keep_alive(&mut asked, 42);
+    assert_eq!(&asked[1..], &42i64.to_be_bytes(), "eight bytes, big endian");
+
+    // The client answers with the same payload under its own id.
+    let mut frame = vec![crate::protocol::play::id::SERVERBOUND_KEEP_ALIVE as u8];
+    frame.extend_from_slice(&asked[1..]);
+
+    let body = crate::protocol::play::serverbound_body(
+        &frame,
+        crate::protocol::play::id::SERVERBOUND_KEEP_ALIVE,
+    )
+    .expect("a keep alive answer");
+    assert_eq!(body.len(), 8, "the id is not part of the answer");
+    let answer = i64::from_be_bytes(body[..8].try_into().expect("eight"));
+    assert_eq!(answer, 42, "and what is left is the challenge itself");
+
+    // Read from byte zero it is not the challenge: it is 28.
+    assert_ne!(i64::from_be_bytes(frame[..8].try_into().unwrap()), 42);
+}
+
+#[test]
+fn a_keep_alive_answer_is_not_read_as_a_varint() {
+    // The game writes it with `writeLong` and reads it with `readLong`, which is
+    // eight fixed bytes. Decoding it as a VarInt takes the first byte and calls
+    // it the whole answer.
+    let mut asked = Vec::new();
+    crate::protocol::play::write_keep_alive(&mut asked, 42);
+    let mut body = &asked[1..];
+
+    let as_long = i64::from_be_bytes(body[..8].try_into().expect("eight"));
+    let (as_varint, _) = crate::protocol::VarLong::read(&mut body).expect("reads");
+    assert_eq!(as_long, 42);
+    assert_ne!(
+        as_varint.0, as_long,
+        "which is why the two encodings must not be confused"
+    );
+}
+
+#[test]
+fn the_body_helper_refuses_a_frame_that_is_something_else() {
+    let mut asked = Vec::new();
+    crate::protocol::play::write_keep_alive(&mut asked, 7);
+    let mut frame = vec![crate::protocol::play::id::SERVERBOUND_KEEP_ALIVE as u8];
+    frame.extend_from_slice(&asked[1..]);
+
+    assert!(
+        crate::protocol::play::serverbound_body(
+            &frame,
+            crate::protocol::play::id::SERVERBOUND_CONTAINER_CLICK
+        )
+        .is_err(),
+        "a keep alive is not a click"
+    );
+    assert!(
+        crate::protocol::play::serverbound_body(
+            &frame,
+            crate::protocol::play::id::SERVERBOUND_KEEP_ALIVE
+        )
+        .is_ok(),
+        "and is itself"
+    );
+}

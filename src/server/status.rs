@@ -1167,13 +1167,32 @@ fn play(
             // place in the player list until the operating system notices, which
             // on Windows is measured in hours.
             if id == p::id::SERVERBOUND_KEEP_ALIVE {
-                let mut body = &frame[..];
-                let (answer, _) = crate::protocol::VarLong::read(&mut body)
+                // Step over the packet id first. It is not optional: the frame
+                // still carries it, and it is a small number that parses as a
+                // perfectly ordinary answer, so reading from byte zero means
+                // every keep alive looks like a client echoing back the id
+                // instead of the challenge -- and every connection is dropped
+                // for being rude about it.
+                //
+                // The payload is a plain long, not a VarInt. The game writes it
+                // with `output.writeLong(id)` and reads it with `readLong()`,
+                // which is eight bytes big-endian; treating it as a VarInt
+                // decodes the first byte and calls it an answer.
+                let body = p::serverbound_body(&frame, p::id::SERVERBOUND_KEEP_ALIVE)
                     .map_err(|e| io_err(FrameError::Decode(e)))?;
+                if body.len() < 8 {
+                    return Err(io_err(FrameError::Decode(
+                        crate::protocol::DecodeError::UnexpectedEof {
+                            wanted: "a keep alive answer",
+                            got: body.len(),
+                        },
+                    )));
+                }
+                let answer = i64::from_be_bytes(body[..8].try_into().expect("eight"));
                 let since = last_keep_alive.elapsed();
-                if !keep_alive.answered(answer.0, since) {
+                if !keep_alive.answered(answer, since) {
                     log.note(format!(
-                        "answered keep alive {answer:?} which was never asked for; \
+                        "answered keep alive {answer} which was never asked for; \
                          the connection is not one we are having a conversation with"
                     ));
                     return Ok(());

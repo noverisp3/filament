@@ -55,6 +55,59 @@ fn a_single_value_still_takes_the_zero_bit_path() {
 }
 
 #[test]
+fn seventeen_states_widen_to_five_bits() {
+    // A section of a real world holds more than sixteen kinds of block, and
+    // the four-bit linear palette holds exactly sixteen entries. The game's
+    // own answer at seventeen is the five-bit hashmap palette; writing four
+    // bits here was a LinearPalette crash on the second player to join.
+    let mut states = vec![0i32; BLOCK_ENTRIES];
+    for (at, state) in states.iter_mut().enumerate() {
+        *state = (at % 17) as i32;
+    }
+
+    let mut w = Vec::new();
+    write_block_states(&mut w, &states);
+
+    assert_eq!(w[0], 5, "five bits once the palette passes sixteen entries");
+    let (len, used) = VarInt::read(&mut &w[1..]).expect("a palette length");
+    assert_eq!(len.0, 17);
+    // Every id here is a one-byte VarInt, then the data with no count in
+    // front: the reader sizes it from the width and the section's entries.
+    let data_start = 1 + used + 17;
+    let first_long = u64::from_be_bytes(w[data_start..data_start + 8].try_into().unwrap());
+    assert_eq!(first_long & 0x1f, 0, "states[0] is palette index zero");
+    // 4096 entries at five bits: twelve to a long, 342 longs and four spare bits.
+    assert_eq!(w.len(), data_start + 342 * 8);
+}
+
+#[test]
+fn past_two_hundred_fifty_six_the_palette_is_global() {
+    // The hashmap palette stops at eight bits. Past that the container keeps
+    // no list at all and the packed entries are registry ids; the reader's
+    // GlobalPalette.read is empty, so there is no length to skip either.
+    let mut states = vec![0i32; BLOCK_ENTRIES];
+    for (at, state) in states.iter_mut().enumerate() {
+        *state = (at % 300) as i32;
+    }
+
+    let mut w = Vec::new();
+    write_block_states(&mut w, &states);
+
+    assert_eq!(w[0], GLOBAL_BITS as u8, "sixteen bits, the registry's own width");
+    // Nothing between the width and the data: no palette length, no long
+    // count, both derived by the reader.
+    let first_long = u64::from_be_bytes(w[1..9].try_into().unwrap());
+    assert_eq!(first_long & 0xffff, 0, "states[0] is state id zero");
+
+    let per_long = 64 / GLOBAL_BITS;
+    assert_eq!(
+        w.len(),
+        1 + BLOCK_ENTRIES.div_ceil(per_long) * 8,
+        "4096 entries at sixteen bits is 1024 longs"
+    );
+}
+
+#[test]
 fn the_packed_data_holds_palette_indices_not_state_ids() {
     let mut states = vec![0i32; BLOCK_ENTRIES];
     states[0] = 1;

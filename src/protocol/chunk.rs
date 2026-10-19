@@ -231,6 +231,23 @@ fn write_single_value_palette(out: &mut Vec<u8>, value: i32) {
 /// reader derives the layout from this byte rather than from the palette.
 pub const BLOCK_BITS: usize = 4;
 
+/// Past this many entries the palette stops growing and the container goes
+/// global: `getConfigurationForBitCount` maps anything above eight bits onto
+/// the global palette, whose width is set by the registry, not the section.
+pub const GLOBAL_BITS_THRESHOLD: usize = 8;
+
+/// The global palette's width: ceil(log2(block states in the registry)).
+///
+/// Thirty-five thousand seven hundred and twenty-three states need sixteen
+/// bits. With no palette list to name, the packed entries are state ids
+/// themselves.
+pub const GLOBAL_BITS: usize = 16;
+
+/// ceil(log2(n)) for n >= 1, the game's `Mth.ceillog2`.
+fn ceil_log2(n: usize) -> usize {
+    (usize::BITS - (n - 1).leading_zeros()) as usize
+}
+
 /// Entries in a block state container: one section.
 pub const BLOCK_ENTRIES: usize = SECTION_VOLUME;
 
@@ -253,14 +270,14 @@ fn write_block_states(out: &mut Vec<u8>, states: &[i32]) {
     // The palette, in order of first appearance so the same terrain always
     // produces the same bytes.
     let mut palette: Vec<i32> = Vec::new();
-    let mut indices: Vec<u8> = Vec::with_capacity(BLOCK_ENTRIES);
+    let mut indices: Vec<usize> = Vec::with_capacity(BLOCK_ENTRIES);
 
     for state in states {
         match palette.iter().position(|p| p == state) {
-            Some(at) => indices.push(at as u8),
+            Some(at) => indices.push(at),
             None => {
                 palette.push(*state);
-                indices.push((palette.len() - 1) as u8);
+                indices.push(palette.len() - 1);
             }
         }
     }
@@ -270,30 +287,59 @@ fn write_block_states(out: &mut Vec<u8>, states: &[i32]) {
         return;
     }
 
-    out.push(BLOCK_BITS as u8);
+    // The width the game's own `Strategy.getConfigurationForBitCount` picks
+    // for this many entries. One through sixteen share the four-bit linear
+    // palette; seventeen to two hundred and fifty-six grow a hashmap palette
+    // one bit at a time; past that the palette is dropped entirely and the
+    // entries are global state ids. Writing one width while packing another
+    // is the LinearPalette crash a second player's chunk produced: a real
+    // world has more than sixteen kinds of block in one section, and the
+    // four-bit index wrapped into the neighbouring entry.
+    let bits = if palette.len() <= 16 {
+        BLOCK_BITS
+    } else if palette.len() <= 1 << GLOBAL_BITS_THRESHOLD {
+        ceil_log2(palette.len())
+    } else {
+        GLOBAL_BITS
+    };
 
-    VarInt(palette.len() as i32).write(out);
-    for state in &palette {
-        VarInt(*state).write(out);
+    out.push(bits as u8);
+
+    // A global palette carries no list: the reader's `GlobalPalette.read` is
+    // empty, and the packed entries are registry ids rather than palette
+    // indices.
+    if bits < GLOBAL_BITS {
+        VarInt(palette.len() as i32).write(out);
+        for state in &palette {
+            VarInt(*state).write(out);
+        }
     }
 
-    // Sixteen entries to a long at four bits, and 4096 entries is 256 longs.
-    let per_long = 64 / BLOCK_BITS;
+    let per_long = 64 / bits;
     let longs = BLOCK_ENTRIES.div_ceil(per_long);
     let mut packed = vec![0u64; longs];
 
-    for (entry, index) in indices.iter().enumerate() {
+    // `SimpleBitStorage` never lets an entry straddle a long: each long holds
+    // `64 / bits` whole entries and the leftover bits go unused. The source is
+    // a palette index or, with no palette, the global state id itself.
+    let source: Vec<u64> = if bits < GLOBAL_BITS {
+        indices.iter().map(|index| *index as u64).collect()
+    } else {
+        states.iter().map(|state| *state as u64).collect()
+    };
+    for (entry, value) in source.iter().enumerate() {
         let long = entry / per_long;
-        let shift = (entry % per_long) * BLOCK_BITS;
-        packed[long] |= (*index as u64) << shift;
+        let shift = (entry % per_long) * bits;
+        packed[long] |= value << shift;
     }
 
-    for value in packed {
+    // No length in front: the reader sizes the array from the width it just
+    // read and the entries it knows the section holds, so a count here is
+    // eight bytes of noise the first long would be read as.
+    for value in &packed {
         out.extend_from_slice(&value.to_be_bytes());
     }
-}
-
-/// Block entities: none.
+}/// Block entities: none.
 fn write_block_entities(out: &mut Vec<u8>) {
     VarInt(0).write(out);
 }

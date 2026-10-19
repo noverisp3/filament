@@ -40,6 +40,7 @@ pub mod nbt;
 pub mod palette;
 pub mod pos;
 pub mod raycast;
+pub mod region;
 pub mod section;
 pub mod ticks;
 pub mod terrain;

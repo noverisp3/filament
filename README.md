@@ -31,6 +31,8 @@ installed.
 filament                # 0.0.0.0:25565, every interface
 filament --verbose      # and log every packet
 filament --addr 127.0.0.1:25565   # only this machine
+
+FILAMENT_WORLD=/path/to/world      # load and save a real world folder
 ```
 
 Every interface by default, with the address printed:
@@ -122,9 +124,10 @@ Grouped by what they are about, not by when they were done.
 
 ### Not yet
 
-- [ ] Persistence to disk. Edits survive a chunk being dropped and a player
-      rejoining; they do not survive a restart, and that is the one a player
-      notices.
+- [x] Persistence to disk. A world folder (`FILAMENT_WORLD`) is opened on
+      startup; edits and generated chunks are written back on shutdown, and a
+      restarted server continues from where it stopped. Only changed chunks are
+      saved.
 - [ ] Lighting. `world/lighting.rs` exists and has tests; nothing calls it yet,
       so the server sends blocks without relighting after an edit.
 - [ ] Mobs, item drops, water, weather
@@ -134,7 +137,7 @@ Grouped by what they are about, not by when they were done.
       the client authoritative for *arrangement*.
 - [ ] Authentication
 
-795 tests. A client connects, negotiates, and gets a world of generated terrain:
+866 tests. A client connects, negotiates, and gets a world of generated terrain:
 grass on top, dirt under it, stone below, hills from two octaves of value noise.
 A second client joins the same world and sees the first one walk about, break and
 place blocks, and have the change appear on both screens at once.

@@ -193,6 +193,15 @@ const MAX_COORD: f64 = 3.0e7;
 /// client replaces it with the rate it wants after the first batch.
 const DEFAULT_CHUNKS_PER_TICK: f32 = 9.0;
 
+/// The player's health, in half-hearts, and the hunger beside it.
+///
+/// Twenty of each, which is what a player starts with: the game gives a new
+/// player a full bar of food and full health, and a hunger bar that starts
+/// full.
+const MAX_HEALTH: f32 = 20.0;
+const MAX_FOOD: i32 = 20;
+const MAX_SATURATION: f32 = 5.0;
+
 /// Answers one connection's handshake and status exchange.
 ///
 /// Deliberately does not implement login: the point here is to be visible in
@@ -868,7 +877,18 @@ fn play(
     );
     send(&mut out, &body, "set_default_spawn_position", &log)?;
 
-    // 8. How far the world goes, then where it is centred. Until the radius
+    // 8. The hearts and the hunger beside them, and the experience. The game
+    //    sends both on arrival, so the numbers on the screen are the server's
+    //    answer rather than the client's own guess at twenty.
+    let mut body = Vec::new();
+    p::write_set_health(&mut body, MAX_HEALTH, MAX_FOOD, MAX_SATURATION);
+    send(&mut out, &body, "set_health", &log)?;
+
+    let mut body = Vec::new();
+    p::write_set_experience(&mut body, 0.0, 0, 0);
+    send(&mut out, &body, "set_experience", &log)?;
+
+    // 9. How far the world goes, then where it is centred. Until the radius
     //    arrives the client is guessing, and until the centre arrives it has
     //    nowhere to ask for chunks.
     let mut body = Vec::new();

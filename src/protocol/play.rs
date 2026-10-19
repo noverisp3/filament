@@ -85,6 +85,13 @@ pub mod id {
 
     // The clientbound packet that tells the client one block changed.
     pub const BLOCK_UPDATE: i32 = 8;
+    // The player's health, and the hunger beside it. The game sends this on
+    // arrival, so the hearts are the server's answer rather than the
+    // client's own guess.
+    pub const SET_HEALTH: i32 = 106;
+    // The same for experience: how far into the level, the level, and the
+    // total.
+    pub const SET_EXPERIENCE: i32 = 105;
     // And that this one is settled, not a guess.
     //
     // Clientbound only: there is no serverbound one, so the server opens this
@@ -633,6 +640,20 @@ pub fn write_system_chat(out: &mut Vec<u8>, text: &str) {
     VarInt(id::SYSTEM_CHAT).write(out);
     crate::world::nbt::write_string_tag(out, text);
     out.push(0);
+}
+
+pub fn write_set_health(out: &mut Vec<u8>, health: f32, food: i32, saturation: f32) {
+    VarInt(id::SET_HEALTH).write(out);
+    out.extend_from_slice(&health.to_be_bytes());
+    VarInt(food).write(out);
+    out.extend_from_slice(&saturation.to_be_bytes());
+}
+
+pub fn write_set_experience(out: &mut Vec<u8>, progress: f32, level: i32, total: i32) {
+    VarInt(id::SET_EXPERIENCE).write(out);
+    out.extend_from_slice(&progress.to_be_bytes());
+    VarInt(level).write(out);
+    VarInt(total).write(out);
 }
 
 pub fn write_player_position(out: &mut Vec<u8>, teleport_id: i32, move_to: &Movement) {

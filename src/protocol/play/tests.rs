@@ -56,6 +56,42 @@ fn a_line_of_chat_is_a_tag_and_a_byte() {
 }
 
 #[test]
+fn the_hearts_are_a_float_a_number_and_a_float() {
+    // The order is the game's: health, then food, then saturation. Reading it
+    // in another order puts the hunger bar at half a heart.
+    let mut body = Vec::new();
+    write_set_health(&mut body, 20.0, 20, 5.0);
+
+    let mut r = &body[..];
+    let (VarInt(packet), _) = VarInt::read(&mut r).expect("a packet id");
+    assert_eq!(packet, id::SET_HEALTH);
+    assert_eq!(f32::from_be_bytes(r[..4].try_into().unwrap()), 20.0);
+    r = &r[4..];
+    let (VarInt(food), _) = VarInt::read(&mut r).expect("the food");
+    assert_eq!(food, 20);
+    assert_eq!(f32::from_be_bytes(r[..4].try_into().unwrap()), 5.0);
+    assert_eq!(r.len(), 4, "and nothing after the saturation");
+}
+
+#[test]
+fn the_experience_is_progress_level_and_total() {
+    // The game writes the progress, then the level, then the total, even
+    // though it reads them back in the other order.
+    let mut body = Vec::new();
+    write_set_experience(&mut body, 0.5, 3, 120);
+
+    let mut r = &body[..];
+    let (VarInt(packet), _) = VarInt::read(&mut r).expect("a packet id");
+    assert_eq!(packet, id::SET_EXPERIENCE);
+    assert_eq!(f32::from_be_bytes(r[..4].try_into().unwrap()), 0.5);
+    r = &r[4..];
+    let (VarInt(level), _) = VarInt::read(&mut r).expect("the level");
+    assert_eq!(level, 3);
+    let (VarInt(total), _) = VarInt::read(&mut r).expect("the total");
+    assert_eq!(total, 120);
+}
+
+#[test]
 fn an_angle_is_a_two_hundred_and_fifty_sixth_of_a_turn() {    assert_eq!(angle_byte(0.0), 0);
     assert_eq!(angle_byte(90.0), 64);
     assert_eq!(angle_byte(180.0), 128);

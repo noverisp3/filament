@@ -2373,6 +2373,13 @@ fn place_block(
             Err(e)
                 if e.kind() == std::io::ErrorKind::WouldBlock
                     || e.kind() == std::io::ErrorKind::TimedOut => {}
+            // Windows reports the read that the timeout cancelled as
+            // "overlapped I/O operation is in progress". It is not a failure
+            // of the connection: it is the leftover of the read that was
+            // waiting when the deadline passed, and the next one waits
+            // properly. Treated as an error it ends a connection that was
+            // perfectly alive.
+            Err(e) if e.raw_os_error() == Some(997) => {}
             Err(e) => return Err(e),
         }
     }

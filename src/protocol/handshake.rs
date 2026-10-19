@@ -142,6 +142,10 @@ pub struct ServerStatus {
     /// Shown as `N / max` in the browser.
     pub online: u32,
     pub max: u32,
+    /// Who is on, shown when the browser list is hovered. Empty sends no
+    /// `sample` field at all rather than an empty list, which the client
+    /// renders as a server that forgot to say.
+    pub sample: Vec<(String, String)>,
     /// The name in the browser, e.g. `filament 26.3`.
     pub version_name: String,
     pub protocol_version: i32,
@@ -157,14 +161,34 @@ impl ServerStatus {
     /// newline cannot produce invalid JSON, which the client treats as a broken
     /// server rather than as a broken description.
     pub fn to_json(&self) -> String {
+        // The player list, if there is anyone to name. Written as a fragment
+        // so the shape without one stays exactly what it was.
+        let sample = if self.sample.is_empty() {
+            String::new()
+        } else {
+            let entries: Vec<String> = self
+                .sample
+                .iter()
+                .map(|(name, uuid)| {
+                    format!(
+                        r#"{{"name":{},"id":{}}}"#,
+                        json_escape(name),
+                        json_escape(uuid)
+                    )
+                })
+                .collect();
+            format!(r#","sample":[{}]"#, entries.join(","))
+        };
+
         format!(
             r#"{{"version":{{"name":{},"protocol":{}}},
-"players":{{"max":{},"online":{}}},
+"players":{{"max":{},"online":{}{}}},
 "description":{{"text":{}}}}}"#,
             json_escape(&self.version_name),
             self.protocol_version,
             self.max,
             self.online,
+            sample,
             json_escape(&self.description),
         )
     }
@@ -246,6 +270,7 @@ pub fn status(
         protocol_version,
         online,
         max,
+        sample: Vec::new(),
     }
 }
 

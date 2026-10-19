@@ -86,7 +86,17 @@ impl StatusServer {
                     }
 
                     let id = next_connection_id();
-                    let status = self.status.clone();
+                    // The status is built per connection, not once at startup,
+                    // because the two numbers a browser shows -- how many and
+                    // who -- are both things that change while the server runs.
+                    let mut status = self.status.clone();
+                    status.online = self.wire.player_count() as u32;
+                    status.sample = self
+                        .wire
+                        .snapshot()
+                        .into_iter()
+                        .map(|p| (p.name, uuid_undashed(&p.uuid)))
+                        .collect();
                     let session = Session {
                         world: Arc::new(self.world.clone()),
                         wire: self.wire.clone(),
@@ -2663,6 +2673,15 @@ fn dist_squared(ax: f64, ay: f64, az: f64, bx: f64, by: f64, bz: f64) -> f64 {
     let dy = by - ay;
     let dz = bz - az;
     dx * dx + dy * dy + dz * dz
+}
+
+/// A UUID as the status sample spells it: thirty-two hex digits, no dashes.
+fn uuid_undashed(bytes: &[u8; 16]) -> String {
+    let mut out = String::with_capacity(32);
+    for b in bytes {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
 }
 
 fn reach_to(player: &crate::protocol::play::Movement, block: crate::world::pos::BlockPos) -> f64 {

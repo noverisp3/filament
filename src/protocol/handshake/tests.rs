@@ -79,6 +79,20 @@ fn the_status_json_has_the_fields_the_client_reads() {
     assert!(json.contains(r#""online":0"#));
     assert!(json.contains(r#""text":"filament""#));
     assert!(json.contains(r#""name":"filament 26.3""#));
+
+    // Nobody on: no sample field at all, which the client reads as a list
+    // it does not need to draw.
+    assert!(!json.contains("sample"));
+}
+
+#[test]
+fn the_sample_names_who_is_on() {
+    let mut s = status("filament", "filament 26.3", 777, 1, 20);
+    s.sample
+        .push(("noverisp3".to_string(), "7bb8500454b03d8692341f2e09c8fe2a".to_string()));
+    let json = s.to_json();
+
+    assert!(json.contains(r#""sample":[{"name":"noverisp3","id":"7bb8500454b03d8692341f2e09c8fe2a"}]"#));
 }
 
 #[test]

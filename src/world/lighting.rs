@@ -36,12 +36,25 @@ impl World {
     /// Draining in level order is what makes this correct rather than merely
     /// usually right. A plain queue would visit a dim cell first, find nothing
     /// better, and never revisit it once a brighter path arrived.
-    pub fn compute_light(&mut self) {
+    ///
+    /// The sections whose light moved are returned, and are also recorded so
+    /// that a client is told about them: the client keeps the light it was
+    /// given with a chunk, so a world whose light moved and was never
+    /// announced is a world the client sees wrongly.
+    pub fn compute_light(&mut self) -> Vec<SectionPos> {
         let mut grid = Grid::new(self.chunk_positions());
         grid.fill_opacity(self);
         grid.fall_sunlight();
         grid.spread_sideways();
-        grid.write_back(self);
+        let dirty = grid.write_back(self);
+        self.light_changes.extend(dirty.iter().copied());
+        self.light_stale = false;
+        dirty
+    }
+
+    /// Whether the light of the world is out of date.
+    pub fn light_is_stale(&self) -> bool {
+        self.light_stale
     }
 
     /// Sky light at a world position, or 0 outside the loaded world.
@@ -59,12 +72,36 @@ impl World {
             .map_or(0, |chunk| chunk.block_light(pos))
     }
 
+    /// The sideways spread of the light around a chunk that has just arrived.
+    ///
+    /// The columns are right the moment a chunk arrives, and the sideways
+    /// spread is not: light that comes in from a lit column next door needs
+    /// somewhere to come in to. This is the game working it out when a chunk
+    /// is loaded, which is the same thing done with a bigger region.
+    ///
+    /// The region is the chunk plus the reach on each side, so light can
+    /// arrive from a neighbour that is already lit, and the chunk's own cells
+    /// are the ones written back.
+    pub fn spread_chunk(&mut self, pos: ChunkPos) {
+        // The middle of the chunk, and a reach that covers the chunk itself
+        // and a lit neighbour's worth of ground around it.
+        let center = super::pos::BlockPos::new(
+            pos.x * SECTION_DIM + SECTION_DIM / 2,
+            0,
+            pos.z * SECTION_DIM + SECTION_DIM / 2,
+        );
+        let half_chunk = SECTION_DIM / 2;
+        let mut region = Region::around_with_reach(self, center, half_chunk + LIGHT_REACH);
+        region.recompute();
+        region.write_back(self);
+    }
+
     /// Recomputes sky light around one edit and reports which sections moved.
     ///
     /// Called after every block change, because the mesher reads light per
     /// vertex: without it a dug hole keeps the shading of solid rock and shows
     /// up as a black pit with no sun in it.
-    pub(crate) fn relight_around(&mut self, center: super::pos::BlockPos) -> Vec<SectionPos> {
+    pub fn relight_around(&mut self, center: super::pos::BlockPos) -> Vec<SectionPos> {
         let mut region = Region::around(self, center);
         region.recompute();
         region.write_back(self)
@@ -340,7 +377,11 @@ impl Grid {
     }
 
     /// Copies the computed light back into each chunk's sections.
-    fn write_back(&self, world: &mut World) {
+    ///
+    /// The sections whose light moved are returned, because a client that was
+    /// told the old light is holding a world that no longer exists.
+    fn write_back(&self, world: &mut World) -> Vec<SectionPos> {
+        let mut dirty: Vec<SectionPos> = Vec::new();
         for pos in world.chunk_positions() {
             let base_x = (pos.x * SECTION_DIM - self.origin_x) as usize;
             let base_z = (pos.z * SECTION_DIM - self.origin_z) as usize;
@@ -352,21 +393,32 @@ impl Grid {
             for slot in 0..SECTIONS_PER_CHUNK {
                 let section_pos = SectionPos::new(pos.x, MIN_SECTION + slot as i32, pos.z);
                 let base_y = (section_pos.y * SECTION_DIM - MIN_BLOCK_Y) as usize;
+                let mut section_dirty = false;
 
                 for local_y in 0..SECTION_DIM as usize {
                     for local_z in 0..SECTION_DIM as usize {
                         let row = self.index(base_x, base_y + local_y, base_z + local_z);
                         for local_x in 0..SECTION_DIM as usize {
-                            chunk.sky_light_mut(
-                                section_pos,
-                                LocalPos::from_array([local_x as u8, local_y as u8, local_z as u8]),
-                                self.sky[row + local_x],
-                            );
+                            let value = self.sky[row + local_x];
+                            let local = LocalPos::from_array([
+                                local_x as u8,
+                                local_y as u8,
+                                local_z as u8,
+                            ]);
+                            if chunk.sky_light_in(section_pos, local) != value {
+                                chunk.sky_light_mut(section_pos, local, value);
+                                section_dirty = true;
+                            }
                         }
                     }
                 }
+
+                if section_dirty && !dirty.contains(&section_pos) {
+                    dirty.push(section_pos);
+                }
             }
         }
+        dirty
     }
 }
 
@@ -403,10 +455,21 @@ struct Region {
 }
 
 impl Region {
+    /// A region around one cell, reaching as far as light can.
     fn around(world: &World, center: BlockPos) -> Self {
+        Self::around_with_reach(world, center, LIGHT_REACH)
+    }
+
+    /// A region around one cell, reaching `reach` blocks in each direction.
+    ///
+    /// The reach is how far light can travel, so a cell further away than that
+    /// cannot be connected to the centre by any light path and its value cannot
+    /// have changed. The extra ring of cells keeps the value it already had and
+    /// only serves as a source for light spreading inwards.
+    fn around_with_reach(world: &World, center: BlockPos, reach: i32) -> Self {
         // One wider than the reach on each side, so the edited cell is never in
         // the margin.
-        let half = LIGHT_REACH + 1;
+        let half = reach + 1;
         let width = (2 * half + 1) as usize;
         let depth = (2 * half + 1) as usize;
         let height = WORLD_HEIGHT as usize;

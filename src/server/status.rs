@@ -1002,6 +1002,35 @@ fn play(
 
     flush_buffer(stream, &mut out)?;
 
+    // The light of the world, worked out now that the ground is all here.
+    //
+    // The chunks above carry the light of their own columns, which is the sun
+    // coming straight down and is right above the ground and under it. What it
+    // does not have is the light that comes in sideways from a lit column next
+    // door, which is what a cave mouth looks like. The game works that out
+    // with a light engine and a queue of updates; here it is one pass over the
+    // world, which is the same answer for a world nobody is editing while it
+    // happens.
+    session.world.recompute_light();
+    let light = session.world.light_changes();
+    if !light.is_empty() {
+        let mut by_chunk: BTreeMap<(i32, i32), ChunkLight> = BTreeMap::new();
+        for (chunk_x, chunk_z, index, bytes) in light {
+            by_chunk
+                .entry((chunk_x, chunk_z))
+                .or_default()
+                .push((index, bytes));
+        }
+        for ((chunk_x, chunk_z), mut sections) in by_chunk {
+            sections.sort_by_key(|(index, _)| *index);
+            let mut body = Vec::new();
+            crate::protocol::chunk::write_light_update(&mut body, chunk_x, chunk_z, &sections);
+            let mut wire = Vec::new();
+            enc.encode(&body, &mut wire).map_err(io_err)?;
+            session.wire.send_all(wire);
+        }
+    }
+
     // Emptied by `flush_buffer` above, and that is the whole of a fault that
     // took a long time to find. Without it, the second write below -- the one
     // that puts the introductions on the wire, added after the chunk batch --

@@ -69,6 +69,26 @@ fn a_chunk_works_out_its_own_light_when_it_arrives() {
 }
 
 #[test]
+fn the_world_says_when_its_light_is_out_of_date() {
+    // A chunk that arrives brings its own columns but not the light that
+    // comes in sideways, so the world as a whole is out of date until it is
+    // worked out again. Saying so is what keeps the work to once rather
+    // than once per player.
+    let mut world = World::generate(1);
+    world.compute_light();
+    assert!(
+        !world.light_is_stale(),
+        "a world whose light has just been worked out is not out of date"
+    );
+
+    world.ensure_chunk(ChunkPos::new(4, 4));
+    assert!(
+        world.light_is_stale(),
+        "and a chunk arriving makes it so again"
+    );
+}
+
+#[test]
 fn light_is_continuous_across_a_chunk_border() {
     let mut world = World::generate(1);
     world.compute_light();

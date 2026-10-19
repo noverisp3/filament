@@ -109,7 +109,15 @@ pub struct World {
     /// The client keeps the light it was given with the chunk, so a hole dug
     /// in a lit room is still lit on the client's screen until somebody tells
     /// it otherwise. This is what tells it.
-    light_changes: Vec<SectionPos>,
+    pub(crate) light_changes: Vec<SectionPos>,
+
+    /// Whether the light of the world is out of date.
+    ///
+    /// A chunk that arrives brings its own columns but not the light that
+    /// comes in sideways, so the world as a whole is out of date until it is
+    /// worked out again. This is what says so, so that the work is done once
+    /// rather than once per player.
+    pub(crate) light_stale: bool,
 
     /// Where the world came from and will go back to. None means memory only.
     store: Option<std::sync::Arc<super::storage::WorldStore>>,
@@ -159,6 +167,7 @@ impl Clone for World {
             ticks: self.ticks.clone(),
             tick_changes: Vec::new(),
             light_changes: Vec::new(),
+            light_stale: false,
             // A clone has no folder of its own; sharing one would mean two
             // worlds writing the same region files.
             store: None,
@@ -196,6 +205,7 @@ impl World {
         ticks: crate::world::ticks::BlockTicks::new(),
         tick_changes: Vec::new(),
         light_changes: Vec::new(),
+        light_stale: false,
         store: store.map(std::sync::Arc::new),
         spawn: (0, 64, 0),
     };
@@ -566,6 +576,9 @@ impl World {
         // the file: the game does not keep it either, because the light of a
         // chunk depends on the chunks around it.
         self.light_chunk_columns(pos);
+        // And the light of the world as a whole is now out of date, because
+        // this chunk's light has not been spread into its neighbours yet.
+        self.light_stale = true;
 
         // And the light around those edits has to be computed again. The
         // chunk came from the noise, which does not know a hole was dug in it,
@@ -625,6 +638,7 @@ impl World {
             ticks: crate::world::ticks::BlockTicks::new(),
             tick_changes: Vec::new(),
             light_changes: Vec::new(),
+            light_stale: false,
             spawn: (0, 64, 0),
         };
 

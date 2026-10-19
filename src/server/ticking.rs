@@ -124,6 +124,12 @@ pub enum Command {
     SpawnPoint { reply: Sender<(i32, i32, i32)> },
     /// The light of the sections that moved, so a client can be told.
     LightChanges { reply: Sender<LightChanges> },
+    /// Works the light of the whole loaded world out again.
+    ///
+    /// The game's light engine does this with queues and a light update task
+    /// per chunk; this does it in one pass, which is the same answer for a
+    /// world that is not being edited while it happens.
+    RecomputeLight,
     /// What the world changed on its own since anyone last asked.
     ///
     /// A tick runs on the world thread with no connection to look out of, so
@@ -308,6 +314,11 @@ impl WorldHandle {
     /// The light of the sections that moved since anyone last looked.
     pub fn light_changes(&self) -> LightChanges {
         self.ask(|reply| Command::LightChanges { reply }).unwrap_or_default()
+    }
+
+    /// Works the light of the whole loaded world out again.
+    pub fn recompute_light(&self) {
+        let _ = self.to_world.send(Command::RecomputeLight);
     }
 
     /// What the world has changed by itself since this was last asked.
@@ -731,6 +742,15 @@ Command::Chunk { pos, reply } => {
                 out.push((section.chunk_pos().x, section.chunk_pos().z, index, bytes));
             }
             let _ = reply.send(out);
+        }
+
+        Command::RecomputeLight => {
+            // Only when the world is actually out of date. A second player
+            // joining does not make the light any older, and the work is not
+            // cheap.
+            if world.light_is_stale() {
+                world.compute_light();
+            }
         }
 
         Command::TickChanges { reply } => {

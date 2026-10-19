@@ -903,11 +903,27 @@ pub fn write_add_entity(
     // The delta, which is zero, which is one byte.
     out.push(0);
 
-    // Three angles and not four, which is the easy mistake: there is no head
-    // pitch. Upstream reads xRot, yRot and yHeadRot, and that is the whole
-    // list. A fourth byte is one byte too many on every entity ever spawned.
-    out.push(angle_byte(yaw));
+    // Three angles, and pitch *before* yaw. The order is the packet.
+    //
+    // ```java
+    // output.writeByte(this.xRot);
+    // output.writeByte(this.yRot);
+    // output.writeByte(this.yHeadRot);
+    // ```
+    //
+    // There is no head *pitch*: three angles and not four, and a fourth byte is
+    // one too many on every entity ever spawned. But the first two are pitch
+    // then yaw, and writing them the other way round leaves a body that faces
+    // wherever it happened to be looking and looks wherever it happened to be
+    // facing.
+    //
+    // It shows on another player's screen only, and only until they move: the
+    // movement packet has the pair the right way round, so one step from the
+    // other player fixes what the spawn got wrong. That is why it survived a
+    // read-back test -- the reader in that test skipped all three angles
+    // without reading them.
     out.push(angle_byte(pitch));
+    out.push(angle_byte(yaw));
     out.push(angle_byte(yaw));
 
     // The data value: zero for a player, one for living things generally.

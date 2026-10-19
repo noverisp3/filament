@@ -272,12 +272,18 @@ fn a_name_is_measured_in_bytes_and_not_in_characters() {
 
 /// Decodes an `add_entity` the way the game does, and reports whether it
 /// landed exactly at the end.
+/// Reads it the way the client does, and returns where it stopped along with the
+/// three angles under the names the client gives them.
 ///
 /// The same reasoning as the tab list: a writer can be well formed and
 /// wrong, and only running the reader agrees with the client. This one is
 /// here because a delta written as a packed long is eight bytes too long,
 /// and the client says so by name.
-fn decode_add_entity_as_client(body: &[u8]) -> usize {
+///
+/// The angles come back rather than being skipped. A read-back test that steps
+/// over them proves there are three of them and says nothing about which is
+/// which, which is exactly how a pair written the wrong way round passes.
+fn decode_add_entity_as_client(body: &[u8]) -> (usize, (u8, u8, u8)) {
     let mut b = body;
     assert_eq!(take_varint(&mut b), id::ADD_ENTITY);
     let _entity_id = take_varint(&mut b);
@@ -302,11 +308,17 @@ fn decode_add_entity_as_client(body: &[u8]) -> usize {
         // A partial scale follows, and this writer never produces one.
     }
 
+    // The three angles, read by name and in the game's order. Skipping them
+    // without reading them is what let the first two be written the wrong way
+    // round for as long as this test existed.
     assert!(b.len() >= 3, "three angles were expected");
+    let x_rot = b[0];
+    let y_rot = b[1];
+    let y_head_rot = b[2];
     b = &b[3..];
 
     let _data = take_varint(&mut b);
-    body.len() - b.len()
+    (body.len() - b.len(), (x_rot, y_rot, y_head_rot))
 }
 
 #[test]
@@ -321,12 +333,56 @@ fn the_client_reads_add_entity_and_lands_exactly_at_the_end() {
         90.0,
         0.0,
     );
-    let read = decode_add_entity_as_client(&body);
+    let (read, _) = decode_add_entity_as_client(&body);
     assert_eq!(
         read,
         body.len(),
         "the reader stopped {read} bytes in, or the packet is {} bytes too long",
         body.len() - read
+    );
+}
+
+#[test]
+fn add_entity_puts_the_pitch_where_the_pitch_goes() {
+    // The symptom, which is what made this worth fixing: another player arrives
+    // facing wherever the server thought they were looking, with their head
+    // stuck at whatever a fresh head defaults to, and the whole thing corrects
+    // itself the moment they move. One step fixes it because the movement packet
+    // has the pair the right way round and this one did not.
+    //
+    // Two different angles, chosen so that swapping them cannot go unnoticed.
+    let mut body = Vec::new();
+    write_add_entity(
+        &mut body,
+        7,
+        [9u8; 16],
+        PLAYER_ENTITY_TYPE,
+        (0.0, 64.0, 0.0),
+        90.0,  // facing east
+        45.0,  // looking forty-five degrees down
+    );
+    let (read, (x_rot, y_rot, y_head_rot)) = decode_add_entity_as_client(&body);
+    assert_eq!(read, body.len(), "and the packet is still well formed");
+
+    let unpack = |b: u8| (b as f32 / 256.0) * 360.0;
+    assert!(
+        (unpack(x_rot) - 45.0).abs() < 2.25,
+        "xRot is the pitch: got {}, wanted 45",
+        unpack(x_rot)
+    );
+    assert!(
+        (unpack(y_rot) - 90.0).abs() < 2.25,
+        "yRot is the yaw: got {}, wanted 90",
+        unpack(y_rot)
+    );
+    assert!(
+        (unpack(y_head_rot) - 90.0).abs() < 2.25,
+        "and the head follows the body: got {}",
+        unpack(y_head_rot)
+    );
+    assert_ne!(
+        x_rot, y_rot,
+        "the two are different, so a swap could not pass unnoticed"
     );
 }
 
@@ -380,7 +436,7 @@ fn an_entity_is_exactly_the_fields_the_game_reads() {
         body.len()
     );
     assert_eq!(
-        decode_add_entity_as_client(&body),
+        decode_add_entity_as_client(&body).0,
         body.len(),
         "and the game's reader gets through all of it"
     );
@@ -411,8 +467,10 @@ fn an_entity_carries_a_zero_delta_because_it_has_not_moved_yet() {
     b = &b[24..];
     assert_eq!(b[0], 0, "a zero delta is one byte, not a packed long");
     b = &b[1..];
-    assert_eq!(b[0], 64, "yaw east");
-    assert_eq!(b[1], 0, "pitch level");
+    // Pitch, then yaw, then the head. The order was the bug: this asserted
+    // yaw-then-pitch and so agreed with it.
+    assert_eq!(b[0], 0, "pitch level, and pitch comes first");
+    assert_eq!(b[1], 64, "then yaw east");
     assert_eq!(b[2], 64, "and the head turns with the body");
     assert_eq!(&b[3..], &[1u8][..], "and a data value of one, for a living thing");
 }

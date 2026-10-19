@@ -1402,9 +1402,13 @@ fn play(
                             let line = format!("<{player_name}> {text}");
                             let mut chat = Vec::new();
                             p::write_system_chat(&mut chat, &line);
-                            let mut wire = Vec::new();
-                            enc.encode(&chat, &mut wire).map_err(io_err)?;
-                            session.wire.send_all(wire);
+                            // The body, not a framed packet: every connection
+                            // frames it for itself, because compression is
+                            // per connection. A body framed here and framed
+                            // again there is a packet with a length in front
+                            // of a length, and the client reads the second one
+                            // as the first byte of the next packet.
+                            session.wire.send_all(chat);
                             log.note(format!("{player_name} said {text}"));
                         }
                         Ok(_) => {}

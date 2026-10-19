@@ -22,7 +22,10 @@ const fn capacity_for_bits(bits: u8) -> usize {
 }
 
 /// Smallest width that can address `palette_len` distinct values.
-const fn bits_for_palette_len(palette_len: usize) -> u8 {
+///
+/// Public because it is the only way back from a stored index array: the array
+/// itself records no width, so a decoder has to recover it from the palette.
+pub const fn bits_for_palette_len(palette_len: usize) -> u8 {
     // Branch-free ceil(log2), with 0 for a single value (handled by Zero).
     if palette_len <= 1 {
         return 1;

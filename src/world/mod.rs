@@ -34,6 +34,7 @@
 pub mod bitpack;
 pub mod block;
 pub mod chunk;
+pub mod chunk_nbt;
 pub mod light;
 pub mod lighting;
 pub mod nbt;

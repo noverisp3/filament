@@ -56,6 +56,16 @@ impl Section {
         self.blocks.bits() == 0
     }
 
+    /// Rebuilds a section from a stored palette and index array.
+    ///
+    /// The mirror of [`Paletted::from_parts`], for the same reason: the bits
+    /// are not in the words, they have to come from the palette.
+    pub fn from_parts(palette: Vec<BlockId>, bits: u8, words: Vec<u64>) -> Self {
+        Self {
+            blocks: Paletted::from_parts(palette, bits, words, SECTION_VOLUME),
+        }
+    }
+
     pub fn blocks(&self) -> &Paletted<BlockId> {
         &self.blocks
     }

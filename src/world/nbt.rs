@@ -80,6 +80,11 @@ impl Compound {
         self.0.get(name)
     }
 
+    /// A tag under a name, to change rather than to look at.
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut Tag> {
+        self.0.get_mut(name)
+    }
+
     /// Adds a tag and hands the compound back, so tags chain:
     /// `Compound::new().put("a", ..).put("b", ..)`.
     ///
@@ -150,6 +155,14 @@ impl Compound {
 
     pub fn compound(&self, name: &str) -> Option<&Compound> {
         match self.get(name) {
+            Some(Tag::Compound(v)) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// The compound under a name, to change rather than to look at.
+    pub fn compound_mut(&mut self, name: &str) -> Option<&mut Compound> {
+        match self.get_mut(name) {
             Some(Tag::Compound(v)) => Some(v),
             _ => None,
         }

@@ -275,13 +275,19 @@ fn decompress(bytes: &[u8]) -> io::Result<Vec<u8>> {
 /// Read off a world the game had written rather than composed from the
 /// reference, because the reference and the file disagree about the block
 /// palette and a disagreement like that is better settled by a file.
-pub fn default_level(world_name: &str, game_time: u64) -> Compound {
+pub fn default_level(
+    world_name: &str,
+    game_time: u64,
+    day_time: u64,
+    spawn: (i32, i32, i32),
+) -> Compound {
     Compound::new()
         .put("DataVersion", Tag::Int(chunk_nbt::DATA_VERSION))
         .put("GameType", Tag::Int(0))
         .put("LastPlayed", Tag::Long(0))
         .put("LevelName", Tag::String(world_name.to_string()))
         .put("Time", Tag::Long(game_time as i64))
+        .put("DayTime", Tag::Long(day_time as i64))
         .put("version", Tag::Int(19133))
         .put("allowCommands", Tag::Byte(0))
         .put("initialized", Tag::Byte(1))
@@ -309,7 +315,7 @@ pub fn default_level(world_name: &str, game_time: u64) -> Compound {
             Tag::Compound(
                 Compound::new()
                     .put("dimension", Tag::String("minecraft:overworld".into()))
-                    .put("pos", Tag::IntArray(vec![0, 64, 0]))
+                    .put("pos", Tag::IntArray(vec![spawn.0, spawn.1, spawn.2]))
                     .put("angle", Tag::Float(0.0)),
             )
         })

@@ -292,6 +292,72 @@ fn an_edit_survives_a_save_and_a_reopen() {
 }
 
 #[test]
+fn the_level_file_is_edited_rather_than_replaced() {
+    // A file the game wrote holds the seed, the game rules, the borders and
+    // the spawn. Writing a default over it loses every one of them, and the
+    // day of the year with it.
+    let dir = std::env::temp_dir().join(format!(
+        "filament-level-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+    ));
+    std::fs::create_dir_all(&dir).expect("a scratch world folder");
+
+    // A level file with something of its own in it.
+    let level = crate::world::storage::default_level("keepme", 100, 200, (11, 22, 33));
+    let mut level = level;    level.set("seed", crate::world::nbt::Tag::Long(987654321));
+    level.set(
+        "GameRules",
+        crate::world::nbt::Tag::Compound(
+            crate::world::nbt::Compound::new().put("doDaylightCycle", crate::world::nbt::Tag::Byte(0)),
+        ),
+    );
+    {
+        let store = crate::world::storage::WorldStore::open(&dir).unwrap();
+        store.write_level(&level).expect("the folder is writable");
+    }
+
+    // Open it, and save it again.
+    let world =
+        World::with_store(Some(crate::world::storage::WorldStore::open(&dir).unwrap()));
+    assert_eq!(
+        world.spawn_point(),
+        (11, 22, 33),
+        "the spawn comes from the file"
+    );
+    world.write_level().expect("the folder is writable");
+    drop(world);
+
+    // And what is on the disk is the same file with the clock moved on.
+    let store = crate::world::storage::WorldStore::open(&dir).unwrap();
+    let after = store.read_level().expect("the file is there");
+    assert_eq!(
+        after.get("seed"),
+        Some(&crate::world::nbt::Tag::Long(987654321)),
+        "the seed must survive a save"
+    );
+    assert!(
+        after.contains("GameRules"),
+        "and so must the game rules"
+    );
+    assert_eq!(
+        after.get("DayTime"),
+        Some(&crate::world::nbt::Tag::Long(200)),
+        "the day of the year must be written down, not lost"
+    );
+    assert_eq!(
+        after.get("Time"),
+        Some(&crate::world::nbt::Tag::Long(100)),
+        "and so must the age"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn a_chunk_that_was_walked_away_from_is_read_back_and_not_made_again() {
     // The case that loses a world. A chunk is loaded, edited and then thrown
     // out because the player walked away. At the save it is no longer in

@@ -833,10 +833,17 @@ fn play(
     //    fixed height. See `terrain::spawn_point`: the old constant was forty
     //    to eighty blocks in the air over this terrain, so every player fell on
     //    arrival, and the fall is what broke the other players' view of them.
+    // 6. The spawn, as the world file says it is.
+    //
+    //    A world the game saved has a spawn it chose, and a number typed in
+    //    to try something out is not that: a player who arrives somewhere
+    //    else is arriving in the wrong place, and a world folder whose spawn
+    //    is ignored is a world folder this server does not really read.
+    let spawn_at = session.world.spawn_point().unwrap_or((0, 64, 0));
     let spawn = p::Movement {
-        x: 0.0,
-        y: 250.0,
-        z: 0.0,
+        x: spawn_at.0 as f64 + 0.5,
+        y: spawn_at.1 as f64,
+        z: spawn_at.2 as f64 + 0.5,
         ..p::Movement::default()
     };
     let mut body = Vec::new();
@@ -846,7 +853,13 @@ fn play(
     // 7. Where a respawn returns to. A block position, so whole blocks, unlike
     //    the spawn above which is inside one.
     let mut body = Vec::new();
-    p::write_set_default_spawn(&mut body, "minecraft:overworld", 0, 250, 0);
+    p::write_set_default_spawn(
+        &mut body,
+        "minecraft:overworld",
+        spawn_at.0,
+        spawn_at.1,
+        spawn_at.2,
+    );
     send(&mut out, &body, "set_default_spawn_position", &log)?;
 
     // 8. How far the world goes, then where it is centred. Until the radius

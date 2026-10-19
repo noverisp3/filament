@@ -106,6 +106,13 @@ pub struct World {
 
     /// Where the world came from and will go back to. None means memory only.
     store: Option<std::sync::Arc<super::storage::WorldStore>>,
+
+    /// Where a player arrives, in blocks, as the world file says.
+    ///
+    /// The file's own answer, not a guess: a world that was saved has a spawn
+    /// the game chose, and arriving somewhere else is arriving in the wrong
+    /// place.
+    spawn: (i32, i32, i32),
 }
 
 impl BlockEdit {
@@ -147,6 +154,7 @@ impl Clone for World {
             // A clone has no folder of its own; sharing one would mean two
             // worlds writing the same region files.
             store: None,
+            spawn: self.spawn,
         }
     }
 }
@@ -180,11 +188,16 @@ impl World {
         ticks: crate::world::ticks::BlockTicks::new(),
         tick_changes: Vec::new(),
         store: store.map(std::sync::Arc::new),
+        spawn: (0, 64, 0),
     };
 
     // The clock the world was saved with. A restart that wound `Time` back
     // would replay a day through every crop and furnace in it, so what is in
     // `level.dat` is what the ticks continue from.
+    //
+    // The spawn comes from the same file, and so does the day of the year
+    // the world was left at: both are things the game wrote down and both
+    // are lost if this server saves the file without them.
     if let Some(level) = world.store.as_ref().and_then(|store| store.read_level()) {
         let data = level.compound("Data").unwrap_or(&level);
         if let Some(super::nbt::Tag::Long(t)) = data.get("Time") {
@@ -192,6 +205,12 @@ impl World {
         }
         if let Some(super::nbt::Tag::Long(t)) = data.get("DayTime") {
             world.day_time = *t as u64;
+        }
+        if let Some(super::nbt::Tag::Compound(spawn)) = data.get("spawn")
+            && let Some(super::nbt::Tag::IntArray(pos)) = spawn.get("pos")
+            && pos.len() >= 3
+        {
+            world.spawn = (pos[0], pos[1], pos[2]);
         }
     }
     world
@@ -243,11 +262,39 @@ impl World {
     }
 
     /// Writes `level.dat`, if there is a world folder to write it into.
+    ///
+    /// The file as it was, with only the clock changed. A file the game wrote
+    /// holds the seed, the spawn, the game rules and the world borders, and
+    /// replacing it with a default loses every one of them -- the day of the
+    /// year resets to zero and the player arrives somewhere else, both
+    /// without a word of complaint.
     pub fn write_level(&self) -> std::io::Result<()> {
         let Some(store) = self.store.as_ref() else {
             return Ok(());
         };
-        store.write_level(&super::storage::default_level(store.name(), self.game_time))
+        let mut level = store.read_level().unwrap_or_else(|| {
+            super::storage::default_level(
+                store.name(),
+                self.game_time,
+                self.day_time,
+                self.spawn,
+            )
+        });
+        // The file the game writes has its data under a name; a file this
+        // build wrote has it at the top. Either way the clock goes in the
+        // place the fields are.
+        let data = match level.compound_mut("Data") {
+            Some(data) => data,
+            None => &mut level,
+        };
+        data.set("Time", super::nbt::Tag::Long(self.game_time as i64));
+        data.set("DayTime", super::nbt::Tag::Long(self.day_time as i64));
+        store.write_level(&level)
+    }
+
+    /// Where a player arrives, in blocks.
+    pub fn spawn_point(&self) -> (i32, i32, i32) {
+        self.spawn
     }
 
     /// Ticks since the world began.
@@ -504,6 +551,7 @@ impl World {
             day_time: 0,
             ticks: crate::world::ticks::BlockTicks::new(),
             tick_changes: Vec::new(),
+            spawn: (0, 64, 0),
         }
     }
 

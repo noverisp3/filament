@@ -114,6 +114,8 @@ pub enum Command {
     TerrainBlocks { reply: Sender<TerrainBlocks> },
     /// The block registry, for mapping a block id to its name.
     Registry { reply: Sender<crate::world::block::BlockRegistry> },
+    /// Where a player arrives, in blocks, as the world file says.
+    SpawnPoint { reply: Sender<(i32, i32, i32)> },
     /// What the world changed on its own since anyone last asked.
     ///
     /// A tick runs on the world thread with no connection to look out of, so
@@ -288,6 +290,11 @@ impl WorldHandle {
 
     pub fn registry(&self) -> Option<crate::world::block::BlockRegistry> {
         self.ask(|reply| Command::Registry { reply })
+    }
+
+    /// Where a player arrives, in blocks.
+    pub fn spawn_point(&self) -> Option<(i32, i32, i32)> {
+        self.ask(|reply| Command::SpawnPoint { reply })
     }
 
     /// What the world has changed by itself since this was last asked.
@@ -692,6 +699,10 @@ Command::Chunk { pos, reply } => {
 
         Command::Registry { reply } => {
             let _ = reply.send(world.registry().clone());
+        }
+
+        Command::SpawnPoint { reply } => {
+            let _ = reply.send(world.spawn_point());
         }
 
         Command::TickChanges { reply } => {

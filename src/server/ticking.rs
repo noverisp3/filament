@@ -161,7 +161,10 @@ impl Clone for WorldHandle {
 }
 
 /// A chunk a worker finished, on its way into the world.
-type Pending = (ChunkPos, Chunk);
+pub enum Pending {
+    Generated(ChunkPos, Chunk),
+    Load(ChunkPos),
+}
 
 /// Positions queued or being built, so a second request for one does not pay
 /// for it twice and a worker finishing one lets the next request through.
@@ -360,6 +363,8 @@ pub fn spawn() -> WorldHandle {
             .flatten(),
     );
     let terrain = *world.terrain_blocks();
+    let store = world.store_handle();
+    let registry = world.registry().clone();
 
     let (work_tx, work_rx) = channel();
     let work_rx = Arc::new(Mutex::new(work_rx));
@@ -406,6 +411,8 @@ pub fn spawn() -> WorldHandle {
     for worker in 0..workers {
         let rx = Arc::clone(&work_rx);
         let pending = Arc::clone(&pending);
+        let store = store.clone();
+        let registry = registry.clone();
         std::thread::Builder::new()
             .name(format!("terrain-{worker}"))
             .spawn(move || {
@@ -420,29 +427,27 @@ pub fn spawn() -> WorldHandle {
                         pos
                     };
 
+                    // Disk first. A chunk that already exists on disk must come
+                    // from there, so the worker only checks presence and asks
+                    // the world's thread to load it; generating over an
+                    // existing chunk is what used to overwrite the world.
+                    let on_disk = store
+                        .as_ref()
+                        .is_some_and(|s| s.has(pos));
+                    if on_disk {
+                        pending
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(Pending::Load(pos));
+                        continue;
+                    }
+
                     let mut chunk = crate::world::terrain::generate_chunk(pos, &terrain);
-                    // Written out here, where the chunk is already in this
-                    // worker's hands, rather than on the world's own thread when
-                    // it is asked for.
-                    //
-                    // Writing a chunk out is about forty times the cost of
-                    // making one -- eleven milliseconds against a quarter of a
-                    // millisecond -- and it used to be done on the one thread
-                    // that everything else also runs on. Adding workers did
-                    // nothing for a player's wait, because the wait was never in
-                    // the part they were parallelising. Two hundred and
-                    // eighty-nine chunks at eleven milliseconds is the three
-                    // seconds a player spent looking at terrain arrive.
-                    //
-                    // The body is dropped again by set_block, so a chunk that is
-                    // edited after this is written out afresh when it is next
-                    // asked for. That is one chunk, once, rather than every
-                    // chunk for every player.
-                    chunk.set_body(|c| encode_chunk_body(c, &terrain, pos));
+                    chunk.set_body(|c| encode_chunk_body(c, &terrain, Some(&registry), pos));
                     pending
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
-                        .push((pos, chunk));
+                        .push(Pending::Generated(pos, chunk));
                 }
             })
             .expect("a thread can be spawned");
@@ -549,12 +554,22 @@ pub fn run(
         // stops when the same thing happens.
         {
             let mut ready = pending.lock().unwrap_or_else(|e| e.into_inner());
-            for (pos, chunk) in ready.drain(..) {
-                world.store_chunk(pos, chunk);
-                // Recorded here, on the thread that owns the world, at the moment
-                // the chunk goes in. Nobody else may write to this set, so it
-                // cannot come to disagree with the world about what exists.
-                pool.stored(pos);
+            for item in ready.drain(..) {
+                match item {
+                    Pending::Generated(pos, chunk) => {
+                        world.store_chunk(pos, chunk);
+                        pool.stored(pos);
+                    }
+                    Pending::Load(pos) => {
+                        world.ensure_chunk(pos);
+                        let terrain = *world.terrain_blocks();
+                        let registry = world.registry().clone();
+                        if let Some(chunk) = world.chunk_mut(pos) {
+                            chunk.set_body(|c| encode_chunk_body(c, &terrain, Some(&registry), pos));
+                        }
+                        pool.stored(pos);
+                    }
+                }
             }
         }
 
@@ -642,7 +657,8 @@ Command::Chunk { pos, reply } => {
             // is writing it out: the body was built with the chunk and is only
             // rebuilt here if the chunk has been edited since.
             let terrain = *world.terrain_blocks();
-            let body = world.chunk_mut(pos).map(|c| chunk_body_of(c, &terrain, pos).to_vec());
+            let registry = world.registry().clone();
+            let body = world.chunk_mut(pos).map(|c| chunk_body_of(c, &terrain, Some(&registry), pos).to_vec());
             let _ = reply.send(body);
         }
 
@@ -700,13 +716,19 @@ fn chunk_body(world: &mut World, pos: ChunkPos) -> Vec<u8> {
     world.ensure_chunk(pos);
 
     let terrain = *world.terrain_blocks();
+    let registry = world.registry().clone();
     let chunk = world.chunk_mut(pos).expect("the chunk was just stored");
-    chunk_body_of(chunk, &terrain, pos).to_vec()
+    chunk_body_of(chunk, &terrain, Some(&registry), pos).to_vec()
 }
 
 /// The body of a chunk packet, written out once and kept until it is edited.
-fn chunk_body_of<'a>(chunk: &'a mut Chunk, terrain: &TerrainBlocks, pos: ChunkPos) -> &'a [u8] {
-    chunk.body(|c| encode_chunk_body(c, terrain, pos))
+fn chunk_body_of<'a>(
+    chunk: &'a mut Chunk,
+    terrain: &TerrainBlocks,
+    registry: Option<&crate::world::block::BlockRegistry>,
+    pos: ChunkPos,
+) -> &'a [u8] {
+    chunk.body(|c| encode_chunk_body(c, terrain, registry, pos))
 }
 
 /// Writes a chunk out as a packet body.
@@ -721,13 +743,65 @@ fn chunk_body_of<'a>(chunk: &'a mut Chunk, terrain: &TerrainBlocks, pos: ChunkPo
 /// has been broken the stored chunk differs from the one these bytes were made
 /// from, so anything wanting current bytes asks the world again rather than
 /// keeping these.
-fn encode_chunk_body(chunk: &Chunk, terrain: &TerrainBlocks, pos: ChunkPos) -> Vec<u8> {
+fn encode_chunk_body(
+    chunk: &Chunk,
+    terrain: &TerrainBlocks,
+    registry: Option<&crate::world::block::BlockRegistry>,
+    pos: ChunkPos,
+) -> Vec<u8> {
+    // Build a dense id -> state id table once per chunk, so encoding a
+    // section is a lookup instead of a search through thirty-five thousand
+    // states for every one of its sixteen thousand blocks.
+    let map: Vec<i32> = match registry {
+        Some(reg) => (0..reg.len())
+            .map(|i| {
+                let id = crate::world::block::BlockId::from_index(i as u16);
+                let name = reg.name(id);
+                let full = match name {
+                    "air" => "minecraft:air".to_string(),
+                    "grass" => "minecraft:grass_block".to_string(),
+                    "dirt" => "minecraft:dirt".to_string(),
+                    "stone" => "minecraft:stone".to_string(),
+                    "glowstone" => "minecraft:glowstone".to_string(),
+                    n if n.contains(':') => n.to_string(),
+                    n => format!("minecraft:{}", n),
+                };
+                crate::generated::BLOCKS
+                    .iter()
+                    .find(|b| b.name == full)
+                    .map(|b| b.default_state as i32)
+                    .unwrap_or(0)
+            })
+            .collect(),
+        None => {
+            // Only the five terrain blocks exist without a registry. Size the
+            // table to cover them; anything else is air.
+            let max = terrain
+                .air
+                .index()
+                .max(terrain.grass.index())
+                .max(terrain.dirt.index())
+                .max(terrain.stone.index())
+                .max(terrain.glowstone.index());
+            let mut v = vec![0i32; max + 1];
+            v[terrain.air.index()] = state_id("minecraft:air");
+            v[terrain.grass.index()] = state_id("minecraft:grass_block");
+            v[terrain.dirt.index()] = state_id("minecraft:dirt");
+            v[terrain.stone.index()] = state_id("minecraft:stone");
+            v[terrain.glowstone.index()] = state_id("minecraft:glowstone");
+            v
+        }
+    };
+
     let sections: Vec<Vec<i32>> = chunk
         .sections()
         .iter()
         .map(|s| {
             section::iter_blocks(s)
-                .map(|block| to_state_id(block, terrain))
+                .map(|block| {
+                    let i = block.index();
+                    map.get(i).copied().unwrap_or(0)
+                })
                 .collect()
         })
         .collect();
@@ -740,7 +814,10 @@ fn encode_chunk_body(chunk: &Chunk, terrain: &TerrainBlocks, pos: ChunkPos) -> V
 /// The state at a position, or `None` if the chunk holding it is not built.
 fn state_at(world: &mut World, pos: BlockPos) -> Option<i32> {
     let terrain = *world.terrain_blocks();
-    world.block(pos).map(|block| to_state_id(block, &terrain))
+    let registry = world.registry().clone();
+    world
+        .block(pos)
+        .map(|block| to_state_id_with_registry(block, &terrain, Some(&registry)))
 }
 
 /// The game's name for one of the world's blocks.
@@ -761,7 +838,7 @@ pub fn to_state_name(block: BlockId, terrain: &TerrainBlocks) -> &'static str {
     } else if block == terrain.glowstone {
         "minecraft:glowstone"
     } else {
-        panic!("the terrain generator produced a block this cannot name")
+        "minecraft:air"
     }
 }
 
@@ -790,6 +867,42 @@ pub fn block_for_name(terrain: &TerrainBlocks, name: &str) -> Option<BlockId> {
 /// Maps one of the world's block ids onto the game's state id.
 pub fn to_state_id(block: BlockId, terrain: &TerrainBlocks) -> i32 {
     state_id(to_state_name(block, terrain))
+}
+
+fn to_state_id_with_registry(
+    block: BlockId,
+    terrain: &TerrainBlocks,
+    registry: Option<&crate::world::block::BlockRegistry>,
+) -> i32 {
+    if block == terrain.air {
+        return state_id("minecraft:air");
+    }
+    if block == terrain.grass {
+        return state_id("minecraft:grass_block");
+    }
+    if block == terrain.dirt {
+        return state_id("minecraft:dirt");
+    }
+    if block == terrain.stone {
+        return state_id("minecraft:stone");
+    }
+    if block == terrain.glowstone {
+        return state_id("minecraft:glowstone");
+    }
+    if let Some(reg) = registry {
+        let name = reg.name(block);
+        let full = if name.contains(':') {
+            name.to_string()
+        } else {
+            format!("minecraft:{}", name)
+        };
+        return crate::generated::BLOCKS
+            .iter()
+            .find(|b| b.name == full)
+            .map(|b| b.default_state as i32)
+            .unwrap_or(0);
+    }
+    0
 }
 
 /// How long a block takes to break, from the generated table.

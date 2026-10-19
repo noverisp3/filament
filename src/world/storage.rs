@@ -72,7 +72,7 @@ pub struct WorldStore {
     /// The name a real `level.dat` carries, which is the folder's own name.
     name: String,
     /// Open regions, by the coordinates of the region file.
-    regions: HashMap<(i32, i32), Option<RegionFile>>,
+    regions: std::sync::Mutex<HashMap<(i32, i32), Option<RegionFile>>>,
 }
 
 impl WorldStore {
@@ -87,7 +87,7 @@ impl WorldStore {
         Ok(Self {
             root,
             name,
-            regions: HashMap::new(),
+            regions: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -117,26 +117,6 @@ impl WorldStore {
     /// `None` means the file is not there yet, which is cached too: without
     /// that, every block in a chunk the server is generating would ask the
     /// filesystem the same question again.
-    fn region_ref(&mut self, pos: ChunkPos) -> Option<&RegionFile> {
-        let key = (pos.x.div_euclid(32), pos.z.div_euclid(32));
-        let path = ChunkKey::of(pos.x, pos.z).path_in(&self.overworld());
-        self.regions
-            .entry(key)
-            .or_insert_with(|| {
-                if !path.exists() {
-                    return None;
-                }
-                match RegionFile::read(&path) {
-                    Ok(region) => Some(region),
-                    Err(e) => {
-                        eprintln!("cannot read {}: {e}", path.display());
-                        None
-                    }
-                }
-            })
-            .as_ref()
-    }
-
     /// Reads a chunk, if the world has one.
     ///
     /// `registry` is grown as blocks turn up. A world written by the game has
@@ -145,30 +125,59 @@ impl WorldStore {
     /// sight rather than dropped: dropping them turns a mountain into a hole,
     /// and the name is still what gets written back.
     pub fn load(
-        &mut self,
+        &self,
         pos: ChunkPos,
         registry: &mut BlockRegistry,
     ) -> Option<Chunk> {
         let (local_x, local_z) = ChunkKey::local_of(pos.x, pos.z);
-        let region = self.region_ref(pos)?;
-        let compound = region.get(local_x, local_z)?;
-
-        let chunk = chunk_nbt::read_lenient(compound, registry, &appearance_for)?;
-
+        let key = (pos.x.div_euclid(32), pos.z.div_euclid(32));
+        let path = ChunkKey::of(pos.x, pos.z).path_in(&self.overworld());
+        let mut regions = self.regions.lock().unwrap_or_else(|e| e.into_inner());
+        let slot = regions.entry(key).or_insert_with(|| {
+            if !path.exists() {
+                return None;
+            }
+            match RegionFile::read(&path) {
+                Ok(region) => Some(region),
+                Err(e) => {
+                    eprintln!("cannot read {}: {e}", path.display());
+                    None
+                }
+            }
+        });
+        let region = slot.as_ref()?;
+        let compound = region.get(local_x, local_z)?.clone();
+        drop(regions);
+        let chunk = chunk_nbt::read_lenient(&compound, registry, &appearance_for)?;
         debug_assert_eq!(chunk.pos(), pos);
         Some(chunk)
     }
 
     /// Whether the world already has this chunk, without decoding it.
-    pub fn has(&mut self, pos: ChunkPos) -> bool {
+    pub fn has(&self, pos: ChunkPos) -> bool {
         let (local_x, local_z) = ChunkKey::local_of(pos.x, pos.z);
-        self.region_ref(pos)
+        let key = (pos.x.div_euclid(32), pos.z.div_euclid(32));
+        let path = ChunkKey::of(pos.x, pos.z).path_in(&self.overworld());
+        let mut regions = self.regions.lock().unwrap_or_else(|e| e.into_inner());
+        let slot = regions.entry(key).or_insert_with(|| {
+            if !path.exists() {
+                return None;
+            }
+            match RegionFile::read(&path) {
+                Ok(region) => Some(region),
+                Err(e) => {
+                    eprintln!("cannot read {}: {e}", path.display());
+                    None
+                }
+            }
+        });
+        slot.as_ref()
             .is_some_and(|region| region.has(local_x, local_z))
     }
 
     /// Puts a chunk back into its region and writes the region out.
     pub fn save(
-        &mut self,
+        &self,
         pos: ChunkPos,
         chunk: &Chunk,
         registry: &BlockRegistry,
@@ -185,19 +194,28 @@ impl WorldStore {
     // the first thing ever to touch the file: here a cached miss is retried
     // and a fresh region file is born, rather than being treated as an open
     // that already failed.
-    let slot = self
-        .regions
-        .entry((pos.x.div_euclid(32), pos.z.div_euclid(32)))
-        .or_insert(None);
+    let key = (pos.x.div_euclid(32), pos.z.div_euclid(32));
+    let mut regions = self.regions.lock().unwrap_or_else(|e| e.into_inner());
+    let slot = regions.entry(key).or_insert_with(|| {
+        if !path.exists() {
+            return None;
+        }
+        match RegionFile::read(&path) {
+            Ok(region) => Some(region),
+            Err(e) => {
+                eprintln!("cannot read {}: {e}", path.display());
+                None
+            }
+        }
+    });
     if slot.is_none() {
         *slot = Some(RegionFile::empty());
     }
     let region = slot.as_mut().expect("the slot was filled in just above");
     region.put(local_x, local_z, compound);
 
-        let region = self
-            .regions
-            .get(&(pos.x.div_euclid(32), pos.z.div_euclid(32)))
+        let region = regions
+            .get(&key)
             .and_then(|r| r.as_ref())
             .ok_or_else(|| {
                 io::Error::other("the region file could not be written")

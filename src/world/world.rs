@@ -4,7 +4,7 @@
 //! data; it borrows a `&World` when it needs geometry, which keeps the rule
 //! that logic in `world/` does not depend on wgpu, and the reverse.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::block::{BlockId, BlockRegistry};
 use super::chunk::{Chunk, MIN_SECTION_Y, SECTIONS_PER_CHUNK};
@@ -60,6 +60,11 @@ pub struct World {
     /// empty one no matter how far anyone travelled.
     edits: HashMap<ChunkPos, Vec<(BlockPos, BlockId)>>,
 
+    /// Chunks that must be written back: either generated here (not on disk
+    /// yet) or edited since they were loaded. Loaded-but-untouched chunks are
+    /// left alone, so a session that only walked around writes nothing.
+    dirty: HashSet<ChunkPos>,
+
     /// Ticks since the world began, counting up and never back.
     ///
     /// The game's `getGameTime`, and the number almost everything scheduled
@@ -86,7 +91,7 @@ pub struct World {
     tick_changes: Vec<(BlockPos, BlockId)>,
 
     /// Where the world came from and will go back to. None means memory only.
-    store: Option<super::storage::WorldStore>,
+    store: Option<std::sync::Arc<super::storage::WorldStore>>,
 }
 
 impl BlockEdit {
@@ -120,6 +125,7 @@ impl Clone for World {
             terrain: self.terrain,
             chunks: self.chunks.clone(),
             edits: self.edits.clone(),
+            dirty: self.dirty.clone(),
             game_time: self.game_time,
             day_time: self.day_time,
             ticks: self.ticks.clone(),
@@ -154,11 +160,12 @@ impl World {
         terrain,
         chunks: HashMap::new(),
         edits: HashMap::new(),
+        dirty: HashSet::new(),
         game_time: 0,
         day_time: 0,
         ticks: crate::world::ticks::BlockTicks::new(),
         tick_changes: Vec::new(),
-        store,
+        store: store.map(std::sync::Arc::new),
     };
 
     // The clock the world was saved with. A restart that wound `Time` back
@@ -176,23 +183,37 @@ impl World {
     world
 }
 
-    /// Writes every chunk that has been loaded back to its region file.
+    /// Writes the chunks that changed back to their region files.
     ///
-    /// The whole world rather than what changed, because the alternative is a
-    /// dirty set and a second thing to get wrong: a chunk edited and then
-    /// unloaded before the flush would silently not be saved, and the only
-    /// sign would be a hole that filled itself in.
+    /// A chunk loaded from disk and left alone is not written again: rewriting
+    /// every loaded region on every save is what turned an idle session into
+    /// tens of megabytes of disk traffic. Only chunks that were generated here
+    /// or edited get saved; the edits journal keeps them consistent even when
+    /// the chunk itself has been thrown away and rebuilt.
     pub fn flush(&mut self) -> std::io::Result<usize> {
         let game_time = self.game_time;
         let Some(store) = self.store.as_mut() else {
             return Ok(0);
         };
-        let positions: Vec<ChunkPos> = self.chunks.keys().copied().collect();
+        let dirty: Vec<ChunkPos> = self.dirty.iter().copied().collect();
         let mut written = 0;
-        for pos in positions {
-            let chunk = self.chunks.get(&pos).expect("position came from this map");
-            match store.save(pos, chunk, &self.registry, game_time) {
-                Ok(()) => written += 1,
+        for pos in dirty {
+            let chunk = if let Some(chunk) = self.chunks.get(&pos) {
+                chunk.clone()
+            } else {
+                let mut chunk = crate::world::terrain::generate_chunk(pos, &self.terrain);
+                if let Some(edits) = self.edits.get(&pos) {
+                    for (at, block) in edits {
+                        chunk.set_block(*at, *block);
+                    }
+                }
+                chunk
+            };
+            match store.save(pos, &chunk, &self.registry, game_time) {
+                Ok(()) => {
+                    written += 1;
+                    self.dirty.remove(&pos);
+                }
                 Err(e) => eprintln!("cannot save chunk {},{}: {e}", pos.x, pos.z),
             }
         }
@@ -377,6 +398,7 @@ impl World {
         }
         let chunk = generate_chunk(pos, &self.terrain);
         self.store_chunk(pos, chunk);
+        self.dirty.insert(pos);
         false
     }
 
@@ -455,6 +477,7 @@ impl World {
             chunks,
             store: None,
             edits: HashMap::new(),
+            dirty: HashSet::new(),
             game_time: 0,
             day_time: 0,
             ticks: crate::world::ticks::BlockTicks::new(),
@@ -474,6 +497,13 @@ impl World {
     /// to storage, which is why this hands the ids over rather than doing it.
     pub fn terrain_blocks(&self) -> &TerrainBlocks {
         &self.terrain
+    }
+
+    /// A handle to the backing folder, if there is one. Shared with the
+    /// terrain workers so they can check whether a chunk already exists on
+    /// disk before generating it.
+    pub fn store_handle(&self) -> Option<std::sync::Arc<super::storage::WorldStore>> {
+        self.store.clone()
     }
 
     /// Chunk positions in a stable order, so rebuilds are deterministic.
@@ -655,6 +685,7 @@ impl World {
             Some(entry) => entry.1 = block,
           None => journal.push((pos, block)),
       }
+        self.dirty.insert(chunk_pos);
 
       // The six blocks around this one get told on the next tick, not now.
       //

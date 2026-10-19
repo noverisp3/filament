@@ -210,7 +210,7 @@ fn sectors_for(size: usize) -> usize {
 /// write the whole file", which is far simpler than allocating and freeing
 /// sectors as chunks grow, and a server that saves on quit and on chunk unload
 /// does not care.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct RegionFile {
     chunks: BTreeMap<usize, Compound>,
     /// Unix seconds, kept so a chunk that has not moved still looks written.

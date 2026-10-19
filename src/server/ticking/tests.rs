@@ -288,7 +288,7 @@ fn a_chunk_that_has_been_built_comes_back_the_second_time_it_is_asked_for() {
     // Somebody puts it there, the way a worker would.
     let terrain = *World::empty().terrain_blocks();
     let chunk = crate::world::terrain::generate_chunk(pos, &terrain);
-    pending.lock().unwrap().push((pos, chunk));
+    pending.lock().unwrap().push(Pending::Generated(pos, chunk));
 
     // The world's thread drains it into itself, and the next ask finds it.
     let deadline = Instant::now() + Duration::from_secs(2);

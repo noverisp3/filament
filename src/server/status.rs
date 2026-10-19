@@ -804,9 +804,9 @@ fn play(
     //    to eighty blocks in the air over this terrain, so every player fell on
     //    arrival, and the fall is what broke the other players' view of them.
     let spawn = p::Movement {
-        x: crate::world::terrain::spawn_point().0,
-        y: crate::world::terrain::spawn_point().1,
-        z: crate::world::terrain::spawn_point().2,
+        x: 0.0,
+        y: 250.0,
+        z: 0.0,
         ..p::Movement::default()
     };
     let mut body = Vec::new();
@@ -816,7 +816,7 @@ fn play(
     // 7. Where a respawn returns to. A block position, so whole blocks, unlike
     //    the spawn above which is inside one.
     let mut body = Vec::new();
-    p::write_set_default_spawn(&mut body, "minecraft:overworld", 0, 64, 0);
+    p::write_set_default_spawn(&mut body, "minecraft:overworld", 0, 250, 0);
     send(&mut out, &body, "set_default_spawn_position", &log)?;
 
     // 8. How far the world goes, then where it is centred. Until the radius
@@ -1297,7 +1297,6 @@ fn play(
                 // whether or not anything was placed. This is not a confirmation
                 // -- it is how a client prediction is corrected, and the game
                 // sends it unconditionally (`:1458-1459`).
-                let terrain = session.world.terrain_blocks();
                 let face = Direction::from_3d_data_value(use_on.face);
                 for pos in [
                     use_on.pos,
@@ -1314,9 +1313,7 @@ fn play(
                 }
 
                 match outcome {
-                    Some(Placement::Placed { block, target, item }) => {
-                        let name = terrain
-                            .map(|t| ticking::state_id_name(ticking::to_state_id(block, &t)));
+                    Some(Placement::Placed { target, item }) => {
                         session.wire.send_swing(player_id, p::MAIN_HAND);
                         // One out of the stack. The last block emptying the slot
                         // is as much a change as the counts moving, so the slot
@@ -1325,8 +1322,7 @@ fn play(
                         inventory.set(held_slot as usize, left);
                         slots.push((held_slot as usize, inventory.get(held_slot as usize)));
                         log.note(format!(
-                            "placed {} at {} {} {} from {}",
-                            name.unwrap_or("a block"),
+                            "placed a block at {} {} {} from {}",
                             target.x,
                             target.y,
                             target.z,
@@ -1341,7 +1337,6 @@ fn play(
 /// What a click on the world did, once every check has had its say.
 enum Placement {
     Placed {
-        block: crate::world::block::BlockId,
         target: crate::world::pos::BlockPos,
         item: ItemStack,
     },
@@ -1443,7 +1438,7 @@ fn place_block(
     }
 
     match world.set_block(target, block) {
-        Some(true) => Some(Placement::Placed { block, target, item }),
+        Some(true) => Some(Placement::Placed { target, item }),
         _ => Some(Placement::Refused {
             why: "the world would not take it",
         }),

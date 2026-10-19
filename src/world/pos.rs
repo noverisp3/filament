@@ -30,9 +30,80 @@ pub struct BlockPos {
 /// Y is signed 12-bit, X and Z are unsigned 26-bit biased by half the range.
 const XZ_BIAS: i32 = 1 << 25;
 
+/// One of the six faces of a block, and the step across it.
+///
+/// The numbering is the wire's, and it is not a natural order to guess at:
+///
+/// ```java
+/// DOWN (0, 1, -1, ...)   new Vec3i( 0, -1,  0)
+/// UP   (1, 0, -1, ...)   new Vec3i( 0,  1,  0)
+/// NORTH(2, 3,  2, ...)   new Vec3i( 0, 0, -1)
+/// SOUTH(3, 2,  0, ...)   new Vec3i( 0, 0,  1)
+/// WEST (4, 5,  1, ...)   new Vec3i(-1,  0,  0)
+/// EAST (5, 4,  3, ...)   new Vec3i( 1,  0,  0)
+/// ```
+///
+/// Y is the axis that flips first, and that ordering is what makes 1 mean up
+/// rather than north. Getting it wrong does not fail loudly — a block still
+/// goes somewhere, just the wrong somewhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Down,
+    Up,
+    North,
+    South,
+    West,
+    East,
+}
+
+impl Direction {
+    /// The face the wire named, or `None` for an id the game does not have.
+    pub fn from_3d_data_value(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Direction::Down),
+            1 => Some(Direction::Up),
+            2 => Some(Direction::North),
+            3 => Some(Direction::South),
+            4 => Some(Direction::West),
+            5 => Some(Direction::East),
+            _ => None,
+        }
+    }
+
+    /// One block across this face.
+    pub fn step(self) -> (i32, i32, i32) {
+        match self {
+            Direction::Down => (0, -1, 0),
+            Direction::Up => (0, 1, 0),
+            Direction::North => (0, 0, -1),
+            Direction::South => (0, 0, 1),
+            Direction::West => (-1, 0, 0),
+            Direction::East => (1, 0, 0),
+        }
+    }
+
+    /// The face on the other side.
+    pub fn opposite(self) -> Self {
+        match self {
+            Direction::Down => Direction::Up,
+            Direction::Up => Direction::Down,
+            Direction::North => Direction::South,
+            Direction::South => Direction::North,
+            Direction::West => Direction::East,
+            Direction::East => Direction::West,
+        }
+    }
+}
+
 impl BlockPos {
     pub const fn new(x: i32, y: i32, z: i32) -> Self {
         Self { x, y, z }
+    }
+
+    /// The block one step across a face.
+    pub fn offset(self, direction: Direction) -> Self {
+        let (dx, dy, dz) = direction.step();
+        BlockPos::new(self.x + dx, self.y + dy, self.z + dz)
     }
 
     /// Packs into a single `u64`.

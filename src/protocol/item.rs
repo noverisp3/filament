@@ -316,14 +316,9 @@ pub struct UseItemOn {
 
 impl UseItemOn {
     pub fn read(frame: &[u8]) -> Result<Self, DecodeError> {
-        let mut r = frame;
-let (packet_id, _used) = crate::protocol::VarInt::read(&mut r)?;
-        if packet_id.0 != crate::protocol::play::id::SERVERBOUND_USE_ITEM_ON {
-            return Err(DecodeError::UnexpectedEof {
-                wanted: "use_item_on",
-                got: packet_id.0 as usize,
-            });
-        }
+        let mut r =
+            crate::protocol::play::serverbound_body(frame, crate::protocol::play::id::SERVERBOUND_USE_ITEM_ON)?;
+
 
         let hand = take_varint(&mut r)?;
         // Eight bytes: the block position, the same packed long block_update

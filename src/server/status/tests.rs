@@ -1077,6 +1077,77 @@ fn the_round_trip_is_smoothed_rather_than_jumping() {
 }
 
 #[test]
+fn the_faces_are_numbered_the_way_the_game_numbers_them() {
+    // Placed on the wrong face, a block still goes somewhere -- just the wrong
+    // somewhere, which is the quietest kind of wrong there is.
+    //
+    //   DOWN (0) new Vec3i( 0, -1,  0)
+    //   UP   (1) new Vec3i( 0,  1,  0)
+    //   NORTH(2) new Vec3i( 0, 0, -1)
+    //   SOUTH(3) new Vec3i( 0, 0,  1)
+    //   WEST (4) new Vec3i(-1,  0,  0)
+    //   EAST (5) new Vec3i( 1,  0,  0)
+    for (id, want) in [
+        (0u8, (0, -1, 0)),
+        (1, (0, 1, 0)),
+        (2, (0, 0, -1)),
+        (3, (0, 0, 1)),
+        (4, (-1, 0, 0)),
+        (5, (1, 0, 0)),
+    ] {
+        let face = Direction::from_3d_data_value(id).expect("a face the game has");
+        assert_eq!(face.step(), want, "face {id}");
+    }
+    assert_eq!(
+        Direction::from_3d_data_value(6),
+        None,
+        "and six is not one of the six"
+    );
+    assert_eq!(Direction::from_3d_data_value(255), None);
+}
+
+#[test]
+fn a_block_goes_on_the_face_that_was_clicked() {
+    let at = crate::world::pos::BlockPos::new(4, -7, 9);
+    for (id, want) in [
+        (0u8, (4, -8, 9)),
+        (1, (4, -6, 9)),
+        (2, (4, -7, 8)),
+        (3, (4, -7, 10)),
+        (4, (3, -7, 9)),
+        (5, (5, -7, 9)),
+    ] {
+        let face = Direction::from_3d_data_value(id).expect("a face");
+        let target = at.offset(face);
+        assert_eq!(
+            (target.x, target.y, target.z),
+            want,
+            "clicking face {id} of {at:?} puts the block there"
+        );
+        assert_eq!(at.offset(face).offset(face.opposite()), at, "and back again");
+    }
+}
+
+/// A click point is 0..1 within the block, and the game refuses anything more
+/// than one block from the centre (`ServerGamePacketListenerImpl:1415-1417`).
+///
+/// The pure part of that, which is what this server actually enforces.
+#[test]
+fn a_click_more_than_a_block_from_the_centre_is_not_on_the_block() {
+    let inside = |axis: f32| (-1.0000001..1.0000001).contains(&(axis - 0.5));
+    for click in [0.0f32, 0.5, 1.0] {
+        assert!(inside(click), "a real click at {click} is on the block");
+    }
+    for click in [-0.6f32, 1.6, 12.0] {
+        assert!(!inside(click), "a click at {click} is not");
+    }
+    // The margin is generous on purpose: it is a check against a client
+    // claiming a block it did not click, not a snapping tolerance.
+    assert!(inside(1.4), "just inside the margin");
+    assert!(!inside(1.6), "and just outside it");
+}
+
+#[test]
 fn a_keep_alive_answer_is_eight_bytes_after_the_packet_id() {
     // Built from the writer the server actually uses, so this is the bytes the
     // client was asked to echo and then echoed. Both halves of the frame are

@@ -14,6 +14,7 @@ use crate::protocol::frame::{FrameDecoder, FrameEncoder, FrameError};
 use crate::protocol::handshake::{ClientIntent, ClientIntention, ServerStatus, status_response_body};
 use crate::protocol::item::{self, slots, Inventory, ItemStack};
 use crate::protocol::container as c;
+use crate::world::pos::Direction;
 use crate::protocol::{VarInt, VarLong};
 
 use super::log::{next_connection_id, packet_name, ConnLog};
@@ -1203,6 +1204,193 @@ fn play(
                     log.note(format!("round trip about {latency} ms"));
                 }
             }
+
+            // Putting a block down.
+            //
+            // The order here is the game's, and the order is most of the
+            // behaviour:
+            //
+            // ```java
+            // if (this.hasClientLoaded()) {
+            //    this.ackBlockChangesUpTo(packet.sequence());      // <- first
+            //    ...
+            //    if (this.player.isWithinBlockInteractionRange(pos, 1.0)) {
+            //       Vec3 distance = location.subtract(Vec3.atCenterOf(pos));
+            //       if (|distance.x| < 1.0000001 && ...) { ... }
+            // ```
+            // (ServerGamePacketListenerImpl.java:1403-1417)
+            //
+            // The acknowledgement comes before any of it, including before the
+            // reach check. A client that guessed a placement is waiting on that
+            // number, and refusing to answer it is how a player ends up unable
+            // to place anything at all.
+            if id == p::id::SERVERBOUND_USE_ITEM_ON
+                && let Ok(use_on) = item::UseItemOn::read(&frame)
+            {
+                let mut ack = Vec::new();
+                p::write_block_changed_ack(&mut ack, use_on.sequence);
+                acks.push(ack);
+
+                let outcome = place_block(
+                    &session.world,
+                    &inventory,
+                    held_slot,
+                    &player,
+                    use_on,
+                );
+
+                // What the client is told about the two positions involved,
+                // whether or not anything was placed. This is not a confirmation
+                // -- it is how a client prediction is corrected, and the game
+                // sends it unconditionally (`:1458-1459`).
+                let terrain = session.world.terrain_blocks();
+                let face = Direction::from_3d_data_value(use_on.face);
+                for pos in [
+                    use_on.pos,
+                    face.map_or(use_on.pos, |f| use_on.pos.offset(f)),
+                ] {
+                    let now = session
+                        .world
+                        .block_at(pos)
+                        .flatten()
+                        .unwrap_or(AIR_STATE);
+                    let mut body = Vec::new();
+                    p::write_block_update(&mut body, pos.x, pos.y, pos.z, now);
+                    edits.push(body);
+                }
+
+                match outcome {
+                    Some(Placement::Placed { block, target, item }) => {
+                        let name = terrain
+                            .map(|t| ticking::state_id_name(ticking::to_state_id(block, &t)));
+                        session.wire.send_swing(player_id, p::MAIN_HAND);
+                        // One out of the stack. The last block emptying the slot
+                        // is as much a change as the counts moving, so the slot
+                        // is reported either way.
+                        let left = inventory.take_one(held_slot as usize);
+                        inventory.set(held_slot as usize, left);
+                        slots.push((held_slot as usize, inventory.get(held_slot as usize)));
+                        log.note(format!(
+                            "placed {} at {} {} {} from {}",
+                            name.unwrap_or("a block"),
+                            target.x,
+                            target.y,
+                            target.z,
+                            describe(Some(item))
+                        ));
+                    }
+                    Some(Placement::Refused { why }) => log.note(format!("refused: {why}")),
+                    None => {}
+                }
+            }
+
+/// What a click on the world did, once every check has had its say.
+enum Placement {
+    Placed {
+        block: crate::world::block::BlockId,
+        target: crate::world::pos::BlockPos,
+        item: ItemStack,
+    },
+    Refused {
+        why: &'static str,
+    },
+}
+
+/// Answers a right-click on a block face with the block that went down.
+///
+/// Every check the game makes before placing, in its order, and for the same
+/// reasons. A refusal is a refusal rather than a silent no-op because the
+/// client has already drawn the block and needs to be told otherwise.
+fn place_block(
+    world: &ticking::WorldHandle,
+    inventory: &Inventory,
+    held_slot: u16,
+    player: &p::Movement,
+    use_on: item::UseItemOn,
+) -> Option<Placement> {
+    // The reach is the same one that governs breaking: the player's eye to the
+    // block, plus the one block of margin `isWithinBlockInteractionRange(pos,
+    // 1.0)` adds (`:1414`). Placing without it is placing anywhere, which is
+    // the same hole as breaking a block a kilometre away.
+    if reach_to(player, use_on.pos) > MAX_REACH {
+        return Some(Placement::Refused {
+            why: "too far away to reach",
+        });
+    }
+
+    // The off hand is a different window and there is nothing in it to place.
+    if use_on.hand != p::MAIN_HAND {
+        return Some(Placement::Refused {
+            why: "the off hand holds nothing this server places",
+        });
+    }
+
+    // What is in the selected slot. Nothing there means nothing placed, and no
+    // block is invented from whatever else the player happens to be carrying.
+    let Some(item) = inventory.get(held_slot as usize) else {
+        return Some(Placement::Refused {
+            why: "holding nothing",
+        });
+    };
+
+    // An item id is not a block id. The name is the join, and an item with no
+    // block behind it -- a torch is a block but a stick is not -- is refused
+    // rather than mapped onto something nearby.
+    let Some(name) = crate::generated::item_name(item.item as u32) else {
+        return Some(Placement::Refused {
+            why: "not an item this registry has",
+        });
+    };
+    let block = name
+        .strip_prefix("minecraft:")
+        .and_then(|n| world.block_by_name(n));
+    let Some(block) = block else {
+        return Some(Placement::Refused {
+            why: "not a block this world has",
+        });
+    };
+
+    // A face the game does not have is not a face it placed against.
+    let Some(face) = Direction::from_3d_data_value(use_on.face) else {
+        return Some(Placement::Refused {
+            why: "a face that is not one of the six",
+        });
+    };
+
+    // Where the block goes. Clicking something solid puts the block on the
+    // face; only something that can be replaced puts it inside, and nothing in
+    // this world is clicked except a solid block, so this is the neighbour.
+    let target = use_on.pos.offset(face);
+
+    // The click is 0..1 within the block, so the location is the block plus it,
+    // and the game's check is that each axis is within one block of the centre
+    // (`:1415-1417`). A client claiming to have clicked somewhere else is
+    // refused before it can place through a wall.
+    for axis in 0..3 {
+        let from_centre = use_on.click[axis] - 0.5;
+        if !(-1.0000001..1.0000001).contains(&from_centre) {
+            return Some(Placement::Refused {
+                why: "the click is not on the block it names",
+            });
+        }
+    }
+
+    // Only into something empty. A block placed where there is already one is
+    // not a replacement, it is a second block in the same place. `block_at`
+    // answers in the game's state ids, and air is state zero.
+    if world.block_at(target).flatten() != Some(AIR_STATE) {
+        return Some(Placement::Refused {
+            why: "there is already something there",
+        });
+    }
+
+    match world.set_block(target, block) {
+        Some(true) => Some(Placement::Placed { block, target, item }),
+        _ => Some(Placement::Refused {
+            why: "the world would not take it",
+        }),
+    }
+}
 
             // Which keys are down: one byte of flags, after the id.
             //

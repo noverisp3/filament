@@ -147,20 +147,34 @@ impl World {
     /// `None` is a world that lives only as long as the process does, which is
     /// what every test wants and what a server without a folder gets.
     pub fn with_store(store: Option<super::storage::WorldStore>) -> Self {
-        let mut registry = BlockRegistry::new();
-        let terrain = register_terrain(&mut registry);
-        Self {
-            registry,
-            terrain,
-            chunks: HashMap::new(),
-            edits: HashMap::new(),
-            game_time: 0,
-            day_time: 0,
-            ticks: crate::world::ticks::BlockTicks::new(),
-            tick_changes: Vec::new(),
-            store,
+    let mut registry = BlockRegistry::new();
+    let terrain = register_terrain(&mut registry);
+    let mut world = Self {
+        registry,
+        terrain,
+        chunks: HashMap::new(),
+        edits: HashMap::new(),
+        game_time: 0,
+        day_time: 0,
+        ticks: crate::world::ticks::BlockTicks::new(),
+        tick_changes: Vec::new(),
+        store,
+    };
+
+    // The clock the world was saved with. A restart that wound `Time` back
+    // would replay a day through every crop and furnace in it, so what is in
+    // `level.dat` is what the ticks continue from.
+    if let Some(level) = world.store.as_ref().and_then(|store| store.read_level()) {
+        let data = level.compound("Data").unwrap_or(&level);
+        if let Some(super::nbt::Tag::Long(t)) = data.get("Time") {
+            world.game_time = *t as u64;
+        }
+        if let Some(super::nbt::Tag::Long(t)) = data.get("DayTime") {
+            world.day_time = *t as u64;
         }
     }
+    world
+}
 
     /// Writes every chunk that has been loaded back to its region file.
     ///

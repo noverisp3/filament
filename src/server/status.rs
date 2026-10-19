@@ -763,16 +763,24 @@ fn play(
     p::write_set_held_slot(&mut body, 0);
     send(&mut out, &body, "set_held_slot", &log)?;
 
-    // 5. The clock, so the sun is where the world says it is. The client runs
-    //    this itself once told, so this is sent on arrival and not again --
-    //    twenty corrections a second for a clock that is already right.
-    if let Some((game_time, day_time)) = session.world.clock() {
-        let mut body = Vec::new();
-        p::write_set_time(&mut body, game_time as i64, day_time as i64);
-        send(&mut out, &body, "set_time", &log)?;
-    }
+    // 5. No world border, and the full clock sync straight after it. The order
+    //    is the game's own (`PlayerList.sendLevelInfo` sends the border, then
+    //    `createFullSyncPacket`, then the spawn), because the client runs the
+    //    sky from the count this packet carries and the later beats correct
+    //    that count without naming the clock again.
+    let mut body = Vec::new();
+    p::write_initialize_border(&mut body);
+    send(&mut out, &body, "initialize_border", &log)?;
 
-    // 5. The spawn, on the actual surface of the terrain rather than at a
+    let mut body = Vec::new();
+    if let Some((game_time, day_time)) = session.world.clock() {
+        p::write_set_time(&mut body, game_time as i64, day_time as i64);
+    } else {
+        p::write_set_time(&mut body, 0, 0);
+    }
+    send(&mut out, &body, "set_time", &log)?;
+
+    // 6. The spawn, on the actual surface of the terrain rather than at a
     //    fixed height. See `terrain::spawn_point`: the old constant was forty
     //    to eighty blocks in the air over this terrain, so every player fell on
     //    arrival, and the fall is what broke the other players' view of them.
@@ -786,20 +794,13 @@ fn play(
     p::write_player_position(&mut body, 1, &spawn);
     send(&mut out, &body, "player_position", &log)?;
 
-    // 6. Where a respawn returns to. A block position, so whole blocks, unlike
+    // 7. Where a respawn returns to. A block position, so whole blocks, unlike
     //    the spawn above which is inside one.
     let mut body = Vec::new();
     p::write_set_default_spawn(&mut body, "minecraft:overworld", 0, 64, 0);
     send(&mut out, &body, "set_default_spawn_position", &log)?;
 
-    // 7. No world border.
-    let mut body = Vec::new();
-    p::write_initialize_border(&mut body);
-    send(&mut out, &body, "initialize_border", &log)?;
-
-    // 8 is the world clock, which is not written yet. See play::set_time.
-
-    // 9. How far the world goes, then where it is centred. Until the radius
+    // 8. How far the world goes, then where it is centred. Until the radius
     //    arrives the client is guessing, and until the centre arrives it has
     //    nowhere to ask for chunks.
     let mut body = Vec::new();
@@ -2089,15 +2090,16 @@ fn place_block(
             stream.flush()?;
         }
 
-        // The clock, once a second. Sent on arrival and then left to the
-        // client is the one leak that shows up as something a player can see:
-        // their sun creeping off the server's real time of day, and a rejoin
-        // snapping it back. Corrected here rather than trusted.
+        // The age, every second, and nothing else. The clock the client runs is
+        // left alone: it has been extrapolating from the join sync ever since,
+        // and replacing it is what showed as a sun that stepped forward. This
+        // beat corrects the count the client runs its clock by, and that count
+        // is all the game's own periodic sync ever carries.
         if last_clock.elapsed() >= CLOCK_EVERY
-            && let Some((game_time, day_time)) = session.world.clock()
+            && let Some((game_time, _day_time)) = session.world.clock()
         {
             let mut body = Vec::new();
-            p::write_set_time(&mut body, game_time as i64, day_time as i64);
+            p::write_set_time_bare(&mut body, game_time as i64);
             let mut wire = Vec::new();
             enc.encode(&body, &mut wire).map_err(io_err)?;
             stream.write_all(&wire)?;
@@ -2262,11 +2264,12 @@ fn chunk_report(wanted: usize, sent_now: usize, dropped: usize) -> Option<String
 /// without the connection going.
 const KEEP_ALIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// How often the clock is sent again. Once on arrival, the client guesses a
-/// tick every fiftieth of a second from there on, and any difference between
-/// its guess and the real clock grows for as long as the session lasts: what
-/// a rejoin shows as a different time of day. Vanilla does not trust the
-/// guess either and refreshes twenty ticks apart, which this matches.
+/// How often the clock is sent again. Once on arrival, the client runs its own
+/// count from there on, and the beat here is the game's own beat: every twenty
+/// ticks the server's age goes out, `timeSync` in `MinecraftServer.tickChildren`.
+/// The count is what the client extrapolates its clock by, so keeping it true
+/// is what keeps the sky steady; the clock itself is only ever named in the
+/// full sync at join, and resending it is what makes the sun step.
 const CLOCK_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// What the keep alive exchange wants done.

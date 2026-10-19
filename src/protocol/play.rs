@@ -779,6 +779,32 @@ fn set_time_carries_the_game_clock_and_where_the_sun_is() {
 }
 
 #[test]
+fn the_periodic_beat_carries_an_age_and_no_clock() {
+    // The game's own timeSync is a bare age: `ClientboundSetTimePacket(getGameTime(),
+    // Map.of())`. Replacing the client's clock with the server's copy on every
+    // beat is what a sky that steps once a second looked like on the wire, so
+    // the map stays empty here and the count alone is corrected.
+    let mut out = Vec::new();
+    write_set_time_bare(&mut out, 12_345);
+
+    let mut at = 0usize;
+    let (v, n) = VarInt::read(&mut &out[at..]).expect("packet id");
+    at += n;
+    assert_eq!(v.0, id::SET_TIME, "the packet");
+
+    let mut eight = [0u8; 8];
+    eight.copy_from_slice(&out[at..at + 8]);
+    at += 8;
+    assert_eq!(i64::from_be_bytes(eight), 12_345, "how long the world has run");
+
+    let (count, n) = VarInt::read(&mut &out[at..]).expect("update count");
+    at += n;
+    assert_eq!(count.0, 0, "no clock update: the client's own copy stands");
+
+    assert_eq!(at, out.len(), "and nothing else trails it");
+}
+
+#[test]
 fn zigzag_keeps_the_numbers_near_zero_small() {
     // A clock that has just been set sits near zero, and -1 costing ten bytes
     // is what a plain varlong does to it.
@@ -1308,6 +1334,22 @@ pub fn write_set_time(out: &mut Vec<u8>, game_time: i64, day_time: i64) {
     // Rate one: real time is real time. Zero is what a paused world sends, and
     // this one is not paused.
     out.extend_from_slice(&1.0f32.to_be_bytes());
+}
+
+/// Writes `ClientboundSetTimePacket` with no clock updates, only the age.
+///
+/// The regular beat the server's game sends every twenty ticks, and the shape
+/// matters more than it looks. An update carrying the clock overwrites what
+/// the client has been running its own count against; the game's own periodic
+/// sync carries an empty map, `Map.of()`, so the client keeps its smoothly
+/// advanced clock and only the age it extrapolates by is corrected. The one
+/// packet that names clocks is the full sync at join.
+pub fn write_set_time_bare(out: &mut Vec<u8>, game_time: i64) {
+    VarInt(id::SET_TIME).write(out);
+    out.extend_from_slice(&game_time.to_be_bytes());
+
+    // Zero entries: no clock update is carried, which is the point.
+    VarInt(0).write(out);
 }
 
 /// Writes `ClientboundPlayerAbilitiesPacket`.

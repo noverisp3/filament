@@ -41,10 +41,15 @@ const BIOME: &str = "minecraft:plains";
 /// Heightmaps are one value per 16x16 column: how high the world reaches.
 const HEIGHTMAP_COLUMNS: usize = SECTION_DIM_USIZE * SECTION_DIM_USIZE;
 
-/// Width for a height. The tallest column can be `WORLD_HEIGHT` above the
-/// bottom, and the bottom is negative, so `WORLD_HEIGHT + 1 - MIN_BLOCK_Y`
-/// distinct values -- ten of them needs ten bits.
-const HEIGHTMAP_BITS: u8 = 10;
+/// Width for a height.
+///
+/// A column runs from `MIN_BLOCK_Y` to the top of the world and is stored
+/// offset by the bottom, so the largest value is `WORLD_HEIGHT`, and 384 needs
+/// nine bits -- 512 will hold it.
+///
+/// Not a guess: a real chunk's heightmap is 37 longs, which is only
+/// `ceil(256 / 7)` at nine bits. At ten it would be 43.
+const HEIGHTMAP_BITS: u8 = 9;
 
 /// Filament names its blocks the way the renderer thinks of them. Two of those
 /// are not the names on disk: the renderer wants `grass` for the green-topped
@@ -107,8 +112,12 @@ fn to_vanilla_words(bits: u8, src: &[u64], len: usize) -> Vec<i64> {
     out.into_iter().map(|w| w as i64).collect()
 }
 
-/// The inverse of [`to_vanilla_words`].
-fn from_vanilla_words(bits: u8, src: &[i64], len: usize) -> Vec<u64> {
+/// The inverse of [`to_vanilla_words`], into the layout [`super::bitpack::BitArray`] reads.
+///
+/// Public because it is also the only way to look at a chunk written by
+/// something else -- see `examples/inspect_chunk.rs`, which runs it over a
+/// real world.
+pub fn from_vanilla_words(bits: u8, src: &[i64], len: usize) -> Vec<u64> {
     if bits == 0 {
         return Vec::new();
     }
@@ -138,11 +147,70 @@ fn from_vanilla_words(bits: u8, src: &[i64], len: usize) -> Vec<u64> {
 
 /// One block as the palette entry the game stores.
 ///
-/// Just the name: `{"Name": "minecraft:dirt"}`. `Properties` is only written
-/// when a block has states, and filament's blocks have none, so an empty
-/// compound would be a field the game reads as "no properties" anyway.
-fn block_state(registry: &BlockRegistry, id: BlockId) -> Compound {
-    Compound::new().put("Name", Tag::String(vanilla_name(registry.name(id))))
+/// Written as a bare string, which is what a real chunk holds for every block
+/// that has no properties -- checked against a world the game saved, where
+/// three different shapes turn up in the same file:
+///
+/// ```text
+/// "minecraft:stone"                     the common one
+/// {"": "minecraft:deepslate"}           the same, from a likeCodec
+/// {"id": "minecraft:tall_seagrass",     a block that has properties
+///  "properties": {...}}
+/// ```
+/// Filament's blocks have no properties, so all of them are default states and
+/// all of them are strings. Reading still accepts the other two, because the
+/// file may have come from a build that writes them.
+///
+/// Note that the third shape is keyed `id`, not `Name`. `BlockState.java` in
+/// the reference decompilation still says `Name`, and following it would have
+/// produced a file the game reads as air.
+fn block_state(registry: &BlockRegistry, id: BlockId) -> Tag {
+    Tag::String(vanilla_name(registry.name(id)))
+}
+
+/// Width for a block palette, which is not the same as the width for an array.
+///
+/// `PalettedContainer` packs into fixed 4, 5, 6, ... bit strategies, and does
+/// not go below four. The game's chunk storage therefore uses **at least**
+/// four bits per block however small the palette is, where an in-memory array
+/// of ours would use three.
+///
+/// Found against a saved world rather than reasoned out: a section with eight
+/// distinct blocks holds 256 longs, and 4096 entries at three bits would be
+/// 196. At four bits it is exactly 256. Decoding it as three produced three
+/// indices pointing outside their own palette out of thirty-two thousand --
+/// a wrong answer, but a wrong answer that looks almost entirely right.
+pub const fn block_bits_for_palette_len(palette_len: usize) -> u8 {
+    let needed = bits_for_palette_len(palette_len);
+    if needed < 4 {
+        4
+    } else {
+        needed
+    }
+}
+
+/// The name out of a palette entry, whichever of the three shapes it takes.
+///
+/// Public so that `examples/inspect_chunk.rs` reads a chunk written by the
+/// game with exactly the same rule the loader uses, rather than a second copy
+/// of it that could disagree.
+pub fn palette_name(entry: &Tag) -> Option<&str> {
+    match entry {
+        Tag::String(name) => Some(name),
+        Tag::Compound(compound) => {
+            // `{"": name}` is a one-field map codec, and `{"id": name, ...}`
+            // carries the block that has properties. Both hold the name under
+            // a key that has nothing to do with each other.
+            compound
+                .get("")
+                .or_else(|| compound.get("id"))
+                .and_then(|tag| match tag {
+                    Tag::String(name) => Some(name.as_str()),
+                    _ => None,
+                })
+        }
+        _ => None,
+    }
 }
 
 /// Packs flat values into the game's bit layout, for the heightmaps.
@@ -196,7 +264,7 @@ pub fn write(chunk: &Chunk, registry: &BlockRegistry, last_update: u64, inhabite
         let palette = blocks
             .palette()
             .iter()
-            .map(|&id| Tag::Compound(block_state(registry, id)))
+            .map(|&id| block_state(registry, id))
             .collect();
 
         // `put` consumes and returns, so the optional field is added with
@@ -222,13 +290,14 @@ pub fn write(chunk: &Chunk, registry: &BlockRegistry, last_update: u64, inhabite
     let mut heightmaps = Compound::new();
     let surface = heights(chunk, |b| registry.name(b) == "air");
     let solid = heights(chunk, |b| registry.name(b) == "air" || !registry.is_opaque(b));
+    // Exactly the four a real chunk carries. The `_WG` variants exist in the
+    // format but this build has no worldgen to record, and writing a key the
+    // game would then trust is worse than leaving it out.
     for (key, values) in [
         ("MOTION_BLOCKING", &surface),
         ("MOTION_BLOCKING_NO_LEAVES", &surface),
         ("WORLD_SURFACE", &surface),
-        ("WORLD_SURFACE_WG", &surface),
         ("OCEAN_FLOOR", &solid),
-        ("OCEAN_FLOOR_WG", &solid),
     ] {
         heightmaps.set(key, Tag::LongArray(pack_heightmap(values)));
     }
@@ -283,10 +352,8 @@ pub fn read(tag: &Compound, registry: &BlockRegistry) -> Option<Chunk> {
             .list("palette")?
             .iter()
             .map(|entry| {
-                let name = entry.as_compound()?.get("Name")?.clone();
-                let Tag::String(name) = name else { return None };
-                let id = registry.id(registry_name(&name)?)?;
-                Some(id)
+                let name = palette_name(entry)?;
+                registry.id(registry_name(name)?)
             })
             .collect::<Option<Vec<BlockId>>>()?;
         if palette.is_empty() {
@@ -295,9 +362,11 @@ pub fn read(tag: &Compound, registry: &BlockRegistry) -> Option<Chunk> {
 
         let (bits, words) = match states.get("data") {
             // The array does not record its own width, so the palette is the
-            // only place it survives.
+            // only place it survives -- and it has to be the width the chunk
+            // format uses, which is not the width an in-memory array would
+            // pick for the same palette.
             Some(Tag::LongArray(words)) => {
-                let bits = bits_for_palette_len(palette.len());
+                let bits = block_bits_for_palette_len(palette.len());
                 (bits, from_vanilla_words(bits, words, SECTION_VOLUME))
             }
             _ => (0, Vec::new()),
@@ -445,10 +514,7 @@ mod tests {
             .list("palette")
             .unwrap()
             .iter()
-            .map(|e| match e.as_compound().unwrap().get("Name").unwrap() {
-                Tag::String(s) => s.as_str(),
-                other => panic!("palette entry is {other:?}"),
-            })
+            .map(|e| palette_name(e).unwrap())
             .collect();
         assert_eq!(names, ["minecraft:air"]);
 
@@ -468,10 +534,7 @@ mod tests {
             .list("palette")
             .unwrap()
             .iter()
-            .map(|e| match e.as_compound().unwrap().get("Name").unwrap() {
-                Tag::String(s) => s.clone(),
-                other => panic!("palette entry is {other:?}"),
-            })
+            .map(|e| palette_name(e).unwrap().to_string())
             .collect();
         assert!(names.contains(&"minecraft:grass_block".to_string()), "{names:?}");
     }
@@ -528,7 +591,7 @@ mod tests {
             .list("palette")
             .unwrap()
             .iter()
-            .map(|_| Tag::Compound(Compound::new().put("Name", Tag::String("minecraft:netherrack".into()))))
+            .map(|_| Tag::String("minecraft:netherrack".into()))
             .collect();
         section.set("block_states", Tag::Compound(states.clone().put("palette", Tag::list(palette))));
 

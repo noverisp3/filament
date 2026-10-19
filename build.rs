@@ -155,18 +155,18 @@ fn main() {
 /// elsewhere, which is a gap left open rather than papered over -- the banner
 /// degrades to the commit it was built at, which is what it does anyway.
 fn watch_the_branch() {
-    if let Some(packed) = git(&["rev-parse", "--git-path", "packed-refs"]) {
-        if !packed.is_empty() {
-            println!("cargo:rerun-if-changed={packed}");
-        }
+    if let Some(packed) = git(&["rev-parse", "--git-path", "packed-refs"])
+        && !packed.is_empty()
+    {
+        println!("cargo:rerun-if-changed={packed}");
     }
     let Some(symbolic) = git(&["symbolic-ref", "HEAD"]) else {
         return;
     };
-    if let Some(path) = git(&["rev-parse", "--git-path", &symbolic]) {
-        if !path.is_empty() {
-            println!("cargo:rerun-if-changed={path}");
-        }
+    if let Some(path) = git(&["rev-parse", "--git-path", &symbolic])
+        && !path.is_empty()
+    {
+        println!("cargo:rerun-if-changed={path}");
     }
 }
 

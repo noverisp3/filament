@@ -1840,12 +1840,16 @@ fn place_block(
                 .block_at(pos)
                 .flatten()
                 .unwrap_or(AIR_STATE);
+            // Into `edits` and not straight down the wire. `edits` is already
+            // broadcast to everyone else when it is written out below, so
+            // calling `send_others` here as well sent every tick-driven change
+            // twice -- once here and once there -- while the player's own copy
+            // went once, because only `edits` produces that. The log said two
+            // broadcasts and one self-send for a single block, which is how it
+            // was caught: it did not match any shape one change can have.
             let mut body = Vec::new();
             p::write_block_update(&mut body, pos.x, pos.y, pos.z, now);
-            session.wire.send_others(player_id, body);
-            let mut mine = Vec::new();
-            p::write_block_update(&mut mine, pos.x, pos.y, pos.z, now);
-            edits.push(mine);
+            edits.push(body);
             if super::log::verbose() {
                 log.note(format!(
                     "the world changed {} {} {} to {}",

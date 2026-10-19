@@ -548,6 +548,20 @@ impl Broadcast {
         sinks.retain(|s| s.id != id);
     }
 
+    /// Sends one packet body to one player.
+    ///
+    /// For the answers that are nobody else's business: what a command
+    /// replied, what the player themselves was told.
+    pub fn send_one(&self, id: u64, body: Vec<u8>) {
+        let sinks = self.sinks.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(sink) = sinks.iter().find(|s| s.id == id) else {
+            return;
+        };
+        // A send that fails means the player has gone, which is their
+        // business and not the caller's.
+        let _ = sink.out.send(body);
+    }
+
     /// Sends one packet body to every player except `except`.
     ///
     /// `Vec<u8>` rather than a packet id and fields so that whatever builds it

@@ -1624,6 +1624,33 @@ fn play(
                 }
             }
 
+            // A command. The game answers these, and a command it does not
+            // know gets "Unknown command or insufficient permissions" --
+            // which is what a player who types something the server cannot do
+            // is told, rather than silence.
+            if id == p::id::SERVERBOUND_CHAT_COMMAND
+                || id == p::id::SERVERBOUND_CHAT_COMMAND_SIGNED
+            {
+                let body = p::serverbound_body(&frame, id)
+                    .map_err(|e| io_err(FrameError::Decode(e)))?;
+                let mut r = body;
+                let (VarInt(len), _) = VarInt::read(&mut r)
+                    .map_err(|e| io_err(FrameError::Decode(e)))?;
+                if len >= 0 && len as usize <= r.len() {
+                    match std::str::from_utf8(&r[..len as usize]) {
+                        Ok(text) => {
+                            let answer = run_command(text, &session.wire, &player_name);
+                            let mut chat = Vec::new();
+                            p::write_system_chat(&mut chat, &answer);
+                            // To the player who asked and to nobody else: a
+                            // command's answer is nobody else's business.
+                            session.wire.send_one(player_id, chat);
+                        }
+                        Err(_) => log.note("ignored a command that was not text"),
+                    }
+                }
+            }
+
             // Putting a block down.
             //
             // The order here is the game's, and the order is most of the
@@ -3053,6 +3080,50 @@ fn hurt(
 
     log.note(format!("hurt for {damage}, {health} health left"));
     Ok(())
+}
+
+/// Answers a command, the way the game does.
+///
+/// The game has Brigadier behind it and hundreds of commands. This has a few
+/// and the answer the game gives for everything else, which is the part a
+/// player notices: a command that is not understood is not ignored, it is
+/// answered.
+///
+/// The text is the game's own, from `en_us.json`: `commands.help.failed` is
+/// "Unknown command or insufficient permissions".
+fn run_command(text: &str, wire: &Arc<Broadcast>, player_name: &str) -> String {
+    // The game's own rule: a leading slash is optional.
+    let command = text.strip_prefix('/').unwrap_or(text);
+    let (name, rest) = match command.split_once(' ') {
+        Some((name, rest)) => (name, rest.trim()),
+        None => (command, ""),
+    };
+
+    match name {
+        "" => String::new(),
+        "list" => {
+            let names = wire.names();
+            let count = names.len();
+            let who = if names.is_empty() {
+                "no one".to_string()
+            } else {
+                names.join(", ")
+            };
+            format!("There are {count} of a max of 20 players online: {who}")
+        }
+        "help" => {
+            let _ = rest;
+            "Commands: /help, /list".to_string()
+        }
+        "me" => {
+            if rest.is_empty() {
+                "Unknown command or insufficient permissions".to_string()
+            } else {
+                format!("<{player_name}> {rest}")
+            }
+        }
+        _ => "Unknown command or insufficient permissions".to_string(),
+    }
 }
 
 /// Squared distance between two points, for the too-fast move check.

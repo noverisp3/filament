@@ -2,6 +2,35 @@ use crate::server::ticking::{state_id, to_state_id};
 use super::*;
 
 #[test]
+fn a_command_the_server_does_not_know_is_answered_not_ignored() {
+    // The player's own words: "Unknown command or insufficient
+    // permissions", from `commands.help.failed`. A command that is not
+    // understood is not silence.
+    let wire = Arc::new(Broadcast::new());
+    assert_eq!(
+        run_command("/wibble", &wire, "noverisp3"),
+        "Unknown command or insufficient permissions"
+    );
+    // Without the slash, too: the game's own rule is that the slash is
+    // optional.
+    assert_eq!(
+        run_command("wibble", &wire, "noverisp3"),
+        "Unknown command or insufficient permissions"
+    );
+}
+
+#[test]
+fn the_list_command_says_who_is_here() {
+    let wire = Arc::new(Broadcast::new());
+    let answer = run_command("/list", &wire, "noverisp3");
+    assert!(
+        answer.starts_with("There are "),
+        "the game says how many are here: {answer}"
+    );
+    assert!(answer.contains("of a max of 20 players online"), "{answer}");
+}
+
+#[test]
 fn three_blocks_of_falling_are_free_and_the_rest_is_not() {
     // The game's own numbers: the safe distance is three, and the damage is
     // what is left of the fall after those three, floored.
@@ -724,7 +753,7 @@ fn generated_terrain_survives_the_wire_format() {
     // Now the actual wire bytes, decoded by a reader written from the
     // decompiled layout rather than from the writer.
     let mut wire = Vec::new();
-    crate::protocol::chunk::write_chunk_with_states(&mut wire, 0, 0, &sections);
+    crate::protocol::chunk::write_chunk_with_states(&mut wire, 0, 0, &sections, &[]);
     let decoded = decode_first_section(&wire);
 
 assert_eq!(

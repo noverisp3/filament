@@ -64,6 +64,10 @@ pub mod id {
     pub const SERVERBOUND_CHAT: i32 = 9;
     pub const SYSTEM_CHAT: i32 = 124;
 
+    // A command, with or without the signature that a signed one carries.
+    pub const SERVERBOUND_CHAT_COMMAND: i32 = 7;
+    pub const SERVERBOUND_CHAT_COMMAND_SIGNED: i32 = 8;
+
     // The client answers every finished chunk batch with the rate it would
     // like, and the server keeps to it. One float.
     pub const SERVERBOUND_CHUNK_BATCH_RECEIVED: i32 = 11;

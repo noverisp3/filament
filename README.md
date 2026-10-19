@@ -67,8 +67,26 @@ Grouped by what they are about, not by when they were done.
 - [x] Greedy meshing
 - [x] Raycasting, for the reach check
 - [x] Breaking a block
+- [x] Placing a block, from the item in hand
 - [x] Block state table, generated from 26.3
 - [x] Terrain from two octaves of value noise
+- [x] Edits journaled per chunk, and replayed when it comes back
+
+### The clock and the tick
+
+- [x] A tick loop at twenty a second, on its own thread, with bounded catch-up
+- [x] The game clock, and the world's own clock where the sun is
+- [x] Scheduled ticks in a budgeted heap, ordered by when they are due
+- [x] Neighbour updates scheduled rather than answered inline
+- [x] What the world changes by itself, sent to everyone in range
+- [x] Grass spreading to dirt that has grass under it and air over it
+
+### Playing
+
+- [x] Inventory contents, and the slot in hand
+- [x] Click handling, so a picked-up block lands in the bag
+- [x] Placing a block from the bag, and the stack coming down
+- [x] Keep-alive, answered
 
 ### The wire
 
@@ -104,16 +122,29 @@ Grouped by what they are about, not by when they were done.
 
 ### Not yet
 
-- [ ] Persistence to disk. Edits survive a chunk being dropped; they do not
-      survive a restart, and that is the one a player notices.
-- [ ] The tick loop, and the world clock
-- [ ] Inventory, and placing blocks
-- [ ] Mobs
+- [ ] Persistence to disk. Edits survive a chunk being dropped and a player
+      rejoining; they do not survive a restart, and that is the one a player
+      notices.
+- [ ] Lighting. `world/lighting.rs` exists and has tests; nothing calls it yet,
+      so the server sends blocks without relighting after an edit.
+- [ ] Mobs, item drops, water, weather
+- [ ] An inventory the server can actually trust. Clicks are simulated from
+      the client's reports, and a stale count can leave the server holding the
+      wrong block. The intended design is server-authoritative *quantity* with
+      the client authoritative for *arrangement*.
 - [ ] Authentication
 
-612 tests. A client connects, negotiates, and gets a world of generated terrain:
+795 tests. A client connects, negotiates, and gets a world of generated terrain:
 grass on top, dirt under it, stone below, hills from two octaves of value noise.
-A second client joins the same world and sees the first one walk about.
+A second client joins the same world and sees the first one walk about, break and
+place blocks, and have the change appear on both screens at once.
+
+The world ticks at twenty a second. It counts the game clock, runs scheduled work
+from a budgeted queue, and has one rule so far: dirt with grass beneath it and air
+above it turns back to grass, which is what makes a dug hillside green again
+instead of leaving a bare stripe across it. What the world changes by itself is
+drained by the connections and sent to everyone in range, because a block that
+turned to grass because something above it was mined is not one player's news.
 
 Two things are worth knowing about the terrain. It is generated on request, and a
 chunk is thrown away when the last player walks away from it, so nothing about it

@@ -187,6 +187,12 @@ const MAX_MOVE_PER_POLL: f64 = 100.0;
 /// The edge of the world, as the game itself clamps it.
 const MAX_COORD: f64 = 3.0e7;
 
+/// How many chunks a batch carries when the client has not said otherwise.
+///
+/// The game's own figure: `PlayerChunkSender` starts at nine a tick, and the
+/// client replaces it with the rate it wants after the first batch.
+const DEFAULT_CHUNKS_PER_TICK: f32 = 9.0;
+
 /// Answers one connection's handshake and status exchange.
 ///
 /// Deliberately does not implement login: the point here is to be visible in
@@ -1152,6 +1158,17 @@ fn play(
     // count up from there so no two asks are ever the same number.
     let mut teleport_seq: i32 = 1;
 
+    // How many chunks a batch may carry, and how fast the client would like
+    // them.
+    //
+    // The client answers every finished batch with the rate it can take, and
+    // the game keeps to it: nine a tick by default. A server that sends the
+    // whole ring at once spends its bandwidth in one burst and leaves the
+    // client to sort it out, which is what the client's own rate is there to
+    // prevent.
+    let mut desired_chunks_per_tick: f32 = DEFAULT_CHUNKS_PER_TICK;
+    let mut batch_quota: f32 = 0.0;
+
     // What they are carrying, which starts empty and is filled by what they
     // break.
     //
@@ -1426,6 +1443,21 @@ fn play(
                         }
                         Ok(_) => {}
                         Err(_) => log.note("ignored a chat line that was not text"),
+                    }
+                }
+            }
+
+            // The client answering a finished chunk batch with the rate it
+            // would like. One float, and the server keeps to it from then on.
+            if id == p::id::SERVERBOUND_CHUNK_BATCH_RECEIVED {
+                let body = p::serverbound_body(&frame, p::id::SERVERBOUND_CHUNK_BATCH_RECEIVED)
+                    .map_err(|e| io_err(FrameError::Decode(e)))?;
+                if body.len() >= 4 {
+                    let rate = f32::from_be_bytes(body[..4].try_into().expect("four"));
+                    if rate.is_finite() && rate >= 1.0 {
+                        // Bounded: a client that asks for a million chunks a
+                        // tick is not asking for chunks.
+                        desired_chunks_per_tick = rate.min(64.0);
                     }
                 }
             }
@@ -2221,6 +2253,14 @@ fn place_block(
             }
 
             if !ready.is_empty() {
+                // The batch carries no more than the client asked for. What
+                // is left over stays wanted, so the next pass sends it: the
+                // chunks arrive over a few ticks rather than in one burst.
+                batch_quota = (batch_quota + desired_chunks_per_tick)
+                    .min(desired_chunks_per_tick.max(1.0));
+                let allowed = batch_quota.floor().max(1.0) as usize;
+                ready.truncate(allowed);
+
                 let mut body = Vec::new();
                 p::write_chunk_batch_start(&mut body);
                 enc.encode(&body, &mut out).map_err(io_err)?;

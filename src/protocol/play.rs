@@ -64,6 +64,10 @@ pub mod id {
     pub const SERVERBOUND_CHAT: i32 = 9;
     pub const SYSTEM_CHAT: i32 = 124;
 
+    // The client answers every finished chunk batch with the rate it would
+    // like, and the server keeps to it. One float.
+    pub const SERVERBOUND_CHUNK_BATCH_RECEIVED: i32 = 11;
+
     // The four movement packets share one class upstream, which is why their
     // bodies are near identical: three doubles and two floats, and each subclass
     // dropping the fields it does not carry. The ids are consecutive because the

@@ -5,6 +5,7 @@
 //! blocked on a read. The parallelism that matters for this server is chunk
 //! generation and lighting, which is CPU-bound and gets its own pool.
 
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
@@ -182,6 +183,10 @@ const POLL: std::time::Duration = std::time::Duration::from_millis(50);
 /// already knows; this runs per poll rather than per tick, and takes the same
 /// hundred blocks as a floor. A real client cannot cross it -- sprinting is
 /// five and a half -- while a teleport or a lag spike of any size can.
+/// The light of a chunk's sections, by the section's place in the chunk.
+type ChunkLight = Vec<(i32, Vec<u8>)>;
+
+/// How far through the world a player may walk before being put back.
 const MAX_MOVE_PER_POLL: f64 = 100.0;
 
 /// The edge of the world, as the game itself clamps it.
@@ -2216,6 +2221,33 @@ fn place_block(
                     pos.z,
                     ticking::state_id_name(now)
                 ));
+            }
+        }
+
+        // The light that moved. The client keeps the light it was given with
+        // the chunk, so a hole dug in a lit room is still lit on its screen
+        // until it is told otherwise, and it is told here.
+        let light = session.world.light_changes();
+        if !light.is_empty() {
+            // One packet per chunk, because that is how the game sends it: the
+            // light belongs to a chunk and the sections of that chunk travel
+            // together.
+            let mut by_chunk: BTreeMap<(i32, i32), ChunkLight> = BTreeMap::new();
+            for (chunk_x, chunk_z, index, bytes) in light {
+                by_chunk
+                    .entry((chunk_x, chunk_z))
+                    .or_default()
+                    .push((index, bytes));
+            }
+            for ((chunk_x, chunk_z), mut sections) in by_chunk {
+                sections.sort_by_key(|(index, _)| *index);
+                let mut body = Vec::new();
+                crate::protocol::chunk::write_light_update(&mut body, chunk_x, chunk_z, &sections);
+                let mut wire = Vec::new();
+                enc.encode(&body, &mut wire).map_err(io_err)?;
+                // The light belongs to the world, so everybody who can see
+                // that part of it is told, not only the player who dug.
+                session.wire.send_all(wire);
             }
         }
 

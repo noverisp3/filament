@@ -39,6 +39,36 @@ fn a_column_under_its_own_surface_is_dark() {
 }
 
 #[test]
+fn a_chunk_works_out_its_own_light_when_it_arrives() {
+    // The game does not keep the light in the chunk file: it works it out
+    // again when the chunk is loaded. Without that, a chunk read from disk
+    // arrives saying the whole world is in full daylight, and a cave in it
+    // is as bright as its top.
+    let mut world = World::generate(1);
+    let surface = surface_y(8, 8);
+
+    // A chunk that has just been generated, with no whole-world pass over it.
+    let chunk = ChunkPos::new(0, 0);
+    world.ensure_chunk(chunk);
+
+    assert_eq!(
+        world.sky_light(BlockPos::new(8, 300, 8)),
+        MAX_LIGHT,
+        "the sky above the ground sees the sun"
+    );
+    assert_eq!(
+        world.sky_light(BlockPos::new(8, surface, 8)),
+        0,
+        "and the ground itself does not"
+    );
+    assert_eq!(
+        world.sky_light(BlockPos::new(8, surface - 3, 8)),
+        0,
+        "nor does the ground under it"
+    );
+}
+
+#[test]
 fn light_is_continuous_across_a_chunk_border() {
     let mut world = World::generate(1);
     world.compute_light();

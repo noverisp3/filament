@@ -69,6 +69,99 @@ impl World {
         region.recompute();
         region.write_back(self)
     }
+
+    /// The sky light of one chunk, computed the way the game computes it when
+    /// a chunk arrives.
+    ///
+    /// The game does not keep the light in the chunk file: it works it out
+    /// again when the chunk is loaded, because the light of a chunk depends on
+    /// the chunks around it. This is the same idea, done for the chunk alone:
+    /// the sun falls straight down each column until something opaque stops
+    /// it, and everything below that is dark.
+    ///
+    /// It is the columns only. The light that comes in sideways from a lit
+    /// column next door is the other half, and the game gets that from its
+    /// light engine's queues; here it is worked out by
+    /// [`Self::relight_around`] when a block changes, which is where it shows.
+    ///
+    /// A chunk that is only a column of light deep is a hole in the ground
+    /// that is dark, which is what the game shows, and the alternative is a
+    /// world where the inside of a mountain is as bright as its top.
+    pub(crate) fn light_chunk_columns(&mut self, pos: ChunkPos) {
+        // For each column, the height at which the sun stops: the first
+        // opaque block from the top, or the bottom of the world if there is
+        // none.
+        let stops: Vec<i32> = {
+            let Some(chunk) = self.chunk(pos) else {
+                return;
+            };
+            let registry = self.registry();
+            let mut stops = vec![i32::MAX; SECTION_DIM as usize * SECTION_DIM as usize];
+            for lz in 0..SECTION_DIM {
+                for lx in 0..SECTION_DIM {
+                    let mut stop = i32::MAX;
+                    'outer: for slot in (0..SECTIONS_PER_CHUNK).rev() {
+                        let section = &chunk.sections()[slot];
+                        for ly in (0..SECTION_DIM).rev() {
+                            let local = LocalPos::from_array([lx as u8, ly as u8, lz as u8]);
+                            if registry.is_opaque(section.get(local)) {
+                                stop =
+                                    (MIN_SECTION + slot as i32) * SECTION_DIM as i32 + ly as i32;
+                                break 'outer;
+                            }
+                        }
+                    }
+                    stops[lz as usize * SECTION_DIM as usize + lx as usize] = stop;
+                }
+            }
+            stops
+        };
+
+        // And the light written back: fifteen above the stop, nothing below.
+        //
+        // A section that is entirely lit or entirely dark is filled in one
+        // go, because a section is uniform most of the time and setting
+        // sixteen thousand cells one at a time is the slow way to say so.
+        for slot in 0..SECTIONS_PER_CHUNK {
+            let section_y = MIN_SECTION + slot as i32;
+            let section_pos = SectionPos::new(pos.x, section_y, pos.z);
+            let base_y = section_y * SECTION_DIM as i32;
+            let top = base_y + SECTION_DIM as i32;
+
+            // The sun stops at the opaque block itself, so everything above it
+            // is lit and everything from it down is not.
+            let all_lit = stops.iter().all(|stop| *stop < base_y);
+            let all_dark = stops.iter().all(|stop| *stop >= top);
+
+            let Some(chunk) = self.chunk_mut(pos) else {
+                return;
+            };
+            let Some(light) = chunk.section_light_mut(section_pos) else {
+                continue;
+            };
+            if all_lit {
+                light.fill_sky(MAX_LIGHT);
+                continue;
+            }
+            if all_dark {
+                light.fill_sky(0);
+                continue;
+            }
+            for lz in 0..SECTION_DIM {
+                for lx in 0..SECTION_DIM {
+                    let stop = stops[lz as usize * SECTION_DIM as usize + lx as usize];
+                    for ly in 0..SECTION_DIM {
+                        let y = base_y + ly as i32;
+                        let value = if y > stop { MAX_LIGHT } else { 0 };
+                        light.set_sky(
+                            LocalPos::from_array([lx as u8, ly as u8, lz as u8]),
+                            value,
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// A flat, chunk-free view of the loaded world.

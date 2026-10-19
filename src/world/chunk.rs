@@ -85,6 +85,15 @@ impl Chunk {
         Self::section_slot(pos.y).map(|slot| &self.light[slot])
     }
 
+    /// The light of one section by its place in the chunk, counting from the
+    /// bottom.
+    ///
+    /// The way the wire wants it: the sections in order, so a chunk's light can
+    /// be written without knowing any world position.
+    pub fn light_at(&self, index: usize) -> Option<&SectionLight> {
+        self.light.get(index)
+    }
+
     pub fn section_light_mut(&mut self, pos: SectionPos) -> Option<&mut SectionLight> {
         debug_assert_eq!(pos.chunk_pos(), self.pos, "section from another chunk");
         Self::section_slot(pos.y).map(|slot| &mut self.light[slot])
@@ -116,6 +125,10 @@ impl Chunk {
     pub(crate) fn sky_light_mut(&mut self, section: SectionPos, local: LocalPos, value: u8) {
         if let Some(light) = self.section_light_mut(section) {
             light.set_sky(local, value);
+            // The body on the wire carries the light as well as the blocks, so
+            // a body written before the light moved describes a world that no
+            // longer exists.
+            self.serialised = None;
         }
     }
 

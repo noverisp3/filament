@@ -81,6 +81,15 @@ impl SectionLight {
         self.sky.set(pos.index(), light);
     }
 
+    /// Sets the sky light of every cell at once.
+    ///
+    /// A section is lit or dark as a whole most of the time, and saying so
+    /// in one call is the difference between a section costing a moment and a
+    /// section costing sixteen thousand.
+    pub fn fill_sky(&mut self, light: u8) {
+        self.sky.fill(light);
+    }
+
     #[inline]
     pub fn set_block(&mut self, pos: LocalPos, light: u8) {
         self.block.set(pos.index(), light);
@@ -93,6 +102,40 @@ impl SectionLight {
     /// one channel winning over the other.
     pub fn combined(&self, pos: LocalPos) -> u8 {
         self.sky(pos).max(self.block(pos))
+    }
+
+    /// The sky layer as the game packs it: two cells to a byte, the even cell
+    /// in the low nibble.
+    ///
+    /// The game keeps a section's light in two thousand and forty-eight bytes
+    /// of nibbles, and that is what goes on the wire. The even cell is the low
+    /// nibble: `DataLayer.get` reads `data[index >> 1]` and shifts by
+    /// `(index & 1) << 2`.
+    pub fn sky_bytes(&self) -> Vec<u8> {
+        let mut out = vec![0u8; SECTION_VOLUME / 2];
+        for (index, value) in self.sky.iter().enumerate() {
+            let nibble = value & 0x0F;
+            if index % 2 == 0 {
+                out[index / 2] = nibble;
+            } else {
+                out[index / 2] |= nibble << 4;
+            }
+        }
+        out
+    }
+
+    /// The block layer as the game packs it, the same way as the sky.
+    pub fn block_bytes(&self) -> Vec<u8> {
+        let mut out = vec![0u8; SECTION_VOLUME / 2];
+        for (index, value) in self.block.iter().enumerate() {
+            let nibble = value & 0x0F;
+            if index % 2 == 0 {
+                out[index / 2] = nibble;
+            } else {
+                out[index / 2] |= nibble << 4;
+            }
+        }
+        out
     }
 
     /// Dense index-array bytes for both layers. Excludes the palettes.

@@ -104,6 +104,13 @@ pub struct World {
     /// this is only what has happened since someone last asked.
     tick_changes: Vec<(BlockPos, BlockId)>,
 
+    /// Sections whose light moved, waiting to be told about.
+    ///
+    /// The client keeps the light it was given with the chunk, so a hole dug
+    /// in a lit room is still lit on the client's screen until somebody tells
+    /// it otherwise. This is what tells it.
+    light_changes: Vec<SectionPos>,
+
     /// Where the world came from and will go back to. None means memory only.
     store: Option<std::sync::Arc<super::storage::WorldStore>>,
 
@@ -151,6 +158,7 @@ impl Clone for World {
             day_time: self.day_time,
             ticks: self.ticks.clone(),
             tick_changes: Vec::new(),
+            light_changes: Vec::new(),
             // A clone has no folder of its own; sharing one would mean two
             // worlds writing the same region files.
             store: None,
@@ -187,6 +195,7 @@ impl World {
         day_time: 0,
         ticks: crate::world::ticks::BlockTicks::new(),
         tick_changes: Vec::new(),
+        light_changes: Vec::new(),
         store: store.map(std::sync::Arc::new),
         spawn: (0, 64, 0),
     };
@@ -380,6 +389,22 @@ impl World {
         std::mem::take(&mut self.tick_changes)
     }
 
+    /// The sections whose light moved since anyone last looked.
+    pub fn take_light_changes(&mut self) -> Vec<SectionPos> {
+        std::mem::take(&mut self.light_changes)
+    }
+
+    /// The light of one section, packed the way the game packs it.
+    ///
+    /// `None` when the section is not here: a chunk that was thrown away has
+    /// no light to give, and the client is told nothing rather than told
+    /// something that is not there.
+    pub fn section_sky_bytes(&self, section: SectionPos) -> Option<Vec<u8>> {
+        let chunk = self.chunk(section.chunk_pos())?;
+        let light = chunk.section_light(section)?;
+        Some(light.sky_bytes())
+    }
+
     /// What the world changed by itself since anyone last looked.
     pub fn pending_tick_changes(&self) -> usize {
         self.tick_changes.len()
@@ -529,12 +554,28 @@ impl World {
         let mut chunk = chunk;
         // Replay whatever was done here before. Without this the chunk comes
         // back as the noise made it and a hole is a hole again.
-        if let Some(edits) = self.edits.get(&pos) {
+        let edits = self.edits.get(&pos).cloned();
+        if let Some(edits) = &edits {
             for (at, block) in edits {
                 chunk.set_block(*at, *block);
             }
         }
         self.chunks.insert(pos, chunk);
+
+        // The light of a chunk is worked out when it arrives, not read from
+        // the file: the game does not keep it either, because the light of a
+        // chunk depends on the chunks around it.
+        self.light_chunk_columns(pos);
+
+        // And the light around those edits has to be computed again. The
+        // chunk came from the noise, which does not know a hole was dug in it,
+        // so without this a hole that was dark when it was made is lit again
+        // when the chunk comes back.
+        if let Some(edits) = edits {
+            for (at, _) in edits {
+                self.relight_around(at);
+            }
+        }
     }
 
     /// What has been changed in each chunk, and how much.
@@ -572,18 +613,10 @@ impl World {
         let mut registry = BlockRegistry::new();
         let terrain = register_terrain(&mut registry);
 
-        let mut chunks = HashMap::new();
-        for x in -radius..=radius {
-            for z in -radius..=radius {
-                let pos = ChunkPos::new(x, z);
-                chunks.insert(pos, generate_chunk(pos, &terrain));
-            }
-        }
-
-        Self {
+        let mut world = Self {
             registry,
             terrain,
-            chunks,
+            chunks: HashMap::new(),
             store: None,
             edits: HashMap::new(),
             dirty: HashSet::new(),
@@ -591,8 +624,21 @@ impl World {
             day_time: 0,
             ticks: crate::world::ticks::BlockTicks::new(),
             tick_changes: Vec::new(),
+            light_changes: Vec::new(),
             spawn: (0, 64, 0),
+        };
+
+        // Through `store_chunk`, so that every chunk has its light worked out
+        // the way a chunk that arrives from a file would.
+        for x in -radius..=radius {
+            for z in -radius..=radius {
+                let pos = ChunkPos::new(x, z);
+                let chunk = generate_chunk(pos, &world.terrain);
+                world.store_chunk(pos, chunk);
+            }
         }
+
+        world
     }
 
     pub fn registry(&self) -> &BlockRegistry {
@@ -772,7 +818,11 @@ impl World {
 
         // Shading changed wherever the light moved, which reaches further than
         // the block edit itself.
-        sections.extend(self.relight_around(pos));
+        let relit = self.relight_around(pos);
+        sections.extend(relit.iter().copied());
+        // And the sections whose light moved are what the client has to be
+        // told about, or the hole stays lit on its screen.
+        self.light_changes.extend(relit);
 
         sections.sort_by_key(|section| (section.x, section.y, section.z));
         sections.dedup();

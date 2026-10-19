@@ -108,7 +108,7 @@ pub fn write_chunk(out: &mut Vec<u8>, x: i32, z: i32) {
     for _ in 0..SECTIONS {
         sections.push(air.clone());
     }
-    write_chunk_with_states(out, x, z, &sections);
+    write_chunk_with_states(out, x, z, &sections, &[]);
 }
 
 /// Writes the chunk, with each section's block states supplied.
@@ -117,7 +117,13 @@ pub fn write_chunk(out: &mut Vec<u8>, x: i32, z: i32) {
 /// ids in wire order. This is the split between generating a world and putting it
 /// on the wire: the world module knows about terrain and the wire module knows
 /// about the protocol, and neither needs to know about the other.
-pub fn write_chunk_with_states(out: &mut Vec<u8>, x: i32, z: i32, sections: &[Vec<i32>]) {
+pub fn write_chunk_with_states(
+    out: &mut Vec<u8>,
+    x: i32,
+    z: i32,
+    sections: &[Vec<i32>],
+    sky: &[Option<Vec<u8>>],
+) {
     VarInt(id::LEVEL_CHUNK_WITH_LIGHT).write(out);
     out.extend_from_slice(&x.to_be_bytes());
     out.extend_from_slice(&z.to_be_bytes());
@@ -125,12 +131,13 @@ pub fn write_chunk_with_states(out: &mut Vec<u8>, x: i32, z: i32, sections: &[Ve
     write_heightmaps(out);
     write_sections(out, sections);
     write_block_entities(out);
-    write_light(out);
+    write_light(out, sky);
 }
 
 /// Packet ids, from `packets.json`.
 pub mod id {
     pub const LEVEL_CHUNK_WITH_LIGHT: i32 = 46;
+    pub const LIGHT_UPDATE: i32 = 49;
 }
 
 /// The heightmaps, as a map of type to packed bits.
@@ -350,49 +357,45 @@ fn write_block_entities(out: &mut Vec<u8>) {
 /// which are empty of it; the lists hold the light itself, two thousand and
 /// forty-eight bytes per section because each block gets four bits.
 ///
-/// Sky light is fifteen everywhere, which is what an empty column above ground
-/// has. Block light is zero, which is why the sections are listed as empty
-/// rather than sent as a thousand blocks of zero.
-fn write_light(out: &mut Vec<u8>) {
-    // Sky light is present in every section, and every section is empty of block
-    // light. Built twice rather than moved, since a Vec is not Copy.
-    let sky_present = section_mask_bytes();
-    let block_absent = section_mask_bytes();
-
-    write_bit_set(out, &sky_present);
-    write_bit_set(out, &[]);
-    write_bit_set(out, &[]);
-    write_bit_set(out, &block_absent);
-
-    // Sky updates: one layer per section, every block fully lit.
-    VarInt(SECTIONS as i32).write(out);
-    for _ in 0..SECTIONS {
-        VarInt(LIGHT_BYTES as i32).write(out);
-        out.extend(std::iter::repeat_n(0xFFu8, LIGHT_BYTES));
+/// The sky light is the world's own, not a blanket fifteen. A blanket fifteen
+/// is what the client used to be told, and it is why a hole dug in a lit room
+/// stayed lit: the client was told the world was in full daylight, and it
+/// believed it.
+fn write_light(out: &mut Vec<u8>, sky: &[Option<Vec<u8>>]) {
+    // The sections that carry sky light, and the ones that carry none of it.
+    let mut sky_present: Vec<u8> = Vec::new();
+    let mut sky_empty: Vec<u8> = Vec::new();
+    let mut updates: Vec<Vec<u8>> = Vec::new();
+    for (index, section) in sky.iter().enumerate() {
+        match section {
+            Some(bytes) if bytes.iter().any(|b| *b != 0) => {
+                set_bit(&mut sky_present, index);
+                updates.push(bytes.clone());
+            }
+            Some(_) => {
+                // Every cell in it is dark: the game says so with the empty
+                // mask and sends no data for it.
+                set_bit(&mut sky_empty, index);
+            }
+            None => {}
+        }
     }
 
-    // No block updates, which is consistent with every section being empty.
-    VarInt(0).write(out);
-}
+    write_bit_set(out, &sky_present);
+    // No block light anywhere: nothing in this world gives off light yet.
+    write_bit_set(out, &[]);
+    write_bit_set(out, &sky_empty);
+    write_bit_set(out, &[]);
 
-/// The shortest byte form of a bit set with every section in it.
-///
-/// `BitSet.toByteArray` indexes from the least significant byte, and the length
-/// is however far it must reach to cover the highest bit set, so a partial last
-/// byte is included and not padded.
-fn section_mask_bytes() -> Vec<u8> {
-    let needed = SECTIONS.div_ceil(8);
-    (0..needed)
-        .map(|byte| {
-            let low = byte * 8;
-            let in_this = SECTIONS.saturating_sub(low).min(8);
-            if in_this >= 8 {
-                0xFFu8
-            } else {
-                ((1u16 << in_this) - 1) as u8
-            }
-        })
-        .collect()
+    VarInt(updates.len() as i32).write(out);
+    for bytes in &updates {
+        VarInt(bytes.len() as i32).write(out);
+        out.extend_from_slice(bytes);
+    }
+
+    // And no block light updates, which is consistent with every section being
+    // empty of it.
+    VarInt(0).write(out);
 }
 
 /// Writes a bit set.
@@ -411,6 +414,63 @@ fn section_mask_bytes() -> Vec<u8> {
 fn write_bit_set(out: &mut Vec<u8>, mask: &[u8]) {
     VarInt(mask.len() as i32).write(out);
     out.extend_from_slice(mask);
+}
+
+/// Writes the light of some sections of a chunk, for the sections that moved.
+///
+/// The client keeps the light it was given with the chunk, so a hole dug in a
+/// lit room is still lit on its screen until somebody says otherwise. This is
+/// the saying otherwise.
+///
+/// The shape is the same as the light in the chunk packet: four bit sets and
+/// two lists. The first says which sections carry sky light, the third which
+/// carry none of it, and the list holds the light itself.
+pub fn write_light_update(
+    out: &mut Vec<u8>,
+    chunk_x: i32,
+    chunk_z: i32,
+    sections: &[(i32, Vec<u8>)],
+) {
+    VarInt(id::LIGHT_UPDATE).write(out);
+    VarInt(chunk_x).write(out);
+    VarInt(chunk_z).write(out);
+
+    // The sections with light in them, and the ones without.
+    let mut present: Vec<u8> = Vec::new();
+    let mut empty: Vec<u8> = Vec::new();
+    for (index, bytes) in sections {
+        if bytes.iter().any(|b| *b != 0) {
+            set_bit(&mut present, *index as usize);
+        } else {
+            set_bit(&mut empty, *index as usize);
+        }
+    }
+
+    write_bit_set(out, &present);
+    // No block light: nothing in this world gives off light yet.
+    write_bit_set(out, &[]);
+    write_bit_set(out, &empty);
+    write_bit_set(out, &[]);
+
+    VarInt(sections.len() as i32).write(out);
+    for (_, bytes) in sections {
+        VarInt(bytes.len() as i32).write(out);
+        out.extend_from_slice(bytes);
+    }
+
+    // And no block light updates, which is consistent with every section being
+    // empty of it.
+    VarInt(0).write(out);
+}
+
+/// Sets one bit in a bit set, which is a list of bytes with the least
+/// significant bit first.
+pub fn set_bit(bits: &mut Vec<u8>, index: usize) {
+    let byte = index / 8;
+    if bits.len() <= byte {
+        bits.resize(byte + 1, 0);
+    }
+    bits[byte] |= 1 << (index % 8);
 }
 /// A seed for the world, kept here so the world module does not need to know
 /// about the packet.

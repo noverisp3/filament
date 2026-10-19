@@ -141,7 +141,7 @@ fn a_chunk_of_terrain_carries_more_than_the_empty_one() {
     }
 
     let mut w = Vec::new();
-    write_chunk_with_states(&mut w, 0, 0, &ground);
+    write_chunk_with_states(&mut w, 0, 0, &ground, &[]);
 
     let mut empty = Vec::new();
     write_chunk(&mut empty, 0, 0);
@@ -218,34 +218,46 @@ fn the_chunk_starts_with_its_coordinates() {
 }
 
 #[test]
-fn the_light_says_full_sky_and_no_block_light() {
+fn the_light_carries_the_sections_that_have_it() {
+    // Two sections with light in them and one that is dark: the dark one is
+    // named in the empty mask and no data is sent for it, which is what the
+    // game does and what keeps a dark cave from carrying two thousand bytes
+    // of zero.
+    let lit = vec![0xFFu8; 2048];
+    let dark = vec![0u8; 2048];
+    let sky = vec![Some(lit.clone()), Some(dark.clone()), None];
+
     let mut w = Vec::new();
-    write_light(&mut w);
+    write_light(&mut w, &sky);
 
-    // A bit set is a byte count and then the bytes, so twenty-four sections
-    // is three bytes of FF and not one eight byte word.
-    assert_eq!(w[0], 3, "the sky mask is three bytes");
-    assert_eq!(&w[1..4], &[0xFF, 0xFF, 0xFF], "every section has sky light");
+    // A bit set is a byte count and then the bytes, so the first section is
+    // one bit in one byte.
+    assert_eq!(w[0], 1, "the sky mask is one byte");
+    assert_eq!(w[1], 0b0000_0001, "the first section has sky light");
 
-    assert_eq!(w[4], 0, "the block mask is empty, not zero");
-    assert_eq!(w[5], 0, "and no section is empty of sky light");
+    assert_eq!(w[2], 0, "the block mask is empty, not zero");
 
-    assert_eq!(w[6], 3, "the empty block mask is three bytes");
-    assert_eq!(&w[7..10], &[0xFF, 0xFF, 0xFF], "no block light anywhere");
+    // The empty sky mask names the second section.
+    assert_eq!(w[3], 1, "the empty sky mask is one byte");
+    assert_eq!(w[4], 0b0000_0010, "the second section is dark");
 
-    let (updates, after) = VarInt::read(&mut &w[10..]).expect("an update count");
-    assert_eq!(updates.0 as usize, SECTIONS);
-    assert_eq!(after, 1);
+    assert_eq!(w[5], 0, "the empty block mask is empty");
+
+    // And one update, for the one section that had light.
+    let (updates, after) = VarInt::read(&mut &w[6..]).expect("an update count");
+    assert_eq!(updates.0, 1);
+    let (len, _) = VarInt::read(&mut &w[6 + after..]).expect("a length");
+    assert_eq!(len.0, 2048, "a section of light is two thousand and forty-eight bytes");
 }
 
 #[test]
-fn a_bit_set_of_sections_is_three_bytes() {
+fn a_bit_set_of_sections_is_the_shortest_form() {
     // BitSet.toByteArray is the shortest form that reaches the highest bit,
     // so twenty-four sections is three bytes and not eight.
-    assert_eq!(section_mask_bytes(), vec![0xFF, 0xFF, 0xFF]);
+    let all = vec![0xFFu8; 3];
 
     let mut w = Vec::new();
-    write_bit_set(&mut w, &section_mask_bytes());
+    write_bit_set(&mut w, &all);
     assert_eq!(w, vec![3, 0xFF, 0xFF, 0xFF]);
 
     let mut empty = Vec::new();
@@ -254,31 +266,26 @@ fn a_bit_set_of_sections_is_three_bytes() {
 }
 
 #[test]
-fn the_sky_updates_are_one_full_layer_per_section() {
-    let mut w = Vec::new();
-    write_light(&mut w);
+fn the_sky_updates_are_one_layer_per_section_that_has_light() {
+    // Twenty-four sections, all with light in them: one update each, and the
+    // data is the section's own light rather than a blanket fifteen.
+    let lit: Vec<Option<Vec<u8>>> = (0..SECTIONS)
+        .map(|_| Some(vec![0xFFu8; LIGHT_BYTES]))
+        .collect();
 
-    // Ten bytes of masks, then a one byte count, then a layer each: a
-    // VarInt length of 2048, which is two bytes, and 2048 bytes of light.
-    let expected = 10 + 1 + SECTIONS * (2 + LIGHT_BYTES) + 1;
+    let mut w = Vec::new();
+    write_light(&mut w, &lit);
+
+    // Four masks (seven bytes: the sky mask carries three and the other three
+    // carry none), then a count, then a layer each: a VarInt length of 2048,
+    // which is two bytes, and 2048 bytes of light.
+    let expected = 7 + 1 + SECTIONS * (2 + LIGHT_BYTES) + 1;
     assert_eq!(
         w.len(),
         expected,
-        "ten bytes of masks, then a count, {SECTIONS} layers of \
-         {LIGHT_BYTES} bytes each, then an empty block list"
+        "four masks, then a count, {SECTIONS} layers of {LIGHT_BYTES} bytes \
+         each, then an empty block list"
     );
-
-    assert!(w[..10].contains(&0xFF), "sanity: the mask is set");
-    assert_eq!(w[4], 0);
-}
-
-#[test]
-fn the_full_mask_covers_every_section_and_nothing_else() {
-    let mask = section_mask_bytes();
-    assert_eq!(mask.len(), 3);
-    // Every bit in those three bytes is a section, and the fourth byte does
-    // not exist, which is the difference between this and a padded mask.
-    assert_eq!(mask.iter().map(|b| b.count_ones()).sum::<u32>(), SECTIONS as u32);
 }
 
 #[test]

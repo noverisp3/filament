@@ -58,6 +58,12 @@ pub const TICK: Duration = Duration::from_millis(1000 / TICKS_PER_SECOND as u64)
 /// depends on catching up.
 const MAX_CATCH_UP: u32 = 5;
 
+/// The light of the sections that moved, and where they are.
+///
+/// A chunk's coordinates, the section's place in the chunk, and the light
+/// itself packed the way the game packs it.
+pub type LightChanges = Vec<(i32, i32, i32, Vec<u8>)>;
+
 /// What a connection can ask the world to do.
 ///
 /// Every one of these is answered by the thread that owns the world, and none of
@@ -116,6 +122,8 @@ pub enum Command {
     Registry { reply: Sender<crate::world::block::BlockRegistry> },
     /// Where a player arrives, in blocks, as the world file says.
     SpawnPoint { reply: Sender<(i32, i32, i32)> },
+    /// The light of the sections that moved, so a client can be told.
+    LightChanges { reply: Sender<LightChanges> },
     /// What the world changed on its own since anyone last asked.
     ///
     /// A tick runs on the world thread with no connection to look out of, so
@@ -295,6 +303,11 @@ impl WorldHandle {
     /// Where a player arrives, in blocks.
     pub fn spawn_point(&self) -> Option<(i32, i32, i32)> {
         self.ask(|reply| Command::SpawnPoint { reply })
+    }
+
+    /// The light of the sections that moved since anyone last looked.
+    pub fn light_changes(&self) -> LightChanges {
+        self.ask(|reply| Command::LightChanges { reply }).unwrap_or_default()
     }
 
     /// What the world has changed by itself since this was last asked.
@@ -705,6 +718,21 @@ Command::Chunk { pos, reply } => {
             let _ = reply.send(world.spawn_point());
         }
 
+        Command::LightChanges { reply } => {
+            // The sections whose light moved, each with its light packed the
+            // way the game packs it.
+            let changes = world.take_light_changes();
+            let mut out = Vec::new();
+            for section in changes {
+                let Some(bytes) = world.section_sky_bytes(section) else {
+                    continue;
+                };
+                let index = section.y - crate::world::chunk::MIN_SECTION_Y;
+                out.push((section.chunk_pos().x, section.chunk_pos().z, index, bytes));
+            }
+            let _ = reply.send(out);
+        }
+
         Command::TickChanges { reply } => {
             let _ = reply.send(world.take_tick_changes());
         }
@@ -827,8 +855,18 @@ fn encode_chunk_body(
         })
         .collect();
 
+    // The light of each section, in the order the wire wants them: the bottom
+    // of the world first.
+    let sky: Vec<Option<Vec<u8>>> = (0..crate::world::chunk::SECTIONS_PER_CHUNK)
+        .map(|index| {
+            chunk
+                .light_at(index)
+                .map(|light| light.sky_bytes())
+        })
+        .collect();
+
     let mut body = Vec::new();
-    crate::protocol::chunk::write_chunk_with_states(&mut body, pos.x, pos.z, &sections);
+    crate::protocol::chunk::write_chunk_with_states(&mut body, pos.x, pos.z, &sections, &sky);
     body
 }
 

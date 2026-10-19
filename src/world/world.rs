@@ -205,6 +205,16 @@ impl World {
         }
         if let Some(super::nbt::Tag::Long(t)) = data.get("DayTime") {
             world.day_time = *t as u64;
+        } else if let Some(clocks) = world.store.as_ref().and_then(|store| store.read_clocks())
+            && let Some(data) = clocks.compound("data")
+            && let Some(overworld) = data.compound("minecraft:overworld")
+            && let Some(super::nbt::Tag::Long(t)) = overworld.get("total_ticks")
+        {
+            // The game moved the day counter out of the level file and into a
+            // clock file of its own. That is where the sun's position lives
+            // now, and a day counter of zero would put the sun at dawn every
+            // time the server started.
+            world.day_time = *t as u64;
         }
         if let Some(super::nbt::Tag::Compound(spawn)) = data.get("spawn")
             && let Some(super::nbt::Tag::IntArray(pos)) = spawn.get("pos")
@@ -283,13 +293,28 @@ impl World {
         // The file the game writes has its data under a name; a file this
         // build wrote has it at the top. Either way the clock goes in the
         // place the fields are.
-        let data = match level.compound_mut("Data") {
-            Some(data) => data,
-            None => &mut level,
+        let had_day_time = {
+            let data = match level.compound_mut("Data") {
+                Some(data) => data,
+                None => &mut level,
+            };
+            data.set("Time", super::nbt::Tag::Long(self.game_time as i64));
+            // The day counter only goes in where it already was: the game
+            // moved it to a clock file of its own, and a file that has it in
+            // two places is a file the game has to fix.
+            let had = data.contains("DayTime");
+            if had {
+                data.set("DayTime", super::nbt::Tag::Long(self.day_time as i64));
+            }
+            had
         };
-        data.set("Time", super::nbt::Tag::Long(self.game_time as i64));
-        data.set("DayTime", super::nbt::Tag::Long(self.day_time as i64));
-        store.write_level(&level)
+        store.write_level(&level)?;
+        if !had_day_time {
+            // The day counter belongs in the clock file, and is put there so
+            // the game finds it where it looks.
+            store.write_clocks(self.day_time)?;
+        }
+        Ok(())
     }
 
     /// Where a player arrives, in blocks.

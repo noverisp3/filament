@@ -112,6 +112,57 @@ impl WorldStore {
         self.root.join(LEVEL_NAME)
     }
 
+    /// The world's clocks, kept beside the level file rather than in it.
+    ///
+    /// The game moved the day counter out of `level.dat` and into a saved
+    /// data file of its own, which is where the sun's position lives now.
+    /// The file is named after the saved data id, with the namespace dropped.
+    fn clocks_path(&self) -> PathBuf {
+        self.root.join("data").join("minecraft").join("world_clocks.dat")
+    }
+
+    /// The day counter, as the game left it.
+    ///
+    /// `None` when the world has no clock file, which is what a world written
+    /// before the move looks like: its day counter is in `level.dat` instead.
+    pub fn read_clocks(&self) -> Option<Compound> {
+        let bytes = std::fs::read(self.clocks_path()).ok()?;
+        let bytes = decompress(&bytes).ok()?;
+        super::nbt::read(&bytes).ok()
+    }
+
+    /// Writes the clock file, with the overworld's counter moved on.
+    ///
+    /// The other clocks are left as they were: the end has one of its own,
+    /// and this server does not run it.
+    pub fn write_clocks(&self, day_time: u64) -> io::Result<()> {
+        let mut root = self.read_clocks().unwrap_or_else(|| {
+            Compound::new().put("DataVersion", Tag::Int(chunk_nbt::DATA_VERSION))
+        });
+        let mut data = root.compound("data").cloned().unwrap_or_default();
+        let mut overworld = data
+            .compound("minecraft:overworld")
+            .cloned()
+            .unwrap_or_default();
+        overworld.set("total_ticks", Tag::Long(day_time as i64));
+        data.set("minecraft:overworld", Tag::Compound(overworld));
+        root.set("data", Tag::Compound(data));
+
+        let bytes = super::nbt::write(&root);
+        let mut out = Vec::new();
+        {
+            use std::io::Write;
+            flate2::write::GzEncoder::new(&mut out, flate2::Compression::default())
+                .write_all(&bytes)
+                .map_err(io::Error::other)?;
+        }
+        let path = self.clocks_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        atomic_write(&path, &out)
+    }
+
     /// The region containing `pos`, opened once and kept.
     ///
     /// `None` means the file is not there yet, which is cached too: without

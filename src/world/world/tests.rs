@@ -358,6 +358,43 @@ fn the_level_file_is_edited_rather_than_replaced() {
 }
 
 #[test]
+fn the_day_counter_comes_from_the_clock_file() {
+    // The game moved the day counter out of the level file and into a clock
+    // file of its own, so a world written by the game has no DayTime in it at
+    // all. Reading the level file alone would put the sun at dawn every time
+    // the server started.
+    let dir = std::env::temp_dir().join(format!(
+        "filament-clocks-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+    ));
+    std::fs::create_dir_all(&dir).expect("a scratch world folder");
+
+    // A level file with an age and no day counter, and a clock file with one.
+    let level = crate::world::storage::default_level("clocky", 500, 0, (0, 64, 0));
+    let mut level = level;
+    level.remove("DayTime");
+    {
+        let store = crate::world::storage::WorldStore::open(&dir).unwrap();
+        store.write_level(&level).expect("the folder is writable");
+        store.write_clocks(626_627).expect("the folder is writable");
+    }
+
+    let world = World::with_store(Some(crate::world::storage::WorldStore::open(&dir).unwrap()));
+    assert_eq!(
+        world.day_time(),
+        626_627,
+        "the day counter comes from the clock file"
+    );
+    assert_eq!(world.game_time(), 500, "and the age from the level file");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn a_chunk_that_was_walked_away_from_is_read_back_and_not_made_again() {
     // The case that loses a world. A chunk is loaded, edited and then thrown
     // out because the player walked away. At the save it is no longer in

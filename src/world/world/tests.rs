@@ -358,6 +358,61 @@ fn the_level_file_is_edited_rather_than_replaced() {
 }
 
 #[test]
+fn many_changed_chunks_in_one_region_are_all_saved() {
+    // A region file holds a thousand chunks and is written whole, so saving
+    // them one at a time writes the same megabytes again and again. All of
+    // them have to end up on disk, and in the same file.
+    let dir = std::env::temp_dir().join(format!(
+        "filament-region-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+    ));
+    std::fs::create_dir_all(&dir).expect("a scratch world folder");
+
+    let mut world =
+        World::with_store(Some(crate::world::storage::WorldStore::open(&dir).unwrap()));
+    let air = world.registry().id("air").expect("registered");
+
+    // Twelve chunks, all in the region around the origin.
+    let mut dug = Vec::new();
+    for n in 0..12 {
+        let pos = ChunkPos::new(n, 0);
+        world.ensure_chunk(pos);
+        let target = (-40..320)
+            .find_map(|y| {
+                let at = BlockPos::new(7, y, 7);
+                match world.block(at) {
+                    Some(id) if id != air => Some(at),
+                    _ => None,
+                }
+            })
+            .expect("terrain keeps a solid cell below y=64");
+        world.set_block(target, air).expect("the dig lands");
+        dug.push(target);
+    }
+    let written = world.flush().expect("the folder is writable");
+    assert_eq!(written, 12, "every changed chunk is written");
+    drop(world);
+
+    // And they are all there.
+    let mut world =
+        World::with_store(Some(crate::world::storage::WorldStore::open(&dir).unwrap()));
+    for (n, target) in dug.iter().enumerate() {
+        world.ensure_chunk(ChunkPos::new(n as i32, 0));
+        assert_eq!(
+            world.block_name(world.block(*target).expect("a block")),
+            "air",
+            "the hole in chunk {n} must still be a hole"
+        );
+    }
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn the_day_counter_comes_from_the_clock_file() {
     // The game moved the day counter out of the level file and into a clock
     // file of its own, so a world written by the game has no DayTime in it at

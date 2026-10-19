@@ -239,7 +239,7 @@ impl World {
             return Ok(0);
         };
         let dirty: Vec<ChunkPos> = self.dirty.iter().copied().collect();
-        let mut written = 0;
+        let mut ready: Vec<(ChunkPos, Chunk)> = Vec::with_capacity(dirty.len());
         for pos in dirty {
             // The chunk as it stands. If it is still here, that is the answer.
             // If it is not -- a player walked away and it was thrown out --
@@ -260,15 +260,30 @@ impl World {
                 replay_edits(&mut chunk, self.edits.get(&pos));
                 chunk
             };
-            match store.save(pos, &chunk, &self.registry, game_time) {
-                Ok(()) => {
-                    written += 1;
-                    self.dirty.remove(&pos);
+            ready.push((pos, chunk));
+        }
+        if ready.is_empty() {
+            return Ok(0);
+        }
+
+        // All of them at once, so that a region is written once rather than
+        // once per chunk in it.
+        let borrowed: Vec<(ChunkPos, &Chunk)> = ready
+            .iter()
+            .map(|(pos, chunk)| (*pos, chunk))
+            .collect();
+        match store.save_many(&borrowed, &self.registry, game_time) {
+            Ok(written) => {
+                for (pos, _) in &ready {
+                    self.dirty.remove(pos);
                 }
-                Err(e) => eprintln!("cannot save chunk {},{}: {e}", pos.x, pos.z),
+                Ok(written)
+            }
+            Err(e) => {
+                eprintln!("cannot save the world: {e}");
+                Ok(0)
             }
         }
-        Ok(written)
     }
 
     /// Writes `level.dat`, if there is a world folder to write it into.

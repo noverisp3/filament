@@ -234,44 +234,69 @@ impl WorldStore {
         registry: &BlockRegistry,
         game_time: u64,
     ) -> io::Result<()> {
-        let (local_x, local_z) = ChunkKey::local_of(pos.x, pos.z);
-        let compound = chunk_nbt::write(chunk, registry, game_time, 0);
+        self.save_many(&[(pos, chunk)], registry, game_time)
+            .map(|_| ())
+    }
 
-        let path = self.region_path(pos);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-    // A read that missed has cached `None` for this region, but a save may be
-    // the first thing ever to touch the file: here a cached miss is retried
-    // and a fresh region file is born, rather than being treated as an open
-    // that already failed.
-    let key = (pos.x.div_euclid(32), pos.z.div_euclid(32));
-    let mut regions = self.regions.lock().unwrap_or_else(|e| e.into_inner());
-    let slot = regions.entry(key).or_insert_with(|| {
-        if !path.exists() {
-            return None;
-        }
-        match RegionFile::read(&path) {
-            Ok(region) => Some(region),
-            Err(e) => {
-                eprintln!("cannot read {}: {e}", path.display());
-                None
+    /// Puts several chunks back and writes each region out once.
+    ///
+    /// A region file holds a thousand chunks and is written whole, so saving
+    /// them one at a time writes the same megabytes over and over: twenty
+    /// changed chunks in one region is two hundred megabytes of writing for
+    /// the same file. Here every chunk goes into its region's memory first
+    /// and the regions are written once each, at the end.
+    ///
+    /// Returns how many chunks were written.
+    pub fn save_many(
+        &self,
+        chunks: &[(ChunkPos, &Chunk)],
+        registry: &BlockRegistry,
+        game_time: u64,
+    ) -> io::Result<usize> {
+        let mut regions = self.regions.lock().unwrap_or_else(|e| e.into_inner());
+        let mut touched: Vec<(i32, i32)> = Vec::new();
+
+        for (pos, chunk) in chunks {
+            let (local_x, local_z) = ChunkKey::local_of(pos.x, pos.z);
+            let compound = chunk_nbt::write(chunk, registry, game_time, 0);
+            let key = (pos.x.div_euclid(32), pos.z.div_euclid(32));
+            let path = ChunkKey::of(pos.x, pos.z).path_in(&self.overworld());
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let slot = regions.entry(key).or_insert_with(|| {
+                if !path.exists() {
+                    return None;
+                }
+                match RegionFile::read(&path) {
+                    Ok(region) => Some(region),
+                    Err(e) => {
+                        eprintln!("cannot read {}: {e}", path.display());
+                        None
+                    }
+                }
+            });
+            if slot.is_none() {
+                *slot = Some(RegionFile::empty());
+            }
+            let region = slot.as_mut().expect("the slot was filled in just above");
+            region.put(local_x, local_z, compound);
+            if !touched.contains(&key) {
+                touched.push(key);
             }
         }
-    });
-    if slot.is_none() {
-        *slot = Some(RegionFile::empty());
-    }
-    let region = slot.as_mut().expect("the slot was filled in just above");
-    region.put(local_x, local_z, compound);
 
-        let region = regions
-            .get(&key)
-            .and_then(|r| r.as_ref())
-            .ok_or_else(|| {
-                io::Error::other("the region file could not be written")
-            })?;
-        region.write(&path)
+        // One write per region, with the lock still held: a region is one
+        // file, and two threads writing it at once would produce a file that
+        // is neither one's.
+        for key in touched {
+            let path = ChunkKey::of(key.0 * 32, key.1 * 32).path_in(&self.overworld());
+            let Some(region) = regions.get(&key).and_then(|r| r.as_ref()) else {
+                continue;
+            };
+            region.write(&path)?;
+        }
+        Ok(chunks.len())
     }
 
     /// Reads `level.dat` as stored, if there is one.

@@ -36,6 +36,7 @@ pub mod block;
 pub mod chunk;
 pub mod light;
 pub mod lighting;
+pub mod nbt;
 pub mod palette;
 pub mod pos;
 pub mod raycast;

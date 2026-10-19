@@ -40,6 +40,7 @@ pub mod palette;
 pub mod pos;
 pub mod raycast;
 pub mod section;
+pub mod ticks;
 pub mod terrain;
 // `world::world` reads oddly next to the other `world::*` modules, but every
 // alternative name is worse. See re-exports below.

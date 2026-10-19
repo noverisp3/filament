@@ -1819,6 +1819,35 @@ fn place_block(
         // it predicted the block going: the game excludes them, and sending it
         // to them gives everyone watching a single break and the player who did
         // it two.
+        // What the world has done to itself since this connection last looked.
+        //
+        // Drained, not read, so two players are not both sent the same change
+        // and it is not sent twice because of that. It goes to everyone in
+        // range rather than to whoever asked: a block that turned to grass
+        // because something above it was mined is not one player's news.
+        for (pos, _block) in session.world.take_tick_changes() {
+            let now = session
+                .world
+                .block_at(pos)
+                .flatten()
+                .unwrap_or(AIR_STATE);
+            let mut body = Vec::new();
+            p::write_block_update(&mut body, pos.x, pos.y, pos.z, now);
+            session.wire.send_others(player_id, body);
+            let mut mine = Vec::new();
+            p::write_block_update(&mut mine, pos.x, pos.y, pos.z, now);
+            edits.push(mine);
+            if super::log::verbose() {
+                log.note(format!(
+                    "the world changed {} {} {} to {}",
+                    pos.x,
+                    pos.y,
+                    pos.z,
+                    ticking::state_id_name(now)
+                ));
+            }
+        }
+
         if !edits.is_empty() || !effects.is_empty() || !acks.is_empty() || !slots.is_empty() {
             let outgoing = std::mem::take(&mut edits);
             let effects = std::mem::take(&mut effects);

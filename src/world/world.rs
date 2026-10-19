@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use super::block::{BlockId, BlockRegistry};
 use super::chunk::{Chunk, MIN_SECTION_Y, SECTIONS_PER_CHUNK};
-use super::pos::{BlockPos, ChunkPos, SECTION_DIM, SectionPos};
+use super::pos::{BlockPos, ChunkPos, Direction, SECTION_DIM, SectionPos};
 use super::raycast::{RayHit, raycast};
 use super::section::{Section, SectionNeighbors};
 use super::terrain::{TerrainBlocks, generate_chunk, register_terrain};
@@ -59,6 +59,52 @@ pub struct World {
     /// past, which is the thing that matters: a server nobody edited has an
     /// empty one no matter how far anyone travelled.
     edits: HashMap<ChunkPos, Vec<(BlockPos, BlockId)>>,
+
+    /// Ticks since the world began, counting up and never back.
+    ///
+    /// The game's `getGameTime`, and the number almost everything scheduled
+    /// refers to: "in twenty ticks" is a statement about this, so a rule that
+    /// wants to run again in twenty ticks has to know what now is.
+    game_time: u64,
+
+    /// Where the sun is, which is a different number from the same clock.
+    ///
+    /// This one wraps, at twenty-four thousand ticks, and it is what the client
+    /// is told so that the sky matches the world it is standing in. The two
+    /// answer different questions -- *how long has this world existed* and *what
+    /// time is it* -- and a server that keeps one number for both sends a sky
+    /// that has been running since the world was made.
+    day_time: u64,
+
+    /// Work the world owes itself, ordered by when.
+    ticks: crate::world::ticks::BlockTicks,
+
+    /// What a tick changed on its own, waiting for a connection to send it.
+    ///
+    /// Separate from `edits`, which is the whole history and is never drained:
+    /// this is only what has happened since someone last asked.
+    tick_changes: Vec<(BlockPos, BlockId)>,
+}
+
+impl BlockEdit {
+    /// Folds another edit in, without reporting the same chunk twice.
+    ///
+    /// A tick that changes several neighbouring blocks produces several edits,
+    /// and each one names the chunk it is in. Sending a chunk twice is not wrong
+    /// -- the client takes the second -- but it is bytes for nothing, and the
+    /// list of chunks is what a caller walks to decide what to re-send.
+    pub fn merge(&mut self, other: BlockEdit) {
+        for pos in other.chunks {
+            if !self.chunks.contains(&pos) {
+                self.chunks.push(pos);
+            }
+        }
+        for pos in other.sections {
+            if !self.sections.contains(&pos) {
+                self.sections.push(pos);
+            }
+        }
+    }
 }
 
 impl Clone for World {
@@ -71,6 +117,10 @@ impl Clone for World {
             terrain: self.terrain,
             chunks: self.chunks.clone(),
             edits: self.edits.clone(),
+            game_time: self.game_time,
+            day_time: self.day_time,
+            ticks: self.ticks.clone(),
+            tick_changes: Vec::new(),
         }
     }
 }
@@ -90,8 +140,137 @@ impl World {
             terrain,
             chunks: HashMap::new(),
             edits: HashMap::new(),
+            game_time: 0,
+            day_time: 0,
+            ticks: crate::world::ticks::BlockTicks::new(),
+            tick_changes: Vec::new(),
         }
     }
+
+    /// Ticks since the world began.
+    pub fn game_time(&self) -> u64 {
+        self.game_time
+    }
+
+    /// Where the sun is, in ticks, wrapping at a full day.
+    pub fn day_time(&self) -> u64 {
+        self.day_time
+    }
+
+    /// Promises to come back to this position in `delay` ticks.
+    pub fn schedule_tick(&mut self, pos: BlockPos, delay: u64) {
+        self.ticks.schedule(self.game_time, delay, pos);
+    }
+
+    /// What the world promised itself and not yet did.
+    pub fn scheduled_ticks(&self) -> usize {
+        self.ticks.len()
+    }
+
+    /// What the last tick changed on its own, for the players who can see it.
+    ///
+    /// A tick has no connection to look out of, so what it changed has to be
+    /// collected here and drained by the connections. It is drained rather than
+    /// broadcast because the world thread does not know who is connected, and
+    /// sending to nobody is worse than sending late.
+    pub fn take_tick_changes(&mut self) -> Vec<(BlockPos, BlockId)> {
+        std::mem::take(&mut self.tick_changes)
+    }
+
+    /// What the world changed by itself since anyone last looked.
+    pub fn pending_tick_changes(&self) -> usize {
+        self.tick_changes.len()
+    }
+
+    /// Tells the six blocks around a change that something near them moved.
+    ///
+    /// The game's `updateNeighborsAt`, and the reason it exists: a block cannot
+    /// know what happened next to it, so the change goes round. It is scheduled
+    /// rather than run because the point of a neighbour update is that it may
+    /// change something else, and answering that inline turns one edit into a
+    /// chain of them all inside the event that caused it.
+    pub fn update_neighbors(&mut self, pos: BlockPos) {
+        for face in [
+            Direction::Down,
+            Direction::Up,
+            Direction::North,
+            Direction::South,
+            Direction::West,
+            Direction::East,
+        ] {
+            self.schedule_tick(pos.offset(face), 1);
+        }
+    }
+
+    /// Moves the world on by one tick.
+    ///
+    /// This is what a tick is *for*. Everything the game does on a delay -- a
+    /// block that wants to check its neighbours again, water looking for
+    /// somewhere to go, an item waiting to be picked up -- comes back through
+    /// here, and nothing is answered anywhere else.
+    ///
+    /// The order is the game's (`ServerLevel.tick`): work that is due is taken
+    /// under a budget, and what does not fit waits for the next tick rather than
+    /// being dropped or paid for all at once here.
+    pub fn tick(&mut self) -> BlockEdit {
+        self.game_time = self.game_time.wrapping_add(1);
+        self.day_time = (self.day_time + 1) % Self::DAY_LENGTH;
+
+        let mut edit = BlockEdit {
+            chunks: Vec::new(),
+            sections: Vec::new(),
+        };
+        let due = self
+            .ticks
+            .take_due(self.game_time, crate::world::ticks::TICK_BUDGET);
+        for pos in due {
+            self.block_update(pos, &mut edit);
+        }
+        edit
+    }
+
+    /// One block's turn to notice something.
+    ///
+    /// The game's is:
+    ///
+    /// ```java
+    /// private void tickBlock(final BlockPos pos, final Block type) {
+    ///    BlockState state = this.getBlockState(pos);
+    ///    if (state.is(type)) { state.tick(this, pos, this.random); }
+    /// }
+    /// ```
+    ///
+    /// -- re-read the block and only act if it is still the thing that was
+    /// asked. A player can break a block between it being scheduled and its turn
+    /// coming round, and a rule that acts on the stale name writes into a block
+    /// that is now something else.
+    fn block_update(&mut self, pos: BlockPos, edit: &mut BlockEdit) {
+        let Some(block) = self.block(pos) else { return };
+
+        // Grass comes back to dirt that has grass under it and air over it.
+        //
+        // That is the rule that makes a dug hillside green again instead of
+        // leaving a stripe of bare dirt across it, and it is the first thing the
+        // tick does here because it is the first thing that needed the tick to
+        // exist at all. Everything else this will eventually run -- water,
+        // crops, growing saplings -- is the same shape.
+        if block == self.terrain.dirt {
+            let above = self.block(pos.offset(Direction::Up));
+            let below = self.block(pos.offset(Direction::Down));
+            let open_above = above.map(|b| b == self.terrain.air).unwrap_or(true);
+            let grass_under = below.map(|b| b == self.terrain.grass).unwrap_or(false);
+            if open_above && grass_under
+                && let Some(made) = self.set_block(pos, self.terrain.grass)
+            {
+                self.tick_changes.push((pos, self.terrain.grass));
+                edit.merge(made);
+            }
+        }
+    }
+
+    /// A full day, in ticks. Twenty-four thousand, which is what a Minecraft day
+    /// is: twenty minutes at twenty a second.
+    pub const DAY_LENGTH: u64 = 24_000;
 
     /// The chunk at `pos`, generating and storing it if it is not there yet.
     ///
@@ -186,6 +365,10 @@ impl World {
             terrain,
             chunks,
             edits: HashMap::new(),
+            game_time: 0,
+            day_time: 0,
+            ticks: crate::world::ticks::BlockTicks::new(),
+            tick_changes: Vec::new(),
         }
     }
 
@@ -380,10 +563,28 @@ impl World {
         let journal = self.edits.entry(chunk_pos).or_default();
         match journal.iter_mut().find(|(at, _)| *at == pos) {
             Some(entry) => entry.1 = block,
-            None => journal.push((pos, block)),
-        }
+          None => journal.push((pos, block)),
+      }
 
-        Some(BlockEdit { chunks, sections })
+      // The six blocks around this one get told on the next tick, not now.
+      //
+      // A neighbour update is how a block learns something changed next to it,
+      // and answering it here would answer it before the change is even
+      // finished: a block placed against a fence needs the fence to notice, and
+      // the fence may yet be replaced by the next of the six.
+      self.schedule_tick(pos, 1);
+      for face in [
+          Direction::Down,
+          Direction::Up,
+          Direction::North,
+          Direction::South,
+          Direction::West,
+          Direction::East,
+      ] {
+          self.schedule_tick(pos.offset(face), 1);
+      }
+
+      Some(BlockEdit { chunks, sections })
     }
 
     /// Writes a block without relighting or reporting what to rebuild.
@@ -445,6 +646,7 @@ impl World {
 
 #[cfg(test)]
 mod tests;
+mod tick_tests;
 
 #[cfg(test)]
 mod sky_light_tests;

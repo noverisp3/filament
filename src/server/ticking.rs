@@ -102,6 +102,15 @@ pub enum Command {
     Forget { pos: ChunkPos },
     /// The terrain palette, which is five block ids and never changes.
     TerrainBlocks { reply: Sender<TerrainBlocks> },
+    /// What the world changed on its own since anyone last asked.
+    ///
+    /// A tick runs on the world thread with no connection to look out of, so
+    /// this is how what it did reaches the players who can see it.
+    TickChanges { reply: Sender<Vec<(BlockPos, BlockId)>> },
+    /// How long the world has been going, in ticks, and where the sun is.
+    Clock {
+        reply: Sender<(u64, u64)>,
+    },
     /// How many chunks the world is holding.
     ChunkCount { reply: Sender<usize> },
     /// Every remembered block edit, by the chunk it was made in.
@@ -224,6 +233,23 @@ impl WorldHandle {
         self.ask(|reply| Command::TerrainBlocks { reply })
     }
 
+    /// What the world has changed by itself since this was last asked.
+    ///
+    /// Draining rather than reading, so two connections do not both send the
+    /// same change and the change is not sent twice because of it.
+    pub fn take_tick_changes(&self) -> Vec<(BlockPos, BlockId)> {
+        self.ask(|reply| Command::TickChanges { reply })
+            .unwrap_or_default()
+    }
+
+    /// Ticks since the world began, and where the sun is.
+    ///
+    /// Two numbers because they answer two questions: how old the world is, and
+    /// what time it is. The sun wraps at a day; the age does not.
+    pub fn clock(&self) -> Option<(u64, u64)> {
+        self.ask(|reply| Command::Clock { reply })
+    }
+
     /// Drops a chunk the player has walked away from.
     pub fn forget(&self, pos: ChunkPos) -> bool {
         self.to_world
@@ -290,7 +316,9 @@ pub fn spawn() -> WorldHandle {
         .spawn({
             let pending = Arc::clone(&pending);
             let pool = pool.clone();
-            move || run(world, from_connections, pending, pool, |_| {})
+            move || run(world, from_connections, pending, pool, |w| {
+                w.tick();
+            })
         })
         .expect("a thread can be spawned");
 
@@ -535,6 +563,14 @@ fn apply(world: &mut World, command: Command, pool: &Pool) {
 
         Command::TerrainBlocks { reply } => {
             let _ = reply.send(*world.terrain_blocks());
+        }
+
+        Command::TickChanges { reply } => {
+            let _ = reply.send(world.take_tick_changes());
+        }
+
+        Command::Clock { reply } => {
+            let _ = reply.send((world.game_time(), world.day_time()));
         }
 
         Command::Forget { pos } => {

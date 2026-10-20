@@ -194,6 +194,70 @@ fn a_lamp_lights_across_a_chunk_boundary_in_z() {
 }
 
 #[test]
+fn a_lamp_lights_the_chunk_the_region_of_the_light_starts_inside() {
+    // The region the light is worked out in is centred on the edit, so it can
+    // begin in the middle of a chunk. A chunk that hangs over the edge of the
+    // region then covers only part of itself inside it, and that part has to
+    // land in the right columns of the chunk.
+    //
+    // Get it wrong and the lamp lights the wrong columns of the chunk next
+    // door: the pool is shifted sideways, and the column at the border keeps
+    // the light it had before the lamp, which is none. The client draws a lamp
+    // whose light is cut in two at the border between two chunks, and then
+    // lights up again on the other side.
+    let mut world = World::generate(2);
+    let glowstone = world
+        .registry()
+        .id("glowstone")
+        .expect("the world knows a glowstone");
+
+    // One block into the chunk at x = 16, so the region starts one block into
+    // the chunk before it.
+    let pos = BlockPos::new(17, 100, 8);
+    world.set_block(pos, glowstone);
+
+    assert_eq!(
+        world.block_light(BlockPos::new(17, 100, 8)),
+        15,
+        "the lamp is as bright as the lamp is"
+    );
+    assert_eq!(
+        world.block_light(BlockPos::new(16, 100, 8)),
+        14,
+        "the cell next to the lamp is one level less"
+    );
+    assert_eq!(
+        world.block_light(BlockPos::new(15, 100, 8)),
+        13,
+        "and the cell across the chunk border is one level less again"
+    );
+    assert_eq!(
+        world.block_light(BlockPos::new(14, 100, 8)),
+        12,
+        "and the pool is not shifted sideways by the chunk it is in"
+    );
+}
+
+#[test]
+fn a_lamp_lights_the_chunk_the_region_of_the_light_starts_inside_in_z() {
+    // The same in the other direction: the border is a line, not a point.
+    let mut world = World::generate(2);
+    let glowstone = world
+        .registry()
+        .id("glowstone")
+        .expect("the world knows a glowstone");
+
+    let pos = BlockPos::new(8, 100, 17);
+    world.set_block(pos, glowstone);
+
+    assert_eq!(
+        world.block_light(BlockPos::new(8, 100, 15)),
+        13,
+        "the cell across the chunk border is one level less"
+    );
+}
+
+#[test]
 fn a_lamp_that_is_taken_away_takes_its_light_with_it() {
     let mut world = World::generate(1);
     let surface = surface_y(8, 8);

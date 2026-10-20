@@ -605,6 +605,15 @@ impl Region {
             let Some((x0, x1, z0, z1)) = self.overlap(chunk_x, chunk_z) else {
                 continue;
             };
+            // The chunk's own first column and row, in region coordinates.
+            //
+            // A chunk that hangs over the edge of the region starts before it,
+            // so the cells it covers inside the region are not its first
+            // columns: they are the ones that start some way into the chunk.
+            // Measuring from the chunk's own edge rather than from the part of
+            // it that happens to be inside the region is what puts the light
+            // back in the column it belongs to.
+            let (chunk_x0, chunk_z0) = self.chunk_origin(chunk_x, chunk_z);
 
             for (slot, section) in chunk.sections().iter().enumerate() {
                 let section_y = MIN_SECTION + slot as i32;
@@ -617,10 +626,13 @@ impl Region {
                 for gy in base_y..(base_y + SECTION_DIM as usize).min(self.height) {
                     let local_y = (gy - base_y) as u8;
                     for gz in z0..z1 {
-                        let local_z = (gz - z0) as u8;
                         let row = self.index(x0, gy, gz);
                         for gx in x0..x1 {
-                            let local = LocalPos::from_array([(gx - x0) as u8, local_y, local_z]);
+                            let local = LocalPos::from_array([
+                                (gx as i32 - chunk_x0) as u8,
+                                local_y,
+                                (gz as i32 - chunk_z0) as u8,
+                            ]);
                             let cell = row + (gx - x0);
                             self.opacity[cell] = u8::from(registry.is_opaque(section.get(local)));
                             self.emission[cell] = registry.light_emission(section.get(local));
@@ -671,6 +683,20 @@ impl Region {
         let (x0, x1) = span(chunk_x * dim, self.origin_x, self.width)?;
         let (z0, z1) = span(chunk_z * dim, self.origin_z, self.depth)?;
         Some((x0, x1, z0, z1))
+    }
+
+    /// The region cell that holds a chunk's first column and first row.
+    ///
+    /// The region's own origin is wherever the edit put it, which is usually
+    /// in the middle of a chunk, so a chunk that hangs over the edge of the
+    /// region starts before the region does. Its cells inside the region are
+    /// then the ones some way into the chunk, and the light of them has to go
+    /// back to those columns and not to the first ones.
+    fn chunk_origin(&self, chunk_x: i32, chunk_z: i32) -> (i32, i32) {
+        (
+            chunk_x * SECTION_DIM - self.origin_x,
+            chunk_z * SECTION_DIM - self.origin_z,
+        )
     }
 
     /// Chunk coordinates overlapping the region. The margin is under three
@@ -814,6 +840,10 @@ impl Region {
             let Some((x0, x1, z0, z1)) = self.overlap(chunk_x, chunk_z) else {
                 continue;
             };
+            // The chunk's own first column and row, in region coordinates: the
+            // light goes back to the column it was read from, not to the
+            // column the region happens to start at.
+            let (chunk_x0, chunk_z0) = self.chunk_origin(chunk_x, chunk_z);
 
             for slot in 0..SECTIONS_PER_CHUNK {
                 let section_pos = SectionPos::new(chunk_x, MIN_SECTION + slot as i32, chunk_z);
@@ -833,7 +863,11 @@ impl Region {
                                 continue;
                             }
                             let value = self.sky[cell];
-                            let local = LocalPos::from_array([(gx - x0) as u8, local_y, (gz - z0) as u8]);
+                            let local = LocalPos::from_array([
+                                (gx as i32 - chunk_x0) as u8,
+                                local_y,
+                                (gz as i32 - chunk_z0) as u8,
+                            ]);
                             let Some(chunk) = world.chunk_mut(chunk_pos) else {
                                 break;
                             };

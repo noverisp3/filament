@@ -1,31 +1,17 @@
 //! Work the world owes itself later, ordered by when.
 //!
 //! Everything the game does to a block on a delay goes through here: dirt
-//! turning back to grass when a block above it is removed, water looking for
-//! somewhere to go, a crop deciding it has grown, a player's block placement
-//! waiting out its cooldown. None of it is answered where the event happened --
-//! an event that changed the world has only just started, and answering it
-//! inline is how one change becomes forty.
+//! turning back to grass, water looking for somewhere to go, a crop deciding
+//! it has grown. None of it is answered where the event happened: an event
+//! that changed the world has only just started, and answering it inline is
+//! how one change becomes forty.
 //!
-//! The shape is the game's (`LevelTicks.tick`):
+//! The shape is the game's (`LevelTicks.tick`): work is **collected** and then
+//! **run**, each tick runs only as much as its **budget**, and a tick that has
+//! gone is **cleaned up** even when it threw.
 //!
-//! ```java
-//! this.collectTicks(currentTick, maxTicksToProcess, profiler);
-//! this.runCollectedTicks(output);
-//! this.cleanupAfterTick();
-//! ```
-//!
-//! Three things follow from it. Work is **collected** and then **run**, so a
-//! tick can schedule more work for the same tick without it running twice. Each
-//! tick runs only as much as its **budget**, and what does not fit stays where
-//! it is rather than being dropped or, worse, paid for all at once on a later
-//! tick and making that one worse. And a tick that has gone is **cleaned up**
-//! even when it threw.
-//!
-//! This is a heap rather than the game's bucket-per-chunk. At the scale of a
-//! world with one player in it, a heap is the same behaviour for less
-//! machinery, and the two properties that actually matter -- ordered by time,
-//! and budgeted per tick -- are the same either way.
+//! This is a heap rather than the game's bucket-per-chunk: at the scale of a
+//! world with one player in it, that is the same behaviour for less machinery.
 
 use std::collections::BinaryHeap;
 
@@ -33,25 +19,20 @@ use crate::world::pos::BlockPos;
 
 /// How much work one tick will do before leaving the rest for the next.
 ///
-/// The game uses 65536 (`ServerLevel.java:394`). That is sized for a world with
-/// thousands of players and millions of scheduled blocks; a quarter of it is
-/// still far more than anything that will fit in fifty milliseconds here, and a
-/// budget that can never be reached is not a budget at all.
+/// The game uses 65536 (`ServerLevel.java:394`), sized for a world with
+/// thousands of players. A quarter of it is still far more than fits in fifty
+/// milliseconds here, and a budget that can never be reached is not a budget.
 pub const TICK_BUDGET: usize = 16_384;
 
 /// A tick, the position it is for, and the order it was asked for in.
 ///
 /// Ordered by tick descending, because [`BinaryHeap`] is a max-heap and the tick
 /// we want next is the smallest. The counter breaks ties so that two things due
-/// at the same moment run in the order they were scheduled, which is the
-/// difference between a stable world and one where water oscillates.
+/// at the same moment run in the order they were scheduled.
 ///
 /// The flag says whether this is one of the game's **random** ticks: the ones
-/// the game rolls for the blocks that change on their own, a hillside healing
-/// itself or a crop deciding it has grown. Those are not answered on the
-/// change that touched the block but now and then, and the difference is the
-/// whole of it: a rule that answers every time is a rule that answers
-/// immediately.
+/// the game rolls for the blocks that change on their own. Those are not
+/// answered on the change that touched the block but now and then.
 #[derive(Debug, PartialEq, Eq, Clone)]
 struct Due {
     tick: u64,
@@ -101,8 +82,7 @@ impl BlockTicks {
     ///
     /// A repeated schedule for the same position is a second promise, not a
     /// replacement: the game allows several ticks on one block and runs them in
-    /// the order they were asked for. Collapsing them would quietly change what
-    /// any repeating rule means.
+    /// the order they were asked for.
     pub fn schedule(&mut self, now: u64, delay: u64, pos: BlockPos) {
         self.push(now, delay, pos, false);
     }
@@ -138,8 +118,6 @@ impl BlockTicks {
     /// What does not fit stays in the heap and is picked up next tick, which is
     /// the whole point of the budget: a spike of work is spread rather than
     /// dropped and rather than paid for all at once.
-    ///
-    /// Each one comes with whether it is one of the game's random ticks.
     pub fn take_due(&mut self, now: u64, budget: usize) -> Vec<(BlockPos, bool)> {
         let mut out = Vec::new();
         while out.len() < budget
@@ -157,8 +135,7 @@ impl BlockTicks {
     /// Forgets every promise for a chunk that has gone.
     ///
     /// Without this a chunk that is unloaded and reloaded keeps its backlog and
-    /// runs the whole of it at once, on a world that has since been rebuilt
-    /// underneath it.
+    /// runs the whole of it at once, on a world that has since been rebuilt.
     pub fn forget_chunk(&mut self, in_chunk: impl Fn(BlockPos) -> bool) -> usize {
         let before = self.due.len();
         let kept: BinaryHeap<Due> = self

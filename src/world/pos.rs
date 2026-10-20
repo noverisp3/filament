@@ -32,20 +32,9 @@ const XZ_BIAS: i32 = 1 << 25;
 
 /// One of the six faces of a block, and the step across it.
 ///
-/// The numbering is the wire's, and it is not a natural order to guess at:
-///
-/// ```java
-/// DOWN (0, 1, -1, ...)   new Vec3i( 0, -1,  0)
-/// UP   (1, 0, -1, ...)   new Vec3i( 0,  1,  0)
-/// NORTH(2, 3,  2, ...)   new Vec3i( 0, 0, -1)
-/// SOUTH(3, 2,  0, ...)   new Vec3i( 0, 0,  1)
-/// WEST (4, 5,  1, ...)   new Vec3i(-1,  0,  0)
-/// EAST (5, 4,  3, ...)   new Vec3i( 1,  0,  0)
-/// ```
-///
-/// Y is the axis that flips first, and that ordering is what makes 1 mean up
-/// rather than north. Getting it wrong does not fail loudly — a block still
-/// goes somewhere, just the wrong somewhere.
+/// The numbering is the wire's, and Y is the axis that flips first: DOWN is
+/// 0, UP is 1, NORTH is 2, SOUTH is 3, WEST is 4, EAST is 5. Getting it
+/// wrong does not fail loudly, it just puts the block somewhere else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Down,
@@ -125,9 +114,8 @@ impl BlockPos {
 
     /// Inverse of [`Self::pack`].
     pub fn unpack(packed: u64) -> Self {
-        // Y occupies 12 raw bits and must be sign-extended; without that every
-        // negative height decodes as a positive one. Shifting the field up and
-        // back down by 20 is the cheap way to extend the sign bit.
+        // Y occupies 12 raw bits and must be sign-extended, or every negative
+        // height decodes as a positive one.
         let y = (((packed >> 26) & 0xFFF) as i32) << 20 >> 20;
         Self {
             x: ((packed >> 38) & 0x3FF_FFFF) as u32 as i32 - XZ_BIAS,
@@ -248,10 +236,8 @@ pub struct LocalPos {
 impl LocalPos {
     /// Linear index into a section, **y-major**: `x + z * 16 + y * 256`.
     ///
-    /// This is Minecraft's layout (`Strategy.getIndex`, 26.3). The dominant
-    /// vertical operation — skylight propagation — then walks contiguous memory
-    /// straight up a column. At 4 bits per entry a whole section is 2 KiB and
-    /// stays L1-resident, so this is a second-order concern either way.
+    /// This is Minecraft's layout (`Strategy.getIndex`, 26.3), and it keeps a
+    /// column of blocks contiguous for the skylight sweep.
     #[inline]
     pub const fn index(self) -> usize {
         (self.y as usize) << (LOCAL_BITS * 2) | (self.z as usize) << LOCAL_BITS | self.x as usize
@@ -268,9 +254,8 @@ impl LocalPos {
 
     /// Builds a position from `[x, y, z]`.
     ///
-    /// Every axis must be below 16. Light propagation computes neighbouring
-    /// cells by adding offsets to axes, so an unchecked value here would index
-    /// out of the section instead of being caught where it was produced.
+    /// Every axis must be below 16: light propagation adds offsets to the axes,
+    /// so an unchecked value would index out of the section.
     pub fn from_array([x, y, z]: [u8; 3]) -> Self {
         assert!(
             x < 16 && y < 16 && z < 16,

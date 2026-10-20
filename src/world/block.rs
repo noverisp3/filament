@@ -4,21 +4,12 @@ use std::collections::HashMap;
 
 /// Light a named block gives off, 0 to 15.
 ///
-/// The game keeps this on the block state, and the state is what the world
-/// file names, so a name is all there is to go on here.
-///
 /// The numbers are the game's own, read out of the block definitions by
-/// `tools/extract_light.py` into `src/generated/light.rs`: a torch is fourteen
-/// and a redstone torch is seven, and a glowstone is fifteen like a sea
-/// lantern and a jack o'lantern.
+/// `tools/extract_light.py` into `src/generated/light.rs`. A list typed by hand
+/// is a list that is always missing something, and a lamp the server does not
+/// know about is a lamp the server does not light.
 ///
-/// They used to be a list typed by hand here, and a list typed by hand is a
-/// list that is always missing something -- and a lamp the server does not
-/// know about is a lamp the server does not light, which is a dark lamp in
-/// the world and no word about it.
-///
-/// A name with no namespace and a name with one are the same block, so the
-/// namespace is dropped before the name is looked up.
+/// A name with no namespace and a name with one are the same block.
 pub fn emission_for_name(name: &str) -> u8 {
     let name = name.rsplit(':').next().unwrap_or(name);
     let mut full = String::with_capacity(name.len() + 10);
@@ -32,9 +23,8 @@ pub fn emission_for_name(name: &str) -> u8 {
 
 /// A dense index into [`BlockRegistry`].
 ///
-/// Deliberately a plain `u16` rather than Minecraft's shared `BlockState`
-/// object: no identity comparison, no pointers, and a paletted section stores
-/// these directly instead of 8-byte references.
+/// A plain `u16` rather than Minecraft's shared `BlockState` object: no
+/// pointers, and a paletted section stores these directly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BlockId(u16);
 
@@ -48,34 +38,29 @@ impl BlockId {
     }
 }
 
-/// Light a block gives off, 0 to 15.
-///
-/// Separate from `opaque` on purpose: a glowstone block is opaque *and*
-/// luminous, and a torch would be luminous without being opaque. Collapsing
-/// the two would make "blocks sight" and "blocks emit" the same concept, which
-/// they are not.
+/// The brightest a block can be, 0 to 15.
 pub const MAX_LIGHT: u8 = 15;
 
 /// What the engine needs to know about a block type.
 ///
-/// `opaque` drives face culling, and `color` is per-vertex data. Both were
-/// added in phase 3, which is the first consumer; retrofitting them later would
-/// mean touching the registry, the mesher, and every stored world at once.
-/// `light_emission` arrived with phase 4b for the same reason.
+/// `opaque` drives face culling, `color` is per-vertex data, and the light is
+/// what the block gives off.
 #[derive(Clone, Debug)]
 pub struct BlockDef {
     pub name: String,
     pub opaque: bool,
     pub color: [f32; 3],
-    /// Light this block emits, 0 to [`MAX_LIGHT`]. Feeds the block-light layer,
-    /// which is computed separately from the sky layer.
+    /// Light this block emits, 0 to [`MAX_LIGHT`].
+    ///
+    /// Separate from `opaque` on purpose: a glowstone is opaque *and*
+    /// luminous, and a torch is luminous without being opaque.
     pub light_emission: u8,
 }
 
 /// Registry mapping block names to dense ids.
 ///
-/// Frozen in practice: ids are baked into paletted sections, so a registry that
-/// changed order would silently reinterpret saved worlds. Build it, then stop.
+/// Frozen in practice: ids are baked into paletted sections, so a registry
+/// that changed order would silently reinterpret saved worlds.
 #[derive(Clone, Debug, Default)]
 pub struct BlockRegistry {
     blocks: Vec<BlockDef>,
@@ -110,9 +95,9 @@ impl BlockRegistry {
         );
         let name = name.into();
         if let Some(&existing) = self.by_name.get(&name) {
-            // A block that is already known may have been heard of before its
-            // light was: a file that says a block glows is taken at its word,
-            // and a block that glows more than it was said to glows more.
+            // A block already known may have been heard of before its light
+            // was: a file that says a block glows is taken at its word, and a
+            // block that glows more than it was said to glows more.
             if let Some(block) = self.blocks.get_mut(existing.index())
                 && light_emission > block.light_emission
             {

@@ -3,16 +3,11 @@
 //! Sky light comes from the sun and is column-driven: it falls straight down
 //! without weakening, and loses one level per block when it spreads sideways.
 //! Block light comes from emissive blocks such as glowstone, and loses one level
-//! per block in every direction, downwards included.
+//! per block in every direction.
 //!
-//! The layers live apart from the block palette on purpose. Light changes far
-//! more often than blocks do, and it changes in ways that say nothing about
-//! which block sits at a position, so folding it into the palette would mean
-//! rewriting a paletted section on every lighting update.
-//!
-//! This module holds one section's light and the rule for filling it. Deciding
-//! which sections to fill, in what order, and how to keep several chunks
-//! consistent is a world-level concern and lives in `world::World`.
+//! The layers live apart from the block palette: light changes far more often
+//! than blocks do, so folding it into the palette would mean rewriting a
+//! paletted section on every lighting update.
 
 use std::collections::VecDeque;
 
@@ -40,8 +35,7 @@ const LAST: u8 = (SECTION_DIM - 1) as u8;
 ///
 /// Backed by [`Paletted`] like the block data, because almost every section is
 /// uniform: everything above the terrain is open sky, everything deep
-/// underground is black. A dense pair of arrays would spend nearly all its
-/// bytes storing one repeated value.
+/// underground is black.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SectionLight {
     sky: Paletted<u8>,
@@ -83,8 +77,8 @@ impl SectionLight {
 
     /// Sets the sky light of every cell at once.
     ///
-    /// A section is lit or dark as a whole most of the time, and saying so
-    /// in one call is the difference between a section costing a moment and a
+    /// A section is lit or dark as a whole most of the time, and saying so in
+    /// one call is the difference between a section costing a moment and a
     /// section costing sixteen thousand.
     pub fn fill_sky(&mut self, light: u8) {
         self.sky.fill(light);
@@ -189,14 +183,9 @@ impl<'a> LightNeighbors<'a> {
 
     /// The cell in that neighbour which sits across the boundary from `local`.
     ///
-    /// Returns `None` when `local` is not on the face bordering that neighbour,
-    /// which is the common case: most of a section is not on any of its six faces.
-    /// Checking here rather than at the call site means a caller cannot forget,
-    /// and forgetting lights the whole section from one neighbour.
-    ///
-    /// Crossing +X leaves the neighbour's x at 0 and keeps y and z; crossing +Y
-    /// leaves its y at 0 and keeps x and z. Getting the remap wrong lights the
-    /// wrong wall, which looks plausible enough to survive a casual look.
+    /// `None` when `local` is not on the face bordering that neighbour, which
+    /// is the common case. Crossing +X leaves the neighbour's x at 0 and keeps
+    /// y and z; getting the remap wrong lights the wrong wall.
     pub fn across(&self, index: usize, local: LocalPos) -> Option<(LocalPos, &'a SectionLight)> {
         let neighbor = self.get(index)?;
         let [x, y, z] = local.to_array();
@@ -227,12 +216,7 @@ impl<'a> LightNeighbors<'a> {
 
 /// Fills `light` with the sky light for one section.
 ///
-/// `open_above` says whether the section above is open sky all the way up,
-/// which is the only thing that can start a full-strength column. The
-/// neighbours are read but never written: propagation across sections is the
-/// driver's job, because it has to keep several chunks consistent while doing
-/// it.
-///
+/// `open_above` says whether the section above is open sky all the way up.
 /// The three steps are: sunlight falls down each column, whatever light arrives
 /// from the six neighbours seeds the boundary, and that seed spreads inward.
 pub fn compute_sky(
@@ -252,8 +236,7 @@ pub fn compute_sky(
 /// it.
 ///
 /// This is why a cave mouth is bright at the entrance and dark one block
-/// further in, and why an overhang casts a shadow with a soft edge: the
-/// sideways pass runs afterwards and fills that edge back in.
+/// further in, and why an overhang casts a shadow with a soft edge.
 fn sunlight_columns(light: &mut SectionLight, blocks: &dyn BlockOpacity, open_above: bool) {
     for x in 0..LAST + 1 {
         for z in 0..LAST + 1 {

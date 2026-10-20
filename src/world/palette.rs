@@ -1,18 +1,10 @@
 //! Palette-indirect storage: a [`BitArray`] of palette indices plus the palette.
 //!
-//! This is the design Minecraft uses for chunk contents, and the same shape is
-//! right here. The dense array holds *indices*, never block data, so entry
-//! width only has to fit the palette.
+//! The same shape Minecraft uses for chunk contents. The dense array holds
+//! *indices*, never block data, so the entry width only has to fit the palette.
 //!
-//! Two storage variants, matching Minecraft's two useful cases:
-//!
-//! * [`Storage::Zero`] — every entry is `palette[0]`. Costs **zero bytes** for
-//!   the dense part. Underground sections and empty air are almost entirely
-//!   this case.
-//! * [`Storage::Packed`] — indices in a [`BitArray`].
-//!
-//! Entry width grows only when the palette outgrows the current width, and each
-//! growth doubles capacity, so widening is amortised O(1) per `set`.
+//! Two cases, matching Minecraft's: [`Storage::Zero`] holds one value and
+//! costs no dense bytes at all, and [`Storage::Packed`] holds indices.
 
 use super::bitpack::{BitArray, MAX_BITS};
 

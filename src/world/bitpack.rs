@@ -1,13 +1,10 @@
 //! Fixed-width bit-packed array: `len` logical entries, `bits` bits each.
 //!
-//! This is the storage primitive under [`crate::world::palette::Paletted`].
-//! Every entry is a palette index, so `bits` only has to be wide enough for the
-//! palette, never for the block data itself.
+//! The storage under the palette: every entry is a palette index, so `bits` only
+//! has to be wide enough for the palette and never for the block data.
 //!
-//! Values routinely straddle the 64-bit word boundary: entry `i` starts at bit
-//! `i * bits`, so unless `bits` divides 64 there is a position where a value
-//! spans two words. The tests at the bottom of this file sweep every
-//! `(bits, bit position)` combination specifically to pin that down.
+//! Values straddle the 64-bit word boundary unless `bits` divides 64, and the
+//! tests sweep every `(bits, position)` pair to pin that down.
 
 /// Number of entries a [`BitArray`] can address.
 #[derive(Clone, Debug, PartialEq, Eq)]

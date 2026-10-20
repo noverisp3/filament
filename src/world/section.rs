@@ -82,13 +82,8 @@ impl Section {
 
 /// A section plus, optionally, its six neighbours.
 ///
-/// `None` means "not loaded", which the mesher treats as air. That is the safe
-/// direction: it can show one extra face, but it can never punch a hole in the
-/// world.
-///
-/// This lives here rather than in the renderer because it describes the storage
-/// layout, not anything about drawing. `render::mesh` consumes it; it does not
-/// own it.
+/// `None` means "not loaded", which the mesher treats as air: that way it can
+/// show one extra face, but it can never punch a hole in the world.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SectionNeighbors<'a> {
     pub pos_x: Option<&'a Section>,

@@ -115,6 +115,7 @@ def main():
     c.send(0, varint(len(name)) + name + b"\x00" * 16)
 
     state = "login"
+    answered = False
     chunks = {}
     deadline = time.time() + 60
     while time.time() < deadline and len(chunks) < 40:
@@ -135,27 +136,23 @@ def main():
                 state = "configuration"
             continue
         if state == "configuration":
-            if pid == 15:
-                packs, o = read_varint(body, off)
-                for _ in range(packs):
-                    length, o = read_varint(body, o)
-                    o += length
-                # The brand. The game will not finish the configuration
-                # without one: it disconnects a client that never says who
-                # it is.
+            # Answer what the server asks, whatever it asks: the brand (the
+            # server will not go on without one) and the known packs.
+            if pid != 3 and not answered:
+                answered = True
                 brand = b"minecraft:brand"
                 c.send(
-                    1,
+                    2,
                     varint(len(brand))
                     + brand
                     + varint(len("vanilla"))
                     + b"vanilla",
                 )
+                # "select known packs": none.
+                c.send(7, varint(0))
             elif pid == 3:
-                # The serverbound "finish configuration". The game numbers
-                # the packets each way separately, so this is not the number
-                # the clientbound one has.
-                c.send(2)
+                # The serverbound "finish configuration".
+                c.send(3)
                 state = "play"
             continue
         if pid == 46:

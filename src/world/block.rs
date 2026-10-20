@@ -2,6 +2,34 @@
 
 use std::collections::HashMap;
 
+/// Light a named block gives off, 0 to 15.
+///
+/// The game keeps this on the block state, and the state is what the world
+/// file names, so a name is all there is to go on here. The list is the
+/// game's own: a torch is fourteen and a redstone torch is seven, and a
+/// glowstone is fifteen like a sea lantern and a jack o'lantern.
+///
+/// A name with no namespace and a name with one are the same block, so the
+/// namespace is dropped before the name is looked up.
+pub fn emission_for_name(name: &str) -> u8 {
+    let name = name.rsplit(':').next().unwrap_or(name);
+    match name {
+        "glowstone" | "sea_lantern" | "lantern" | "jack_o_lantern" | "shroomlight"
+        | "beacon" | "conduit" | "fire" | "campfire" | "froglight" | "ochre_froglight"
+        | "verdant_froglight" | "pearlescent_froglight" | "chiseled_bookshelf" | "firefly_bush" => 15,
+        "torch" | "end_rod" => 14,
+        "soul_lantern" | "soul_torch" | "soul_campfire" | "crying_obsidian" => 10,
+        "redstone_torch" | "ender_chest" | "enchanting_table" | "glow_lichen" => 7,
+        "respawn_anchor" => 4,
+        "magma_block" => 3,
+        "nether_portal" => 11,
+        "brewing_stand" | "dragon_egg" | "end_portal" | "end_portal_frame" | "end_gateway"
+        | "sculk_shrieker" | "sea_pickle" | "mob_spawner" | "decorated_pot" | "torchflower"
+        | "pink_petals" => 1,
+        _ => 0,
+    }
+}
+
 /// A dense index into [`BlockRegistry`].
 ///
 /// Deliberately a plain `u16` rather than Minecraft's shared `BlockState`
@@ -82,6 +110,14 @@ impl BlockRegistry {
         );
         let name = name.into();
         if let Some(&existing) = self.by_name.get(&name) {
+            // A block that is already known may have been heard of before its
+            // light was: a file that says a block glows is taken at its word,
+            // and a block that glows more than it was said to glows more.
+            if let Some(block) = self.blocks.get_mut(existing.index())
+                && light_emission > block.light_emission
+            {
+                block.light_emission = light_emission;
+            }
             return existing;
         }
 

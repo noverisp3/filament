@@ -379,7 +379,15 @@ pub fn read_lenient(
         Some(id) => Some(id),
         None => {
             let (opaque, color) = appearance(name);
-            Some(registry.register(name, opaque, color))
+            // And the light it gives off, which the name says: a glowstone
+            // read out of a file is a glowstone, and a file that says so is
+            // not a file whose lamp is broken.
+            Some(registry.register_emitting(
+                name,
+                opaque,
+                color,
+                super::block::emission_for_name(name),
+            ))
         }
     })
 }

@@ -108,7 +108,7 @@ pub fn write_chunk(out: &mut Vec<u8>, x: i32, z: i32) {
     for _ in 0..SECTIONS {
         sections.push(air.clone());
     }
-    write_chunk_with_states(out, x, z, &sections, &[]);
+    write_chunk_with_states(out, x, z, &sections, &[], &[]);
 }
 
 /// Writes the chunk, with each section's block states supplied.
@@ -123,6 +123,7 @@ pub fn write_chunk_with_states(
     z: i32,
     sections: &[Vec<i32>],
     sky: &[Option<Vec<u8>>],
+    block: &[Option<Vec<u8>>],
 ) {
     VarInt(id::LEVEL_CHUNK_WITH_LIGHT).write(out);
     out.extend_from_slice(&x.to_be_bytes());
@@ -131,7 +132,7 @@ pub fn write_chunk_with_states(
     write_heightmaps(out);
     write_sections(out, sections);
     write_block_entities(out);
-    write_light(out, sky);
+    write_light(out, sky, block);
 }
 
 /// Packet ids, from `packets.json`.
@@ -361,16 +362,16 @@ fn write_block_entities(out: &mut Vec<u8>) {
 /// is what the client used to be told, and it is why a hole dug in a lit room
 /// stayed lit: the client was told the world was in full daylight, and it
 /// believed it.
-fn write_light(out: &mut Vec<u8>, sky: &[Option<Vec<u8>>]) {
+fn write_light(out: &mut Vec<u8>, sky: &[Option<Vec<u8>>], block: &[Option<Vec<u8>>]) {
     // The sections that carry sky light, and the ones that carry none of it.
     let mut sky_present: Vec<u8> = Vec::new();
     let mut sky_empty: Vec<u8> = Vec::new();
-    let mut updates: Vec<Vec<u8>> = Vec::new();
+    let mut sky_updates: Vec<Vec<u8>> = Vec::new();
     for (index, section) in sky.iter().enumerate() {
         match section {
             Some(bytes) if bytes.iter().any(|b| *b != 0) => {
                 set_bit(&mut sky_present, index);
-                updates.push(bytes.clone());
+                sky_updates.push(bytes.clone());
             }
             Some(_) => {
                 // Every cell in it is dark: the game says so with the empty
@@ -381,21 +382,39 @@ fn write_light(out: &mut Vec<u8>, sky: &[Option<Vec<u8>>]) {
         }
     }
 
-    write_bit_set(out, &sky_present);
-    // No block light anywhere: nothing in this world gives off light yet.
-    write_bit_set(out, &[]);
-    write_bit_set(out, &sky_empty);
-    write_bit_set(out, &[]);
+    // And the same for the light the blocks themselves give off.
+    let mut block_present: Vec<u8> = Vec::new();
+    let mut block_empty: Vec<u8> = Vec::new();
+    let mut block_updates: Vec<Vec<u8>> = Vec::new();
+    for (index, section) in block.iter().enumerate() {
+        match section {
+            Some(bytes) if bytes.iter().any(|b| *b != 0) => {
+                set_bit(&mut block_present, index);
+                block_updates.push(bytes.clone());
+            }
+            Some(_) => {
+                set_bit(&mut block_empty, index);
+            }
+            None => {}
+        }
+    }
 
-    VarInt(updates.len() as i32).write(out);
-    for bytes in &updates {
+    write_bit_set(out, &sky_present);
+    write_bit_set(out, &block_present);
+    write_bit_set(out, &sky_empty);
+    write_bit_set(out, &block_empty);
+
+    VarInt(sky_updates.len() as i32).write(out);
+    for bytes in &sky_updates {
         VarInt(bytes.len() as i32).write(out);
         out.extend_from_slice(bytes);
     }
 
-    // And no block light updates, which is consistent with every section being
-    // empty of it.
-    VarInt(0).write(out);
+    VarInt(block_updates.len() as i32).write(out);
+    for bytes in &block_updates {
+        VarInt(bytes.len() as i32).write(out);
+        out.extend_from_slice(bytes);
+    }
 }
 
 /// Writes a bit set.
@@ -430,6 +449,7 @@ pub fn write_light_update(
     chunk_x: i32,
     chunk_z: i32,
     sections: &[(i32, Vec<u8>)],
+    block_sections: &[(i32, Vec<u8>)],
 ) {
     VarInt(id::LIGHT_UPDATE).write(out);
     VarInt(chunk_x).write(out);
@@ -454,11 +474,24 @@ pub fn write_light_update(
         }
     }
 
+    // And the same for the light the blocks give off, which is a layer of its
+    // own and not part of the sun's.
+    let mut block_present: Vec<u8> = Vec::new();
+    let mut block_empty: Vec<u8> = Vec::new();
+    let mut block_updates: Vec<Vec<u8>> = Vec::new();
+    for (index, bytes) in block_sections {
+        if bytes.iter().any(|b| *b != 0) {
+            set_bit(&mut block_present, *index as usize);
+            block_updates.push(bytes.clone());
+        } else {
+            set_bit(&mut block_empty, *index as usize);
+        }
+    }
+
     write_bit_set(out, &present);
-    // No block light: nothing in this world gives off light yet.
-    write_bit_set(out, &[]);
+    write_bit_set(out, &block_present);
     write_bit_set(out, &empty);
-    write_bit_set(out, &[]);
+    write_bit_set(out, &block_empty);
 
     VarInt(updates.len() as i32).write(out);
     for bytes in &updates {
@@ -466,9 +499,11 @@ pub fn write_light_update(
         out.extend_from_slice(bytes);
     }
 
-    // And no block light updates, which is consistent with every section being
-    // empty of it.
-    VarInt(0).write(out);
+    VarInt(block_updates.len() as i32).write(out);
+    for bytes in &block_updates {
+        VarInt(bytes.len() as i32).write(out);
+        out.extend_from_slice(bytes);
+    }
 }
 
 /// Sets one bit in a bit set, which is a list of bytes with the least

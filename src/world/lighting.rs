@@ -46,6 +46,7 @@ impl World {
         grid.fill_opacity(self);
         grid.fall_sunlight();
         grid.spread_sideways();
+        grid.spread_block_light();
         let dirty = grid.write_back(self);
         self.light_changes.extend(dirty.iter().copied());
         self.light_stale = false;
@@ -214,7 +215,10 @@ struct Grid {
     /// Non-zero stops light. Starts entirely opaque, so the border and anything
     /// not overwritten by `fill_opacity` blocks light.
     opacity: Vec<u8>,
+    /// The light the blocks themselves give off, before it spreads.
+    emission: Vec<u8>,
     sky: Vec<u8>,
+    block: Vec<u8>,
 }
 
 impl Grid {
@@ -236,7 +240,9 @@ impl Grid {
             height,
             plane: width * depth,
             opacity: vec![1; width * depth * height],
+            emission: vec![0; width * depth * height],
             sky: vec![0; width * depth * height],
+            block: vec![0; width * depth * height],
         }
     }
 
@@ -289,6 +295,7 @@ impl Grid {
                                 local_z as u8,
                             ]));
                             self.opacity[row + local_x] = u8::from(registry.is_opaque(block));
+                            self.emission[row + local_x] = registry.light_emission(block);
                         }
                     }
                 }
@@ -376,6 +383,53 @@ impl Grid {
             .any(|target| self.opacity[target] == 0 && (self.sky[target] as usize) < dimmed)
     }
 
+    /// Spreads the light the blocks themselves give off.
+    ///
+    /// Block light is not the sun: it starts at the blocks that glow and loses
+    /// one level for every block it crosses, in every direction, downwards
+    /// included. A glowstone is fifteen, so the cell next to it is fourteen and
+    /// the one after that is thirteen, and fifteen cells away there is nothing
+    /// left.
+    ///
+    /// The drain is by level, from the brightest down, for the same reason the
+    /// sun's spread is: a cell only ever pushes into a strictly lower level,
+    /// so the buckets never grow while they are being drained.
+    fn spread_block_light(&mut self) {
+        let mut buckets: Vec<Vec<usize>> = (0..=MAX_LIGHT as usize).map(|_| Vec::new()).collect();
+
+        // The sources first: a block that glows is lit as brightly as it glows,
+        // whatever else is around it.
+        for cell in 0..self.block.len() {
+            let emission = self.emission[cell];
+            if emission > 0 {
+                self.block[cell] = emission;
+                buckets[emission as usize].push(cell);
+            }
+        }
+
+        for level in (2..=MAX_LIGHT as usize).rev() {
+            let dimmed = level - 1;
+            let mut next = 0;
+            while next < buckets[level].len() {
+                let cell = buckets[level][next];
+                next += 1;
+
+                // Queued at `level` but improved since, so a brighter path has
+                // already dealt with it.
+                if self.block[cell] as usize != level {
+                    continue;
+                }
+
+                for target in self.neighbors(cell).into_iter().flatten() {
+                    if self.opacity[target] == 0 && (self.block[target] as usize) < dimmed {
+                        self.block[target] = dimmed as u8;
+                        buckets[dimmed].push(target);
+                    }
+                }
+            }
+        }
+    }
+
     /// Copies the computed light back into each chunk's sections.
     ///
     /// The sections whose light moved are returned, because a client that was
@@ -398,18 +452,24 @@ impl Grid {
                 for local_y in 0..SECTION_DIM as usize {
                     for local_z in 0..SECTION_DIM as usize {
                         let row = self.index(base_x, base_y + local_y, base_z + local_z);
-                        for local_x in 0..SECTION_DIM as usize {
-                            let value = self.sky[row + local_x];
-                            let local = LocalPos::from_array([
-                                local_x as u8,
-                                local_y as u8,
-                                local_z as u8,
-                            ]);
-                            if chunk.sky_light_in(section_pos, local) != value {
-                                chunk.sky_light_mut(section_pos, local, value);
-                                section_dirty = true;
-                            }
+                    for local_x in 0..SECTION_DIM as usize {
+                        let value = self.sky[row + local_x];
+                        let local = LocalPos::from_array([
+                            local_x as u8,
+                            local_y as u8,
+                            local_z as u8,
+                        ]);
+                        if chunk.sky_light_in(section_pos, local) != value {
+                            chunk.sky_light_mut(section_pos, local, value);
+                            section_dirty = true;
                         }
+
+                        let value = self.block[row + local_x];
+                        if chunk.block_light_in(section_pos, local) != value {
+                            chunk.block_light_mut(section_pos, local, value);
+                            section_dirty = true;
+                        }
+                    }
                     }
                 }
 
@@ -449,7 +509,9 @@ struct Region {
     height: usize,
     plane: usize,
     opacity: Vec<u8>,
+    emission: Vec<u8>,
     sky: Vec<u8>,
+    block: Vec<u8>,
     /// Cells in the margin ring, which are not written back.
     fixed: Vec<bool>,
 }
@@ -486,7 +548,9 @@ impl Region {
             height,
             plane,
             opacity: vec![1; width * depth * height],
+            emission: vec![0; width * depth * height],
             sky: vec![0; width * depth * height],
+            block: vec![0; width * depth * height],
             fixed: vec![false; width * depth * height],
         };
 
@@ -559,7 +623,9 @@ impl Region {
                             let local = LocalPos::from_array([(gx - x0) as u8, local_y, local_z]);
                             let cell = row + (gx - x0);
                             self.opacity[cell] = u8::from(registry.is_opaque(section.get(local)));
+                            self.emission[cell] = registry.light_emission(section.get(local));
                             self.sky[cell] = light.map_or(0, |light| light.sky(local));
+                            self.block[cell] = light.map_or(0, |light| light.block(local));
 
                             // The margin ring keeps whatever it already had, so
                             // it only ever acts as a source for light coming in.
@@ -619,6 +685,62 @@ impl Region {
     /// The downward pass runs over the region's full height so the sun column is
     /// exact rather than seeded from a guess.
     fn recompute(&mut self) {
+        self.recompute_sky();
+        self.recompute_block();
+    }
+
+    /// The light the blocks themselves give off, worked out again inside the
+    /// region.
+    ///
+    /// The margin keeps the value it had, so it is the light arriving from
+    /// outside the region, and the sources inside it are the blocks that glow.
+    /// Everything else is worked out from those two.
+    fn recompute_block(&mut self) {
+        // The interior is worked out again; the margin keeps what it had.
+        for cell in 0..self.block.len() {
+            if !self.fixed[cell] {
+                self.block[cell] = 0;
+            }
+        }
+
+        let mut buckets: Vec<Vec<usize>> = (0..=MAX_LIGHT as usize).map(|_| Vec::new()).collect();
+
+        // The sources: a block that glows is lit as brightly as it glows.
+        for cell in 0..self.block.len() {
+            let emission = self.emission[cell];
+            if emission > 0 && self.block[cell] < emission {
+                self.block[cell] = emission;
+            }
+        }
+
+        // Everything that is lit seeds the spread, the margin included.
+        for cell in 0..self.block.len() {
+            let level = self.block[cell] as usize;
+            if level >= 2 {
+                buckets[level].push(cell);
+            }
+        }
+
+        for level in (2..=MAX_LIGHT as usize).rev() {
+            let dimmed = level - 1;
+            let mut next = 0;
+            while next < buckets[level].len() {
+                let cell = buckets[level][next];
+                next += 1;
+                if self.block[cell] as usize != level {
+                    continue;
+                }
+                for target in self.neighbors(cell).into_iter().flatten() {
+                    if self.opacity[target] == 0 && (self.block[target] as usize) < dimmed {
+                        self.block[target] = dimmed as u8;
+                        buckets[dimmed].push(target);
+                    }
+                }
+            }
+        }
+    }
+
+    fn recompute_sky(&mut self) {
         let mut falling = vec![MAX_LIGHT; self.plane];
         for y in (0..self.height).rev() {
             let base = y * self.plane;
@@ -692,7 +814,6 @@ impl Region {
                 for gy in base_y..(base_y + SECTION_DIM as usize).min(self.height) {
                     let local_y = (gy - base_y) as u8;
                     for gz in z0..z1 {
-                        let local_z = (gz - z0) as u8;
                         let row = self.index(x0, gy, gz);
                         for gx in x0..x1 {
                             let cell = row + (gx - x0);
@@ -700,12 +821,18 @@ impl Region {
                                 continue;
                             }
                             let value = self.sky[cell];
-                            let local = LocalPos::from_array([(gx - x0) as u8, local_y, local_z]);
+                            let local = LocalPos::from_array([(gx - x0) as u8, local_y, (gz - z0) as u8]);
                             let Some(chunk) = world.chunk_mut(chunk_pos) else {
                                 break;
                             };
                             if chunk.sky_light_in(section_pos, local) != value {
                                 chunk.sky_light_mut(section_pos, local, value);
+                                section_dirty = true;
+                            }
+
+                            let value = self.block[cell];
+                            if chunk.block_light_in(section_pos, local) != value {
+                                chunk.block_light_mut(section_pos, local, value);
                                 section_dirty = true;
                             }
                         }

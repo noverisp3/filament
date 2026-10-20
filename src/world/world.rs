@@ -475,6 +475,14 @@ impl World {
         Some(light.sky_bytes())
     }
 
+    /// The light the blocks themselves give off in one section, packed the way
+    /// the game packs it.
+    pub fn section_block_bytes(&self, section: SectionPos) -> Option<Vec<u8>> {
+        let chunk = self.chunk(section.chunk_pos())?;
+        let light = chunk.section_light(section)?;
+        Some(light.block_bytes())
+    }
+
     /// What the world changed by itself since anyone last looked.
     pub fn pending_tick_changes(&self) -> usize {
         self.tick_changes.len()
@@ -636,6 +644,17 @@ impl World {
         // the file: the game does not keep it either, because the light of a
         // chunk depends on the chunks around it.
         self.light_chunk_columns(pos);
+        // And the light that comes in from the sides, which the columns
+        // cannot know: the neighbouring chunk's lamp lights this one, and this
+        // chunk's lamp lights that one. The region around the chunk is worked
+        // out again, both layers of it.
+        //
+        // Only when there is a lamp to spread. Working the region out again
+        // costs a moment, and a world with no lamp in it gains nothing from
+        // it.
+        if self.lamp_near(pos) {
+            self.spread_chunk(pos);
+        }
         // And the light of the world as a whole is now out of date, because
         // this chunk's light has not been spread into its neighbours yet.
         self.light_stale = true;
@@ -649,6 +668,30 @@ impl World {
                 self.relight_around(at);
             }
         }
+    }
+
+    /// Whether a lamp is in this chunk or in one of the eight around it.
+    ///
+    /// Light travels fifteen blocks, which is one chunk, so a lamp in a chunk
+    /// next door reaches this one. If there is no lamp anywhere near, there is
+    /// nothing to spread and no reason to work the region out again.
+    fn lamp_near(&self, pos: ChunkPos) -> bool {
+        let registry = self.registry();
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                let Some(chunk) = self.chunk(ChunkPos::new(pos.x + dx, pos.z + dz)) else {
+                    continue;
+                };
+                for section in chunk.sections() {
+                    for block in crate::world::section::iter_blocks(section) {
+                        if registry.light_emission(block) > 0 {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// What has been changed in each chunk, and how much.
@@ -1011,3 +1054,6 @@ mod tick_tests;
 
 #[cfg(test)]
 mod sky_light_tests;
+
+#[cfg(test)]
+mod block_light_tests;

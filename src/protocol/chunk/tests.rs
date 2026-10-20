@@ -141,7 +141,7 @@ fn a_chunk_of_terrain_carries_more_than_the_empty_one() {
     }
 
     let mut w = Vec::new();
-    write_chunk_with_states(&mut w, 0, 0, &ground, &[]);
+    write_chunk_with_states(&mut w, 0, 0, &ground, &[], &[]);
 
     let mut empty = Vec::new();
     write_chunk(&mut empty, 0, 0);
@@ -228,7 +228,7 @@ fn the_light_carries_the_sections_that_have_it() {
     let sky = vec![Some(lit.clone()), Some(dark.clone()), None];
 
     let mut w = Vec::new();
-    write_light(&mut w, &sky);
+    write_light(&mut w, &sky, &[]);
 
     // A bit set is a byte count and then the bytes, so the first section is
     // one bit in one byte.
@@ -262,7 +262,7 @@ fn a_light_update_carries_one_array_for_each_section_it_names() {
     let sections = vec![(0, lit.clone()), (1, dark.clone()), (2, lit.clone())];
 
     let mut w = Vec::new();
-    write_light_update(&mut w, 4, 5, &sections);
+    write_light_update(&mut w, 4, 5, &sections, &[]);
 
     let mut r = &w[..];
     let (VarInt(packet), _) = VarInt::read(&mut r).expect("a packet id");
@@ -300,6 +300,44 @@ fn a_light_update_carries_one_array_for_each_section_it_names() {
 }
 
 #[test]
+fn the_light_of_the_blocks_travels_with_the_light_of_the_sun() {
+    // A chunk carries two layers of light: the sun's and the one the blocks
+    // give off. The client reads four masks and two lists, and the second
+    // layer is not a part of the first: a lamp in a sunlit room is not the
+    // sun.
+    let sky = vec![Some(vec![0xFFu8; 2048]), Some(vec![0u8; 2048]), None];
+    let block = vec![Some(vec![0x0Fu8; 2048]), Some(vec![0u8; 2048]), None];
+
+    let mut w = Vec::new();
+    write_light(&mut w, &sky, &block);
+
+    // The sky mask names the first section, and the block mask names it too.
+    assert_eq!(w[0], 1, "the sky mask is one byte");
+    assert_eq!(w[1], 0b0000_0001, "the first section has sky light");
+    assert_eq!(w[2], 1, "the block mask is one byte");
+    assert_eq!(w[3], 0b0000_0001, "and the first section has block light");
+
+    // Then the two empty masks, naming the second section each.
+    assert_eq!(w[4], 1, "the empty sky mask is one byte");
+    assert_eq!(w[5], 0b0000_0010, "the second section has no sky light");
+    assert_eq!(w[6], 1, "the empty block mask is one byte");
+    assert_eq!(w[7], 0b0000_0010, "and no block light either");
+
+    // And one array for the sun and one for the lamps.
+    let mut r = &w[8..];
+    let (sky_layers, _) = VarInt::read(&mut r).expect("a layer count");
+    assert_eq!(sky_layers.0, 1, "one array of sky light");
+    let (len, _) = VarInt::read(&mut r).expect("a length");
+    assert_eq!(len.0, 2048);
+    r = &r[2048..];
+
+    let (block_layers, _) = VarInt::read(&mut r).expect("a block layer count");
+    assert_eq!(block_layers.0, 1, "one array of block light");
+    let (len, _) = VarInt::read(&mut r).expect("a length");
+    assert_eq!(len.0, 2048);
+}
+
+#[test]
 fn a_bit_set_of_sections_is_the_shortest_form() {
     // BitSet.toByteArray is the shortest form that reaches the highest bit,
     // so twenty-four sections is three bytes and not eight.
@@ -323,7 +361,7 @@ fn the_sky_updates_are_one_layer_per_section_that_has_light() {
         .collect();
 
     let mut w = Vec::new();
-    write_light(&mut w, &lit);
+    write_light(&mut w, &lit, &[]);
 
     // Four masks (seven bytes: the sky mask carries three and the other three
     // carry none), then a count, then a layer each: a VarInt length of 2048,

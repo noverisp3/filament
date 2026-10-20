@@ -206,7 +206,7 @@ fn orphan_after_shutdown() -> Option<usize> {
         );
         // And what it is told is the light of a section, in the shape the
         // game packs it: two thousand and forty-eight bytes.
-        let (_, _, _, bytes) = &changes[0];
+        let (_, _, _, bytes, _) = &changes[0];
         assert_eq!(bytes.len(), 2048, "a section of light");
     }
 

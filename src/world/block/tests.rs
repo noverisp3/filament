@@ -58,16 +58,30 @@ fn emission_above_the_maximum_is_a_bug_not_a_clamp() {
 }
 
 #[test]
-fn re_registering_a_name_keeps_the_original_emission() {
+fn re_registering_a_name_keeps_the_id_and_the_strongest_light() {
     let mut registry = BlockRegistry::new();
     let first = registry.register_emitting("glowstone", true, [1.0, 1.0, 1.0], 15);
     let again = registry.register_emitting("glowstone", true, [1.0, 1.0, 1.0], 1);
-    assert_eq!(first, again);
+    assert_eq!(first, again, "the same name is the same block");
     assert_eq!(
         registry.light_emission(first),
         15,
-        "the first definition wins, as with opacity"
+        "a block that was said to glow brightly does not stop glowing because
+         it was heard of again more quietly"
     );
+}
+
+#[test]
+fn the_lamps_of_the_game_light_as_the_game_lights_them() {
+    // The numbers are the game's, not guesses: a torch is fourteen and a
+    // redstone torch is seven, and a glowstone is fifteen.
+    assert_eq!(emission_for_name("minecraft:glowstone"), 15);
+    assert_eq!(emission_for_name("glowstone"), 15, "and the namespace is optional");
+    assert_eq!(emission_for_name("minecraft:torch"), 14);
+    assert_eq!(emission_for_name("minecraft:redstone_torch"), 7);
+    assert_eq!(emission_for_name("minecraft:magma_block"), 3);
+    assert_eq!(emission_for_name("minecraft:stone"), 0);
+    assert_eq!(emission_for_name("minecraft:air"), 0);
 }
 
 #[test]

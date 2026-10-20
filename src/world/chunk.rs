@@ -143,6 +143,24 @@ impl Chunk {
         }
     }
 
+    /// Block light at a section-local cell, or 0 if the section is outside the
+    /// loaded world.
+    pub fn block_light_in(&self, section: SectionPos, local: LocalPos) -> u8 {
+        self.section_light(section)
+            .map_or(0, |light| light.block(local))
+    }
+
+    /// Writes block light into a section, ignoring positions outside the world.
+    ///
+    /// The body on the wire carries the light as well as the blocks, so a body
+    /// written before the light moved describes a world that no longer exists.
+    pub(crate) fn block_light_mut(&mut self, section: SectionPos, local: LocalPos, value: u8) {
+        if let Some(light) = self.section_light_mut(section) {
+            light.set_block(local, value);
+            self.serialised = None;
+        }
+    }
+
     pub fn sections(&self) -> &[Section] {
         &self.sections
     }

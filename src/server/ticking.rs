@@ -62,7 +62,7 @@ const MAX_CATCH_UP: u32 = 5;
 ///
 /// A chunk's coordinates, the section's place in the chunk, and the light
 /// itself packed the way the game packs it.
-pub type LightChanges = Vec<(i32, i32, i32, Vec<u8>)>;
+pub type LightChanges = Vec<(i32, i32, i32, Vec<u8>, Vec<u8>)>;
 
 /// What a connection can ask the world to do.
 ///
@@ -748,11 +748,20 @@ Command::Chunk { pos, reply } => {
             let changes = world.take_light_changes();
             let mut out = Vec::new();
             for section in changes {
-                let Some(bytes) = world.section_sky_bytes(section) else {
+                let Some(sky) = world.section_sky_bytes(section) else {
+                    continue;
+                };
+                let Some(block) = world.section_block_bytes(section) else {
                     continue;
                 };
                 let index = section.y - crate::world::chunk::MIN_SECTION_Y;
-                out.push((section.chunk_pos().x, section.chunk_pos().z, index, bytes));
+                out.push((
+                    section.chunk_pos().x,
+                    section.chunk_pos().z,
+                    index,
+                    sky,
+                    block,
+                ));
             }
             let _ = reply.send(out);
         }
@@ -889,7 +898,8 @@ fn encode_chunk_body(
         .collect();
 
     // The light of each section, in the order the wire wants them: the bottom
-    // of the world first.
+    // of the world first. Both layers travel together: the sun's and the one
+    // the blocks themselves give off.
     let sky: Vec<Option<Vec<u8>>> = (0..crate::world::chunk::SECTIONS_PER_CHUNK)
         .map(|index| {
             chunk
@@ -897,9 +907,16 @@ fn encode_chunk_body(
                 .map(|light| light.sky_bytes())
         })
         .collect();
+    let block: Vec<Option<Vec<u8>>> = (0..crate::world::chunk::SECTIONS_PER_CHUNK)
+        .map(|index| {
+            chunk
+                .light_at(index)
+                .map(|light| light.block_bytes())
+        })
+        .collect();
 
     let mut body = Vec::new();
-    crate::protocol::chunk::write_chunk_with_states(&mut body, pos.x, pos.z, &sections, &sky);
+    crate::protocol::chunk::write_chunk_with_states(&mut body, pos.x, pos.z, &sections, &sky, &block);
     body
 }
 

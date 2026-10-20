@@ -1014,16 +1014,29 @@ fn play(
     let light = session.world.light_changes();
     if !light.is_empty() {
         let mut by_chunk: BTreeMap<(i32, i32), ChunkLight> = BTreeMap::new();
-        for (chunk_x, chunk_z, index, bytes) in light {
+        let mut blocks: BTreeMap<(i32, i32), ChunkLight> = BTreeMap::new();
+        for (chunk_x, chunk_z, index, sky, block) in light {
             by_chunk
                 .entry((chunk_x, chunk_z))
                 .or_default()
-                .push((index, bytes));
+                .push((index, sky));
+            blocks
+                .entry((chunk_x, chunk_z))
+                .or_default()
+                .push((index, block));
         }
         for ((chunk_x, chunk_z), mut sections) in by_chunk {
             sections.sort_by_key(|(index, _)| *index);
+            let mut block_sections = blocks.remove(&(chunk_x, chunk_z)).unwrap_or_default();
+            block_sections.sort_by_key(|(index, _)| *index);
             let mut body = Vec::new();
-            crate::protocol::chunk::write_light_update(&mut body, chunk_x, chunk_z, &sections);
+            crate::protocol::chunk::write_light_update(
+                &mut body,
+                chunk_x,
+                chunk_z,
+                &sections,
+                &block_sections,
+            );
             // The body, not a framed packet: every connection frames it for
             // itself, because compression is per connection. A body framed
             // here and framed again there is a packet with a length in front
@@ -2442,16 +2455,29 @@ fn place_block(
             // light belongs to a chunk and the sections of that chunk travel
             // together.
             let mut by_chunk: BTreeMap<(i32, i32), ChunkLight> = BTreeMap::new();
-            for (chunk_x, chunk_z, index, bytes) in light {
+            let mut blocks: BTreeMap<(i32, i32), ChunkLight> = BTreeMap::new();
+            for (chunk_x, chunk_z, index, sky, block) in light {
                 by_chunk
                     .entry((chunk_x, chunk_z))
                     .or_default()
-                    .push((index, bytes));
+                    .push((index, sky));
+                blocks
+                    .entry((chunk_x, chunk_z))
+                    .or_default()
+                    .push((index, block));
             }
             for ((chunk_x, chunk_z), mut sections) in by_chunk {
                 sections.sort_by_key(|(index, _)| *index);
+                let mut block_sections = blocks.remove(&(chunk_x, chunk_z)).unwrap_or_default();
+                block_sections.sort_by_key(|(index, _)| *index);
                 let mut body = Vec::new();
-                crate::protocol::chunk::write_light_update(&mut body, chunk_x, chunk_z, &sections);
+                crate::protocol::chunk::write_light_update(
+                    &mut body,
+                    chunk_x,
+                    chunk_z,
+                    &sections,
+                    &block_sections,
+                );
                 // The body, not a framed packet: every connection frames it
                 // for itself, because compression is per connection.
                 // The light belongs to the world, so everybody who can see

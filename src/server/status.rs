@@ -1476,6 +1476,13 @@ fn play(
                     );
                     enc.encode(&body, &mut out).map_err(io_err)?;
 
+                    // And the player is put back at the spawn, not where
+                    // they died: the game teleports them to the spawn point
+                    // they are going to come back to.
+                    player.x = spawn_at.0 as f64 + 0.5;
+                    player.y = spawn_at.1 as f64;
+                    player.z = spawn_at.2 as f64 + 0.5;
+
                     teleport_seq += 1;
                     let mut body = Vec::new();
                     p::write_player_position(&mut body, teleport_seq, &player);
@@ -1493,6 +1500,42 @@ fn play(
 
                     let mut body = Vec::new();
                     p::write_set_health(&mut body, health, MAX_FOOD, MAX_SATURATION);
+                    enc.encode(&body, &mut out).map_err(io_err)?;
+
+                    // The difficulty and the experience, which the game sends
+                    // here too: the player is a new one as far as the client
+                    // is concerned.
+                    let mut body = Vec::new();
+                    p::write_difficulty(&mut body, 1);
+                    enc.encode(&body, &mut out).map_err(io_err)?;
+
+                    let mut body = Vec::new();
+                    p::write_set_experience(&mut body, 0.0, 0, 0);
+                    enc.encode(&body, &mut out).map_err(io_err)?;
+
+                    // And the level is described again, which is the rest of
+                    // `sendLevelInfo`: the border, the clock, the spawn and
+                    // the event that says the world is loading.
+                    //
+                    // The last one is what the client waits for: it puts up
+                    // the loading screen when it reads the respawn, and
+                    // nothing tells it that the chunks are on their way
+                    // without it. A client that is told to wait and never
+                    // told that the world is here waits until it times out.
+                    let mut body = Vec::new();
+                    p::write_initialize_border(&mut body);
+                    enc.encode(&body, &mut out).map_err(io_err)?;
+
+                    let mut body = Vec::new();
+                    if let Some((game_time, day_time)) = session.world.clock() {
+                        p::write_set_time(&mut body, game_time as i64, day_time as i64);
+                    } else {
+                        p::write_set_time(&mut body, 0, 0);
+                    }
+                    enc.encode(&body, &mut out).map_err(io_err)?;
+
+                    let mut body = Vec::new();
+                    p::write_game_event(&mut body, 13, 0.0);
                     enc.encode(&body, &mut out).map_err(io_err)?;
 
                     // The client threw the world away when it read the

@@ -1,16 +1,15 @@
 //! Packets of the play phase, the one that carries the world.
 //!
-//! Only what a client needs to leave the loading screen is here. The ordering
+//! Only what a client needs to leave the loading screen is here, and the order
 //! matters: upstream `ClientPacketListener.handleLogin` runs a sequence before
-//! it will draw anything, and a packet sent out of place is dropped rather than
-//! rejected, so the order below is the order a real server uses.
+//! it will draw anything, and a packet sent out of place is dropped rather
+//! than rejected.
 //!
-//! Every layout in this file was read off a capture of a stock 26.3 server rather
-//! than off the decompiled source alone, because several of these carry fields
-//! the record definitions do not make obvious. `ClientboundLoginPacket` in
-//! particular declares a `CommonPlayerSpawnInfo` that contains no coordinates at
-//! all, while the wire bytes show a dimension key, a seed and a game type: the
-//! position arrives afterwards, in `ClientboundPlayerPositionPacket`.
+//! Every layout here was read off a capture of a stock 26.3 server, because
+//! several of these carry fields the record definitions do not make obvious:
+//! `ClientboundLoginPacket` declares a `CommonPlayerSpawnInfo` with no
+//! coordinates at all, while the wire bytes show a dimension key, a seed and a
+//! game type.
 
 use crate::protocol::{DecodeError, VarInt, VarLong};
 
@@ -118,12 +117,9 @@ pub mod id {
     pub const BLOCK_CHANGED_ACK: i32 = 4;
     // A hand going through a swing.
     //
-    // 123, and not 2. Two is `animate`, a different packet that happens to
-    // sound related: it carries an entity and a single byte. Reading the shape
-    // from `ClientboundSwingAnimationPacket` and the number from the packet
-    // called `animate` produces a packet that decodes as the other one and
-    // leaves the client two bytes short of the end, which is how this was
-    // found.
+    // 123, and not 2. Two is `animate`, a different packet that carries an
+    // entity and a single byte: reading the shape from one and the number from
+    // the other produces a packet the client reads two bytes short.
     pub const SWING_ANIMATION: i32 = 123;
     // The entity's metadata, which is how a pose — and so a crouch — travels.
     pub const SET_ENTITY_DATA: i32 = 101;
@@ -164,16 +160,11 @@ pub mod id {
 /// Steps over the packet id of a serverbound frame and returns what is left.
 ///
 /// The frame a decoder is handed still carries its id, because that is what the
-/// wire carries and what `FrameEncoder::encode` wants back. Every serverbound
-/// decoder here has to step over it first, and every one that forgot was wrong in
-/// the same way: the id is a small number, so it parses as a perfectly ordinary
-/// first field, and nothing fails until two or three fields later, where the
-/// complaint is about something that was never wrong.
+/// wire carries. Every serverbound decoder here has to step over it first, and
+/// every one that forgot was wrong in the same way: the id parses as an
+/// ordinary first field and nothing fails until two fields later.
 ///
-/// Three separate decoders made this mistake, so it is written once here rather
-/// than left to be remembered four times. Checking the id as well as stepping
-/// over it means a packet that is not the one being decoded is refused rather
-/// than decoded as if it were.
+/// Three separate decoders made this mistake, so it is written once here.
 pub fn serverbound_body(frame: &[u8], expected: i32) -> Result<&[u8], DecodeError> {
     let mut body = frame;
     let (id, _) = VarInt::read(&mut body)?;
@@ -188,28 +179,14 @@ pub fn serverbound_body(frame: &[u8], expected: i32) -> Result<&[u8], DecodeErro
 
 /// Writes `set_chunk_cache_radius`, telling the client how far the world goes.
 ///
-/// Without it the client is never told how many chunks to hold, and falls back
-/// to a radius of its own that has nothing to do with what this server sends.
-/// It then keeps chunks that were never streamed and drops ones that were, and
-/// which of the two it does depends on the radius it happens to assume rather
-/// than the one the world is actually built to.
-///
-/// One VarInt, read straight back out of the packet by the client.
+/// Without it the client falls back to a radius of its own that has nothing to
+/// do with what this server sends, and then keeps chunks that were never
+/// streamed and drops ones that were.
 pub fn write_chunk_cache_radius(out: &mut Vec<u8>, radius: i32) {
     VarInt(id::SET_CHUNK_CACHE_RADIUS).write(out);
     VarInt(radius).write(out);
 }
 
-/// Writes `ClientboundLoginPacket`.
-///
-/// `levels` is the set of dimensions the client may switch between. The real
-/// server sends all three and the capture shows exactly that, so this does too:
-/// sending one would be a different server, and the client reads the count
-/// before the keys.
-///
-/// The spawn block is not coordinates. It is a dimension holder, a seed, a game
-/// type, and a handful of flags, and the fields come out in the order the
-/// capture shows rather than the order the record declares.
 /// Everything `ClientboundLoginPacket` carries besides its id.
 ///
 /// Grouped rather than passed as thirteen arguments, because the packet is one
@@ -232,6 +209,15 @@ pub struct Login<'a> {
     pub sea_level: i32,
 }
 
+/// Writes `ClientboundLoginPacket`.
+///
+/// `levels` is the set of dimensions the client may switch between: the real
+/// server sends all three and the capture shows exactly that, because the
+/// client reads the count before the keys.
+///
+/// The spawn block is not coordinates. It is a dimension holder, a seed, a game
+/// type, and a handful of flags, and the fields come out in the order the
+/// capture shows rather than the order the record declares.
 pub fn write_login(out: &mut Vec<u8>, login: &Login<'_>) {
     let Login {
         entity_id,
@@ -334,29 +320,13 @@ fn write_spawn_info(out: &mut Vec<u8>, info: &SpawnInfo<'_>) {
     // An optional last death location, absent.
     out.push(0);
 
-    // VarInts, not the ints the record declares them as. The declaration is what
-    // led to writing four bytes each: the client reads one, stops on the first
-    // zero byte of the pair, and reports the remaining six as trailing bytes on
-    // the login packet. The capture settles it, and the capture writes the
-    // cooldown as a single 00 and the sea level as a five byte VarInt.
+    // VarInts, not the ints the record declares them as. The declaration is
+    // what led to writing four bytes each: the client reads one, stops on the
+    // first zero byte of the pair, and reports the rest as trailing bytes.
     VarInt(portal_cooldown).write(out);
     VarInt(sea_level).write(out);
 }
 
-/// Writes `ClientboundPlayerPositionPacket`.
-///
-/// The shape is not what the older versions of the protocol had. There is no
-/// flag byte: the packet is a teleport id, a `PositionMoveRotation`, and a set
-/// of which fields are relative to where the client thinks it already is.
-///
-/// `PositionMoveRotation` is two vectors and two angles, not one of each. The
-/// second vector is the movement delta and it has to be sent even at a
-/// teleport, because the client keeps it as the player's velocity; leaving it
-/// out shifts the reading of every field after it.
-///
-/// The capture records 62 bytes for this packet, which is the check on the
-/// layout: one for the id, one for the teleport id, 48 for the two vectors,
-/// eight for the angles, and four for an empty set of relatives.
 /// The movement the client should apply, as `PositionMoveRotation` carries it.
 ///
 /// A struct rather than nine arguments, since the three vectors and the two
@@ -589,20 +559,10 @@ impl PlayerActionPacket {
 
 /// Unpacks a block position from the long the wire carries.
 ///
-/// Three coordinates in one sixty-four bit number. The decompiled source is
-/// explicit about the layout and it is not the order the fields are read in:
-///
-/// ```text
-/// PACKED_HORIZONTAL_LENGTH = 26      // enough for thirty million blocks
-/// PACKED_Y_LENGTH         = 64 - 52 = 12
-/// Y_OFFSET  = 0
-/// Z_OFFSET  = 12
-/// X_OFFSET  = 38
-/// ```
-///
-/// So y is in the low twelve bits, z above it in twenty-six, and x in the top
-/// twenty-six. Reading it as x, y, z top to bottom gives three wrong numbers for
-/// three right ones, which is the worst kind of wrong.
+/// Three coordinates in one sixty-four bit number, and the order the fields
+/// are read in is not the order they are declared in: y is in the low twelve
+/// bits, z above it in twenty-six, and x in the top twenty-six. Reading it as
+/// x, y, z top to bottom gives three wrong numbers for three right ones.
 pub fn unpack_block_pos(packed: i64) -> (i32, i32, i32) {
     // The masks are written as shifts rather than constants so that the sign
     // extension is visible: y's twelve bits reach the top of the word before
@@ -628,15 +588,11 @@ pub fn pack_block_pos(x: i32, y: i32, z: i32) -> i64 {
 /// Writes a `forget_level_chunk`, telling the client to drop a chunk.
 ///
 /// Without this the client's chunk cache only ever grows, and the server's
-/// memory goes with it: every chunk ever visited stays loaded on both sides
-/// for the length of the session.
+/// memory goes with it.
 ///
-/// The coordinate is one long, not two VarInts. That is not a guess about this
-/// packet being different: the neighbouring ones genuinely differ.
-/// `set_chunk_cache_center` is two VarInts and `level_chunk_with_light` is two
-/// int32s, and this is a `ChunkPos`, which packs into a fixed eight bytes with x
-/// in the low half and z in the high half. Writing VarInts here makes a packet
-/// that decodes as far as the id and no further.
+/// The coordinate is one long, not two VarInts: this is a `ChunkPos`, which
+/// packs into a fixed eight bytes with x in the low half and z in the high
+/// half. Writing VarInts here makes a packet that decodes as far as the id.
 pub fn write_forget_chunk(out: &mut Vec<u8>, chunk_x: i32, chunk_z: i32) {
     VarInt(id::FORGET_LEVEL_CHUNK).write(out);
     let packed = (chunk_x as i64 & 0xFFFF_FFFF) | ((chunk_z as i64 & 0xFFFF_FFFF) << 32);
@@ -744,12 +700,8 @@ pub fn write_sound(out: &mut Vec<u8>, sound: &Sound) {
 /// The sound of a player being hurt, and of one dying.
 ///
 /// The ids are the registry ids the client knows them by, from the data
-/// generator's report (`extracted/registries.json`, the `minecraft:sound_event`
-/// registry). The wire carries one more than these, because a holder that
-/// names a registry entry is written as its id plus one.
-///
-/// A block being broken is not here: the level event that says a block was
-/// destroyed is enough, and the client plays that block's own sound from it.
+/// generator's report. The wire carries one more than these, because a holder
+/// that names a registry entry is written as its id plus one.
 pub mod sound {
     /// A player being hurt.
     pub const PLAYER_HURT: i32 = 1316;
@@ -762,10 +714,8 @@ pub mod sound {
 
 /// The damage types of the game, by the id the client was told.
 ///
-/// The registry is one of the ones the client is sent, and the order it is
-/// sent in is the order the damage types go in. These are read out of that
-/// capture: `minecraft:fall` is the tenth, `minecraft:lava` the twenty-fourth,
-/// and so on.
+/// The order the client is sent the damage types in is the order they go in
+/// here: `minecraft:fall` is the tenth and `minecraft:lava` the twenty-fourth.
 pub mod damage {
     /// A fall from too high up.
     pub const FALL: i32 = 10;
@@ -793,9 +743,7 @@ pub mod damage {
 /// ```
 ///
 /// The two ids are counted from one, because zero is the way of saying there
-/// was nothing there. The damage type is the one the client was sent in the
-/// registry, so the client can play the right sound and write the right
-/// death message.
+/// was nothing there.
 pub fn write_damage_event(
     out: &mut Vec<u8>,
     entity_id: i32,
@@ -853,6 +801,13 @@ pub fn write_respawn(out: &mut Vec<u8>, info: &SpawnInfo<'_>, keep_all_data: boo
     out.push(if keep_all_data { 3 } else { 0 });
 }
 
+/// Writes `ClientboundPlayerPositionPacket`.
+///
+/// There is no flag byte: the packet is a teleport id, a
+/// `PositionMoveRotation`, and a set of which fields are relative to where the
+/// client thinks it already is. `PositionMoveRotation` is two vectors and two
+/// angles, and the second vector has to be sent even at a teleport, because the
+/// client keeps it as the player's velocity.
 pub fn write_player_position(out: &mut Vec<u8>, teleport_id: i32, move_to: &Movement) {
     let Movement {
         x,
@@ -920,16 +875,12 @@ pub fn write_chunk_cache_center(out: &mut Vec<u8>, chunk_x: i32, chunk_z: i32) {
 
 /// Writes `ClientboundInitializeBorderPacket`.
 ///
-/// Two sizes, two centres and then four numbers that are not doubles. Reading
-/// the record alone suggests seven doubles; the capture says four, followed by a
-/// VarLong and three VarInts, and it walks to exactly forty bytes with no
-/// remainder. Those are the numbers that matter, so the ordering here is the one
-/// the capture shows rather than the one the field declaration implies.
+/// Two sizes, two centres and then four numbers that are not doubles. The
+/// record alone suggests seven doubles; the capture says four, followed by a
+/// VarLong and three VarInts, and it walks to exactly forty bytes.
 ///
 /// A zero size means the whole world is playable, which is right for a world
-/// that is not finished. The centres are the vanilla maximum, again to mean
-/// "no restriction", and the warning fields are what the client would show
-/// before the border was drawn at all.
+/// that is not finished.
 pub fn write_initialize_border(out: &mut Vec<u8>) {
     VarInt(id::INITIALIZE_BORDER).write(out);
 
@@ -961,8 +912,6 @@ const MAX_BORDER: f64 = 59_999_968.0;
 /// three doubles: it is a block position, which is packed into a single eight
 /// byte value, and writing coordinates as doubles here produces a packet nine
 /// bytes too long.
-///
-/// The pack is x in the low 26 bits, z in the next 26 and y in the top 12.
 pub fn write_set_default_spawn(out: &mut Vec<u8>, dimension: &str, x: i32, y: i32, z: i32) {
     VarInt(id::SET_DEFAULT_SPAWN).write(out);
     VarInt(dimension.len() as i32).write(out);
@@ -1106,10 +1055,9 @@ pub const ITEM_ENTITY_TYPE: i32 = 72;
 /// The actions of `player_info_update`, by their position in the enum.
 ///
 /// Named rather than written as bare bit numbers because the numbers are the
-/// whole difficulty of this packet and they are not guessable: the enum has
-/// exactly eight members, so the mask that selects them is **one byte**, and
-/// getting an ordinal wrong does not fail here, it fails on the client, which
-/// then reads a name out of the middle of a uuid.
+/// whole difficulty of this packet: the enum has exactly eight members, so the
+/// mask that selects them is **one byte**, and getting an ordinal wrong does
+/// not fail here, it fails on the client.
 mod action {
     /// A name and the properties of its profile.
     pub const ADD_PLAYER: u8 = 0;
@@ -1137,21 +1085,11 @@ mod action {
 /// with `writeFixedBitSet`, which emits `ceil(values.length / 8)` raw bytes,
 /// least significant bit first. With eight actions that is one byte, and a
 /// two-byte VarInt where one byte belongs reads the entry count out of the
-/// action bits and the name out of the middle of the uuid.
+/// action bits.
 ///
-/// Four actions are set, which is the smallest set that leaves a player a
-/// client can name, list, play as and show a ping for:
-///
-/// - add player: the name, then the profile's properties. Properties are a
-///   count and that many entries, and an offline profile owns none.
-/// - update game mode: a VarInt, and survival is zero.
-/// - update listed: one boolean. Without this a player is in the tab list's
-///   data and not in the tab list.
-/// - update latency: a VarInt, and zero is fine.
-///
-/// The rest of the enum — chat, display name, list order, hat — exists and is
-/// not set. Fields are written in enum order, which is why listed comes after
-/// the game mode and not where it would read most naturally.
+/// Four actions are set, the smallest set that leaves a player a client can
+/// name, list, play as and show a ping for. The rest of the enum exists and is
+/// not set.
 pub fn write_player_info_add(out: &mut Vec<u8>, uuid: [u8; 16], name: &str) {
     use action::*;
 
@@ -1325,20 +1263,15 @@ pub const POSE_CROUCHING: i32 = 5;
 /// Which piece of an entity's metadata the pose is.
 ///
 /// Six, not five. It is counted by the order the fields are declared on the
-/// entity, and the decompiled source in `mc-ref` lists seven of them where the
-/// shipped jar has eight — a `DATA_CUSTOM_NAME` that is not in the source. Read
-/// out of the jar's static initialiser instead, where the order is the order
-/// they are actually assigned.
+/// entity, and the decompiled source lists seven where the shipped jar has
+/// eight: a `DATA_CUSTOM_NAME` that is not in the source.
 pub const ENTITY_DATA_POSE: u8 = 6;
 
 /// Which serializer reads the pose, out of the table the game registers them in.
 ///
-/// Twenty. Also from the jar's static initialiser, which is the only place the
-/// order exists: the table is filled by a method that is called from nowhere in
-/// the decompiled tree, and it is not a datapack registry, so it is in neither
-/// the source nor the capture. Counting the field declarations in the source
-/// gives fifteen, which is wrong — the table has two entries the declaration
-/// order hides, an optional component and a plural particles.
+/// Twenty. The table is filled by a method that is called from nowhere in the
+/// decompiled tree, so it is in neither the source nor the capture; counting
+/// the field declarations in the source gives fifteen, which is wrong.
 pub const ENTITY_DATA_SERIALIZER_POSE: i32 = 20;
 
 /// Marks the end of an entity's metadata.
@@ -1349,14 +1282,9 @@ pub const ENTITY_DATA_END: u8 = 255;
 
 /// Which piece of an item entity's metadata holds the item.
 ///
-/// Eight, and not zero. The ids of the metadata are not counted per entity
-/// but along the line of ancestors: a class's ids start after the last id its
-/// parent has, and `Entity` has eight of its own -- the flags byte is zero,
-/// the pose is six -- so the first thing an item entity defines is the
-/// eighth.
-///
-/// The client says so if this is wrong, and says it loudly: it is told a
-/// stack where it expects a byte, and it stops.
+/// Eight, and not zero. The ids of the metadata are not counted per entity but
+/// along the line of ancestors: a class's ids start after the last id its
+/// parent has, and `Entity` has eight of its own.
 pub const ENTITY_DATA_ITEM: u8 = 8;
 
 /// Which serializer reads an item stack, out of the table the game registers
@@ -1468,18 +1396,14 @@ pub fn write_swing_animation(
 /// Writes a `block_changed_ack`, which is how a block change stops being a guess.
 ///
 /// The client applies a block change straight away -- it draws the block gone
-/// before the player has finished swinging, which is the whole point of the
-/// prediction. What it does not do straight away is throw away the shape the
-/// block used to have. That is settled when this arrives, and until it does the
-/// block is invisible and still solid: a player stands on air and walks into a
+/// before the player has finished swinging. What it does not do straight away
+/// is throw away the shape the block used to have: until this arrives the block
+/// is invisible and still solid, and a player stands on air and walks into a
 /// wall that is not drawn.
 ///
-/// It exists in only one direction. There is no serverbound packet of this name,
-/// so the server sends it and the client has nothing to answer with.
-///
 /// One VarInt, a sequence number counting the changes this connection has been
-/// told are final. The client reads it as a counter and not as a position or an
-/// id, so what matters is that it goes up.
+/// told are final. The client reads it as a counter, so what matters is that it
+/// goes up.
 pub fn write_block_changed_ack(out: &mut Vec<u8>, sequence: i32) {
     VarInt(id::BLOCK_CHANGED_ACK).write(out);
     VarInt(sequence).write(out);
@@ -1510,17 +1434,12 @@ pub const MAX_DELTA_BLOCKS: f64 = 32767.0 / DELTA_SCALE;
 ///
 /// **A delta, not a position.** Each client is told how far the body moved since
 /// that client last heard about it, which is why the server has to remember what
-/// each observer was last told separately — two players watching the same walk
-/// have been told different amounts of it.
+/// each observer was last told separately.
 ///
 /// Returns false without writing anything when the movement is too large to be
-/// a delta, which is the case for anything past about eight blocks. The caller
-/// has to send the position outright instead. Clamping is not an option: it
-/// moves the body a plausible-looking amount that is simply wrong, and a body
-/// that is slightly wrong keeps being slightly wrong, because every later delta
-/// is measured from where the client thinks it is. A body that fell on arrival
-/// descends eight blocks per packet instead of forty and then stops, which is
-/// exactly what it did.
+/// a delta, which is the case for anything past about eight blocks. Clamping is
+/// not an option: it moves the body a plausible-looking amount that is simply
+/// wrong, and every later delta is measured from where the client thinks it is.
 ///
 /// The shape:
 ///

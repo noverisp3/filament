@@ -188,14 +188,6 @@ type ChunkLight = Vec<(i32, Vec<u8>)>;
 /// five and a half -- while a teleport or a lag spike of any size can.
 const MAX_MOVE_PER_POLL: f64 = 100.0;
 
-/// The shortest time between two position packets that a client can keep to.
-///
-/// A tick is fifty milliseconds and the client sends one position a tick, so
-/// two inside this time is a client sending twice as fast. The slack is half a
-/// tick, because a packet that arrives early and one that arrives late can
-/// land close together without the client having done anything wrong.
-const MIN_TIME_BETWEEN_MOVES: std::time::Duration = std::time::Duration::from_millis(25);
-
 /// The edge of the world, as the game itself clamps it.
 const MAX_COORD: f64 = 3.0e7;
 
@@ -1032,9 +1024,12 @@ fn play(
             sections.sort_by_key(|(index, _)| *index);
             let mut body = Vec::new();
             crate::protocol::chunk::write_light_update(&mut body, chunk_x, chunk_z, &sections);
-            let mut wire = Vec::new();
-            enc.encode(&body, &mut wire).map_err(io_err)?;
-            session.wire.send_all(wire);
+            // The body, not a framed packet: every connection frames it for
+            // itself, because compression is per connection. A body framed
+            // here and framed again there is a packet with a length in front
+            // of a length, and the client reads the second one as the first
+            // byte of the next packet.
+            session.wire.send_all(body);
         }
     }
 
@@ -1304,14 +1299,8 @@ fn play(
     // made it, and the other players had no guess to settle.
     let mut acks: Vec<Vec<u8>> = Vec::new();
 
-    // When the last packet with a position arrived.
-    //
-    // The game refuses two position packets in one tick: the client sends one
-    // a tick and no more, so two in the same tick is a client that is not
-    // playing by the rules. The check here is on the clock rather than on a
-    // tick counter, because this server's loop is a poll and not a tick, and
-    // a poll that catches two of them is a client sending twice as fast.
-    let mut last_position_at: Option<std::time::Instant> = None;
+    // Whether a position has already arrived in this client tick.
+    let mut positions = PositionCounter::default();
 
     loop {
         while let Some(frame) = dec.next_frame().map_err(io_err)? {
@@ -1351,10 +1340,10 @@ fn play(
                     // is not checked by anyone downstream.
                     if !x.is_finite() || !y.is_finite() || !z.is_finite() {
                         log.note("refused a move that was not a number");
-                    } else if move_came_too_soon(last_position_at) {
-                        // Two positions inside one tick. The game drops the
-                        // connection for it; here the move is refused and the
-                        // player is put back, which stops the same thing
+                    } else if !positions.take() {
+                        // Two positions inside one client tick. The game drops
+                        // the connection for it; here the move is refused and
+                        // the player is put back, which stops the same thing
                         // without deciding that the client is broken.
                         teleport_seq += 1;
                         let mut fix = Vec::new();
@@ -1393,7 +1382,6 @@ fn play(
                             player.pitch,
                         );
                         session.wire.send_movement(player_id, true);
-                        last_position_at = Some(std::time::Instant::now());
 
                         // Falling. The distance is added up while the player
                         // is off the ground, and the landing is what hurts:
@@ -1436,6 +1424,14 @@ fn play(
             // people on a server and two people in separate worlds.
             if id == p::id::SERVERBOUND_PUNCH {
                 session.wire.send_swing(player_id, p::MAIN_HAND);
+            }
+
+            // The end of the client's tick. The client says where its tick
+            // ends, and the game counts a player's position packets between
+            // one of these and the next: more than one in a tick is a client
+            // that is not playing by the rules.
+            if id == p::id::SERVERBOUND_CLIENT_TICK_END {
+                positions.end_tick();
             }
 
             // The client asking to come back to life, or for its statistics.
@@ -2326,11 +2322,11 @@ fn place_block(
                 sections.sort_by_key(|(index, _)| *index);
                 let mut body = Vec::new();
                 crate::protocol::chunk::write_light_update(&mut body, chunk_x, chunk_z, &sections);
-                let mut wire = Vec::new();
-                enc.encode(&body, &mut wire).map_err(io_err)?;
+                // The body, not a framed packet: every connection frames it
+                // for itself, because compression is per connection.
                 // The light belongs to the world, so everybody who can see
                 // that part of it is told, not only the player who dug.
-                session.wire.send_all(wire);
+                session.wire.send_all(body);
             }
         }
 
@@ -3153,13 +3149,32 @@ fn run_command(text: &str, wire: &Arc<Broadcast>, player_name: &str) -> String {
     }
 }
 
-/// Whether a second position has arrived too soon after the last one.
+/// How many position packets a client has sent in its current tick.
 ///
 /// The game refuses two position packets in one tick: the client sends one a
 /// tick and no more, so two in the same tick is a client that is not playing
 /// by the rules.
-fn move_came_too_soon(last: Option<std::time::Instant>) -> bool {
-    last.is_some_and(|at| at.elapsed() < MIN_TIME_BETWEEN_MOVES)
+///
+/// The tick is the client's own, and the client says where it ends by sending a
+/// tick-end packet. Counting per clock instead would call a burst of packets
+/// a flood when the client is only catching up after being put somewhere.
+#[derive(Debug, Default)]
+struct PositionCounter {
+    seen: bool,
+}
+
+impl PositionCounter {
+    /// Whether a position packet may be taken, and notes that one was.
+    fn take(&mut self) -> bool {
+        let allowed = !self.seen;
+        self.seen = true;
+        allowed
+    }
+
+    /// The client has finished its tick.
+    fn end_tick(&mut self) {
+        self.seen = false;
+    }
 }
 
 /// Squared distance between two points, for the too-fast move check.

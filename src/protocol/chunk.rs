@@ -436,11 +436,19 @@ pub fn write_light_update(
     VarInt(chunk_z).write(out);
 
     // The sections with light in them, and the ones without.
+    //
+    // The list holds one array for each section in the first mask, in the same
+    // order: the client walks the mask and takes the next array for each bit
+    // it finds. A section with no light in it is named in the second mask
+    // instead and gets no array at all, which is what the capture shows: two
+    // sections lit, one empty, two arrays.
     let mut present: Vec<u8> = Vec::new();
     let mut empty: Vec<u8> = Vec::new();
+    let mut updates: Vec<Vec<u8>> = Vec::new();
     for (index, bytes) in sections {
         if bytes.iter().any(|b| *b != 0) {
             set_bit(&mut present, *index as usize);
+            updates.push(bytes.clone());
         } else {
             set_bit(&mut empty, *index as usize);
         }
@@ -452,8 +460,8 @@ pub fn write_light_update(
     write_bit_set(out, &empty);
     write_bit_set(out, &[]);
 
-    VarInt(sections.len() as i32).write(out);
-    for (_, bytes) in sections {
+    VarInt(updates.len() as i32).write(out);
+    for bytes in &updates {
         VarInt(bytes.len() as i32).write(out);
         out.extend_from_slice(bytes);
     }

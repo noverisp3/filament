@@ -49,6 +49,50 @@ fn drain_raw(reg: &Registration) -> Vec<Vec<u8>> {
 }
 
     #[test]
+    fn a_broadcast_carries_a_body_and_not_a_framed_packet() {
+        // Every connection frames what it is given, because compression is per
+        // connection. A body that arrives already framed is a length in front
+        // of a length, and the client reads the second one as the first byte
+        // of the next packet: "unknown packet id" with nothing wrong with
+        // the packet before it.
+        let wire = Broadcast::new();
+        let reg = join(&wire, "noverisp3");
+
+        let mut body = Vec::new();
+        crate::protocol::play::write_block_update(&mut body, 1, 2, 3, 4);
+        wire.send_all(body.clone());
+
+        let got = drain_raw(&reg);
+        assert_eq!(got.len(), 1, "one packet reached the connection");
+        assert_eq!(
+            got[0], body,
+            "and it is the body itself, not a frame around it"
+        );
+        assert_eq!(
+            got[0][0],
+            crate::protocol::play::id::BLOCK_UPDATE as u8,
+            "which starts with the packet id, not with a length"
+        );
+    }
+
+    #[test]
+    fn an_answer_reaches_the_player_who_asked_and_nobody_else() {
+        let wire = Broadcast::new();
+        let first = join(&wire, "noverisp3");
+        let second = join(&wire, "other");
+
+        let mut body = Vec::new();
+        crate::protocol::play::write_block_update(&mut body, 1, 2, 3, 4);
+        wire.send_one(first.id, body.clone());
+
+        assert_eq!(drain_raw(&first).len(), 1, "the one who asked is answered");
+        assert!(
+            drain_raw(&second).is_empty(),
+            "and nobody else is told, which is what an answer is"
+        );
+    }
+
+    #[test]
     fn a_mover_is_never_told_about_their_own_movement() {
         // Their client already knows where they are — it is the one deciding.
         // Telling them anyway means their body advances a second time for every

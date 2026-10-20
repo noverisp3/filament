@@ -2,23 +2,21 @@ use crate::server::ticking::{state_id, to_state_id};
 use super::*;
 
 #[test]
-fn a_second_position_in_one_tick_is_too_soon() {
-    // The client sends one position a tick and no more. Two inside one tick is
-    // a client that is not playing by the rules.
-    assert!(
-        !move_came_too_soon(None),
-        "the first position is never too soon"
-    );
-    assert!(
-        move_came_too_soon(Some(std::time::Instant::now())),
-        "but a second one right after it is"
-    );
-    assert!(
-        !move_came_too_soon(Some(
-            std::time::Instant::now() - std::time::Duration::from_millis(80)
-        )),
-        "and one a few ticks later is not"
-    );
+fn a_second_position_in_one_client_tick_is_too_many() {
+    // The client sends one position a tick and no more, and it says where its
+    // tick ends by sending a tick-end packet. Two positions between one of
+    // those and the next is a client that is not playing by the rules.
+    //
+    // The count is per client tick and not per clock: a real client sends a
+    // burst of packets after it is put somewhere, and a clock would call that
+    // a flood when it is only the client catching up.
+    let mut positions = PositionCounter::default();
+
+    assert!(positions.take(), "the first position of a tick is fine");
+    assert!(!positions.take(), "but a second one is not");
+
+    positions.end_tick();
+    assert!(positions.take(), "and the next tick starts again");
 }
 
 #[test]

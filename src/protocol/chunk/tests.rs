@@ -251,6 +251,55 @@ fn the_light_carries_the_sections_that_have_it() {
 }
 
 #[test]
+fn a_light_update_carries_one_array_for_each_section_it_names() {
+    // The client walks the mask and takes the next array for each bit it
+    // finds, so the list has to have exactly one array per section the mask
+    // names. A section with no light in it is named in the empty mask and
+    // gets no array at all, which is what the capture shows: two sections lit,
+    // one empty, two arrays.
+    let lit = vec![0xFFu8; 2048];
+    let dark = vec![0u8; 2048];
+    let sections = vec![(0, lit.clone()), (1, dark.clone()), (2, lit.clone())];
+
+    let mut w = Vec::new();
+    write_light_update(&mut w, 4, 5, &sections);
+
+    let mut r = &w[..];
+    let (VarInt(packet), _) = VarInt::read(&mut r).expect("a packet id");
+    assert_eq!(packet, id::LIGHT_UPDATE);
+    let (VarInt(x), _) = VarInt::read(&mut r).expect("a chunk x");
+    assert_eq!(x, 4);
+    let (VarInt(z), _) = VarInt::read(&mut r).expect("a chunk z");
+    assert_eq!(z, 5);
+
+    // Four masks: the sections with sky light, the ones with block light, the
+    // ones empty of sky light, the ones empty of block light.
+    let mut masks = Vec::new();
+    for _ in 0..4 {
+        let (VarInt(len), _) = VarInt::read(&mut r).expect("a mask length");
+        masks.push(r[..len as usize].to_vec());
+        r = &r[len as usize..];
+    }
+    // The first mask names the two lit sections, the third the dark one.
+    assert_eq!(masks[0], vec![0b0000_0101], "sections zero and two have light");
+    assert_eq!(masks[2], vec![0b0000_0010], "section one is empty of it");
+
+    // And the list holds one array for each of the two lit sections.
+    let (VarInt(layers), _) = VarInt::read(&mut r).expect("a layer count");
+    assert_eq!(layers, 2, "one array for each section the mask names");
+    for _ in 0..layers {
+        let (VarInt(len), _) = VarInt::read(&mut r).expect("a layer length");
+        assert_eq!(len, 2048, "a section of light is two thousand and forty-eight bytes");
+        r = &r[len as usize..];
+    }
+
+    // No block light updates.
+    let (VarInt(block_layers), _) = VarInt::read(&mut r).expect("a block layer count");
+    assert_eq!(block_layers, 0);
+    assert!(r.is_empty(), "and the walk ends on the last byte");
+}
+
+#[test]
 fn a_bit_set_of_sections_is_the_shortest_form() {
     // BitSet.toByteArray is the shortest form that reaches the highest bit,
     // so twenty-four sections is three bytes and not eight.

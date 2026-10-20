@@ -97,10 +97,6 @@ impl WorldStore {
         &self.name
     }
 
-    fn region_path(&self, pos: ChunkPos) -> PathBuf {
-        ChunkKey::of(pos.x, pos.z).path_in(&self.overworld())
-    }
-
     fn overworld(&self) -> PathBuf {
         self.root.join(OVERWORLD)
     }

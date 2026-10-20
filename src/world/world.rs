@@ -1390,6 +1390,7 @@ impl World {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
 mod tick_tests;
 
 #[cfg(test)]

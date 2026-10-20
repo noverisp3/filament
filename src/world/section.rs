@@ -70,10 +70,6 @@ impl Section {
         &self.blocks
     }
 
-    pub(crate) fn blocks_mut(&mut self) -> &mut Paletted<BlockId> {
-        &mut self.blocks
-    }
-
     /// Drops block ids no longer present and tightens entry width.
     pub fn compact(&mut self) {
         self.blocks.compact();

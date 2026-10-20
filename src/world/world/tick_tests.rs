@@ -8,10 +8,6 @@ fn stone(world: &World) -> BlockId {
     world.registry().id("stone").expect("registered")
 }
 
-fn air(world: &World) -> BlockId {
-    world.registry().id("air").expect("registered")
-}
-
 #[test]
 fn a_tick_moves_the_clock_on_by_one() {
     let mut world = test_world();

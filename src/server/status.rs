@@ -1341,15 +1341,17 @@ fn play(
                     if !x.is_finite() || !y.is_finite() || !z.is_finite() {
                         log.note("refused a move that was not a number");
                     } else if !positions.take() {
-                        // Two positions inside one client tick. The game drops
-                        // the connection for it; here the move is refused and
-                        // the player is put back, which stops the same thing
-                        // without deciding that the client is broken.
-                        teleport_seq += 1;
-                        let mut fix = Vec::new();
-                        p::write_player_position(&mut fix, teleport_seq, &player);
-                        enc.encode(&fix, &mut out).map_err(io_err)?;
-                        log.note("refused a second position in one tick");
+                        // Two positions inside one client tick. The client
+                        // sends one a tick and no more, and the game drops
+                        // the connection when it sees two, so this does too:
+                        // a client that sends them is not playing by the
+                        // rules, and the rules are what keeps the world
+                        // honest.
+                        log.note("sent two positions in one tick; closing the connection");
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "two positions in one tick",
+                        ));
                     } else if dist_squared(player.x, player.y, player.z, x, y, z)
                         > MAX_MOVE_PER_POLL * MAX_MOVE_PER_POLL
                     {

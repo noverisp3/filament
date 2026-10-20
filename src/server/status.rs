@@ -71,15 +71,10 @@ impl StatusServer {
         loop {
             match self.listener.accept() {
                 Ok((stream, peer)) => {
-                    // The listener is non-blocking so that a Ctrl+C is seen at
-                    // this loop's next poll, and on Windows an accepted socket
-                    // inherits that flag from the listener. Left alone, every
-                    // read on the connection returns "would block" immediately
-                    // and a client that says anything at all is dropped with
-                    // error 10035.
-                    //
-                    // Unix does not inherit it, which is why this is easy to miss
-                    // until a real client connects.
+                    // On Windows an accepted socket inherits the listener's
+                    // non-blocking flag. Left alone, every read on the
+                    // connection returns "would block" immediately and a client
+                    // that says anything at all is dropped with error 10035.
                     if let Err(e) = stream.set_nonblocking(false) {
                         log::error(format!("accept failed: {e}"));
                         continue;
@@ -107,10 +102,6 @@ impl StatusServer {
                     // Detached on purpose: a server's whole job is to handle
                     // many people at once, so joining these would serialise the
                     // entire server on whichever connection finished first.
-                    //
-                    // The handle is kept rather than dropped anyway, so that
-                    // shutdown can wait for the connections to finish writing
-                    // instead of cutting them off mid-packet.
                     let handle = thread::spawn(move || {
                         if let Err(e) = handle_connection(stream, status, session) {
                             if client_went_away(&e) {
@@ -138,12 +129,9 @@ impl StatusServer {
             }
         }
 
-        // Waiting here, behind the connections being cut, is what makes the
-        // save real rather than raced: shutdown is a command whose body is the
-        // write, answered only once the files are closed. Whether anything
-        // was saved is a matter of whether a world folder was opened at all:
-        // an empty save reported as a save is a line the next reader trusts
-        // for nothing.
+        // Waiting here, behind the connections being cut, is what makes the save
+        // real rather than raced: shutdown is a command whose body is the write,
+        // answered only once the files are closed.
         let ticks = self.world.shutdown();
         if std::env::var_os("FILAMENT_WORLD").is_some() {
             log::note(format!("the world saved, {} ticks run", ticks));
@@ -154,11 +142,9 @@ impl StatusServer {
             ));
         }
 
-        // The connections are not waited for. A connection thread runs until its
-        // client goes away, and there is no way yet to tell one to finish, so
-        // joining here would hang for as long as anybody stayed connected, which
-        // is a worse Ctrl+C than the one being fixed. Saying so is better than
-        // appearing to shut down cleanly and then not.
+        // The connections are not waited for. There is no way yet to tell one to
+        // finish, so joining here would hang for as long as anybody stayed
+        // connected, which is a worse Ctrl+C than the one being fixed.
         if live.is_empty() {
             log::note("stopped");
         } else {
@@ -176,7 +162,6 @@ impl StatusServer {
 /// server is not spinning.
 const POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// The light of a chunk's sections, by the section's place in the chunk.
 /// The light of some sections of a chunk, as the wire carries it.
 type ChunkLight = Vec<(i32, Vec<u8>)>;
 
@@ -566,30 +551,21 @@ fn configure(
 
     // 1. The feature flags this world runs with.
     //
-    //    ```java
-    //    VANILLA = builder.createVanilla("vanilla");
-    //    VANILLA_SET = FeatureFlagSet.of(VANILLA);
-    //    DEFAULT_FLAGS = VANILLA_SET;
-    //    ```
-    //    (`FeatureFlags.java:31-42`) and `createVanilla` is
-    //    `Identifier.withDefaultNamespace(name)`, so the one that ships is
-    //    `minecraft:vanilla` (`FeatureFlagRegistry.java:87-88`).
+    //    `FeatureFlags.java:31-42` builds the game's own set, and
+    //    `createVanilla` is `Identifier.withDefaultNamespace(name)`, so the one
+    //    that ships is `minecraft:vanilla`.
     //
-    //    An empty list is not "no requirement" -- it is "nothing is enabled",
-    //    and every item whose prototype asks for a flag then reads as disabled
-    //    and says so on its tooltip. Sending one the client has not heard of
-    //    would be worse, so this is the game's own default rather than a
-    //    guess.
+    //    An empty list is not "no requirement", it is "nothing is enabled",
+    //    and every item whose prototype asks for a flag then reads as disabled.
     let mut body = Vec::new();
     write_update_enabled_features(&mut body, &["minecraft:vanilla"]);
     enc.encode(&body, &mut out).map_err(io_err)?;
     log.out_packet("update_enabled_features", "configuration", body.len());
 
     // 2. Registry data. These look optional and are not: with none of them the
-    //    client falls back to the registries built into its jar, and that set
-    //    is not the one the tags refer to. It resolves a tag against the
-    //    fallback registries and throws on the first datapack registry it meets
-    //    with "Missing registry: ResourceKey[minecraft:root / minecraft:dialog]".
+    //    client falls back to the registries built into its jar, and that set is
+    //    not the one the tags refer to.
+    //
     //    Sending them also fixes the other direction: tag contents are registry
     //    indices, so without the registries there is no order to read them
     //    against.
@@ -743,24 +719,6 @@ fn flush_buffer<S: Write>(stream: &mut S, out: &mut Vec<u8>) -> std::io::Result<
     Ok(())
 }
 
-// Which chunks a player standing at `player_chunk` has coming, and which ones
-// can be taken off them.
-//
-// Two squares, and the distance between them is the whole point. Chunks within
-// the view radius are wanted: they are what gets sent. Chunks within one ring
-// further out are merely kept, and nothing is forgotten until a chunk is
-// outside that.
-//
-// Using one square for both meant a player crossing a boundary had the
-// terrain under them forgotten before its replacement existed. want_chunk
-// returns None until the terrain pool has built a chunk, so the forget went out
-// on one pass and the replacement arrived on a later one, and in between the
-// client held neither. It looked like a hitch to the player walking and a
-// hitch to whoever was watching them, which is why it was reported as motion
-// rather than as a world fault.
-//
-// Sorting both, so the same walk produces the same bytes in the same order,
-// which is what makes a session reproducible.
 /// A chunk coordinate pair, which is what a chunk is named by throughout.
 type ChunkCoord = (i32, i32);
 
@@ -768,16 +726,23 @@ type ChunkCoord = (i32, i32);
 /// for the wider one it is allowed to forget from.
 type ChunkSquare = std::collections::HashSet<ChunkCoord>;
 
-/// Arrivals are sorted by distance from the player, so the ground nearest them
-/// is asked for first and arrives first.
+/// Which chunks a player standing at `player_chunk` has coming, and which ones
+/// can be taken off them.
 ///
-/// This was sorted by coordinate, which is reproducible and wrong. A player
-/// walking east is handed a wall of new terrain, and sorting that wall by
-/// (x, z) sends its north end before its south, so the chunk at their feet is
-/// near the back of the queue and the chunk eight to their left is near the
-/// front. The login batch already goes nearest first, because it walks the
-/// rings outwards, so one player was given two different orders in a session
-/// and only one of them was the useful one.
+/// Two squares, and the distance between them is the whole point. Chunks within
+/// the view radius are wanted: they are what gets sent. Chunks within one ring
+/// further out are merely kept, and nothing is forgotten until a chunk is
+/// outside that.
+///
+/// Using one square for both meant a player crossing a boundary had the
+/// terrain under them forgotten before its replacement existed: `want_chunk`
+/// returns None until the pool has built a chunk, so the forget went out on one
+/// pass and the replacement arrived on a later one.
+///
+/// Arrivals are sorted by distance from the player, so the ground nearest them
+/// is asked for first and arrives first. Sorted by coordinate it was
+/// reproducible and wrong: a player walking east is handed a wall of new
+/// terrain, and its north end arrives before its south.
 ///
 /// The coordinate is the tiebreak rather than the other way round: two chunks
 /// at the same distance are common at a corner, and the bytes a walk produces
@@ -814,6 +779,14 @@ fn chunk_edges(
     (arriving, leaving)
 }
 
+/// The play phase, and the first one that shows anything.
+///
+/// The order is the order a real server sends, and it matters more here than in
+/// the earlier phases: the client processes what arrives and drops what it
+/// cannot use, so a packet in the wrong place is not an error, it is silence.
+/// The sequence the capture recorded is login, difficulty, abilities, held
+/// slot, recipes, position, spawn, border, time, and finally the game event
+/// that says to start waiting for chunks.
 fn play(
     stream: &mut TcpStream,
     mut dec: FrameDecoder,

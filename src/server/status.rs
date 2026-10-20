@@ -2542,8 +2542,11 @@ fn place_block(
             }
 
             if !out.is_empty() {
-                stream.write_all(&out)?;
-                stream.flush()?;
+                // Written and emptied. Emptied is the part that matters: a
+                // buffer that keeps what it has already sent sends it again
+                // on the next pass, and the client is sent the same chunk
+                // every time the world moves.
+                flush_buffer(stream, &mut out)?;
             }
 
             // Only when something happened. The ring a player is walking into
@@ -2557,8 +2560,7 @@ fn place_block(
         } else if !out.is_empty() {
             // The center moved without any chunk following it, which is what
             // happens on a diagonal walk back through ground already sent.
-            stream.write_all(&out)?;
-            stream.flush()?;
+            flush_buffer(stream, &mut out)?;
         }
 
         // The age, every second, and nothing else. The clock the client runs is

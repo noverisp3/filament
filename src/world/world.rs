@@ -252,6 +252,14 @@ impl World {
             world.spawn_from_file = true;
         }
     }
+
+    // A world with no file to ask has the ground it generated, and a player
+    // stands on that. A spawn in the air is a player who falls the whole way
+    // down and dies on arrival, which is what a fixed height was.
+    if !world.spawn_from_file {
+        let (x, y, z) = crate::world::terrain::spawn_point();
+        world.spawn = (x as i32, y as i32, z as i32);
+    }
     world
 }
 
@@ -363,13 +371,7 @@ impl World {
 
     /// Where a player arrives, in blocks.
     pub fn spawn_point(&self) -> (i32, i32, i32) {
-        if self.spawn_from_file {
-            return self.spawn;
-        }
-        // A world made here rather than read: the ground it generated is the
-        // answer, and the surface of it is where a player stands.
-        let (x, y, z) = crate::world::terrain::spawn_point();
-        (x as i32, y as i32, z as i32)
+        self.spawn
     }
 
     /// Ticks since the world began.
@@ -668,6 +670,11 @@ impl World {
                 world.store_chunk(pos, chunk);
             }
         }
+
+        // And the spawn is on the ground this world made, not in the air
+        // above it.
+        let (x, y, z) = crate::world::terrain::spawn_point();
+        world.spawn = (x as i32, y as i32, z as i32);
 
         world
     }

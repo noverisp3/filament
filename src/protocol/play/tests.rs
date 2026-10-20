@@ -80,9 +80,10 @@ fn a_sound_is_a_registry_id_a_source_a_place_and_two_numbers() {
     assert_eq!(which, sound::PLAYER_HURT);
     let (VarInt(source), _) = VarInt::read(&mut r).expect("the source");
     assert_eq!(source, sound::SOURCE_PLAYER);
-    assert_eq!(i32::from_be_bytes(r[..4].try_into().unwrap()), 1, "x");
-    assert_eq!(i32::from_be_bytes(r[4..8].try_into().unwrap()), 2, "y");
-    assert_eq!(i32::from_be_bytes(r[8..12].try_into().unwrap()), 3, "z");
+    // The place is in eighths of a block.
+    assert_eq!(i32::from_be_bytes(r[..4].try_into().unwrap()), 8, "x");
+    assert_eq!(i32::from_be_bytes(r[4..8].try_into().unwrap()), 16, "y");
+    assert_eq!(i32::from_be_bytes(r[8..12].try_into().unwrap()), 24, "z");
     assert_eq!(f32::from_be_bytes(r[12..16].try_into().unwrap()), 0.5, "the volume");
     assert_eq!(f32::from_be_bytes(r[16..20].try_into().unwrap()), 1.0, "the pitch");
     assert_eq!(i64::from_be_bytes(r[20..28].try_into().unwrap()), 0, "the seed");

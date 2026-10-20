@@ -718,9 +718,14 @@ pub fn write_sound(out: &mut Vec<u8>, sound: &Sound) {
     VarInt(id::SOUND).write(out);
     VarInt(sound.id).write(out);
     VarInt(sound.source).write(out);
-    out.extend_from_slice(&sound.x.to_be_bytes());
-    out.extend_from_slice(&sound.y.to_be_bytes());
-    out.extend_from_slice(&sound.z.to_be_bytes());
+    // The place is in eighths of a block: the game's own constructor takes
+    // a block position and stores it multiplied by eight, and the client
+    // divides it back. A sound sent in whole blocks is heard eight times
+    // further away than it is, which is past where a sound carries, and
+    // the client drops it without a word.
+    out.extend_from_slice(&(sound.x * 8).to_be_bytes());
+    out.extend_from_slice(&(sound.y * 8).to_be_bytes());
+    out.extend_from_slice(&(sound.z * 8).to_be_bytes());
     out.extend_from_slice(&sound.volume.to_be_bytes());
     out.extend_from_slice(&sound.pitch.to_be_bytes());
     out.extend_from_slice(&sound.seed.to_be_bytes());

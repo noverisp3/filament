@@ -93,6 +93,34 @@ fn a_say_is_for_everybody_and_a_tp_is_for_one() {
 }
 
 #[test]
+fn a_give_is_something_to_give() {
+    let wire = Arc::new(Broadcast::new());
+    let Command::Give { item, count, .. } = run_command("/give minecraft:dirt 5", &wire, "noverisp3")
+    else {
+        panic!("the give command gives something");
+    };
+    assert_eq!(item, 55, "dirt is item 55");
+    assert_eq!(count, 5);
+
+    // And one of them is one of them.
+    let Command::Give { count, .. } = run_command("/give minecraft:dirt", &wire, "noverisp3") else {
+        panic!("the give command gives something");
+    };
+    assert_eq!(count, 1, "one of it, when no number is said");
+
+    // A name the registry does not have is not an item.
+    assert!(matches!(
+        run_command("/give minecraft:wibble", &wire, "noverisp3"),
+        Command::Reply(_)
+    ));
+    // And a count that is not a count is not a count.
+    assert!(matches!(
+        run_command("/give minecraft:dirt wibble", &wire, "noverisp3"),
+        Command::Reply(_)
+    ));
+}
+
+#[test]
 fn three_blocks_of_falling_are_free_and_the_rest_is_not() {
     // The game's own numbers: the safe distance is three, and the damage is
     // what is left of the fall after those three, floored.

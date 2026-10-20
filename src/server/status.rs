@@ -1871,6 +1871,33 @@ fn play(
                                     session.wire.send_movement(player_id, true);
                                     log.note(format!("moved to {x} {y} {z}"));
                                 }
+                                Command::Give { item, count, name } => {
+                                    // Into the pockets, and the slots that
+                                    // changed are the ones the client is told
+                                    // about: a slot reported changed that did
+                                    // not is a slot the client redraws for
+                                    // nothing.
+                                    let used = inventory.add(ItemStack::new(item as i32, count));
+                                    if used.is_empty() {
+                                        let mut body = Vec::new();
+                                        p::write_system_chat(
+                                            &mut body,
+                                            "There is no room for that",
+                                        );
+                                        session.wire.send_one(player_id, body);
+                                    } else {
+                                        for slot in &used {
+                                            slots.push((*slot, inventory.get(*slot)));
+                                        }
+                                        let mut body = Vec::new();
+                                        p::write_system_chat(
+                                            &mut body,
+                                            &format!("Gave {count} {name} to {player_name}"),
+                                        );
+                                        session.wire.send_one(player_id, body);
+                                        log.note(format!("gave {count} {name}"));
+                                    }
+                                }
                                 Command::Kill => {
                                     // The same road as a fall that goes all
                                     // the way: the health goes to nothing and
@@ -3621,6 +3648,12 @@ enum Command {
     SetTime(u64),
     /// Move the player to a place.
     Teleport(f64, f64, f64),
+    /// Give the player something.
+    Give {
+        item: u32,
+        count: i32,
+        name: String,
+    },
 }
 
 fn run_command(text: &str, wire: &Arc<Broadcast>, player_name: &str) -> Command {
@@ -3647,7 +3680,9 @@ fn run_command(text: &str, wire: &Arc<Broadcast>, player_name: &str) -> Command 
         }
         "help" => {
             let _ = rest;
-            Command::Reply("Commands: /help, /list, /kill, /say, /time, /tp".to_string())
+            Command::Reply(
+                "Commands: /help, /list, /give, /kill, /say, /time, /tp".to_string(),
+            )
         }
         "me" => {
             if rest.is_empty() {
@@ -3665,6 +3700,31 @@ fn run_command(text: &str, wire: &Arc<Broadcast>, player_name: &str) -> Command 
                 Command::Reply("Incorrect argument for command: expected a message".to_string())
             } else {
                 Command::Say(rest.to_string())
+            }
+        }
+        "give" => {
+            // The item, and how many of it. The name is the game's own, and a
+            // name the registry does not have is not an item.
+            let mut parts = rest.split_whitespace();
+            let Some(name) = parts.next() else {
+                return Command::Reply("Usage: /give <item> [count]".to_string());
+            };
+            let count = match parts.next() {
+                Some(text) => match text.parse::<i32>() {
+                    Ok(value) if value > 0 => value,
+                    _ => {
+                        return Command::Reply("Usage: /give <item> [count]".to_string());
+                    }
+                },
+                None => 1,
+            };
+            let Some(item) = crate::generated::item_id(name) else {
+                return Command::Reply(format!("There is no item called {name}"));
+            };
+            Command::Give {
+                item,
+                count,
+                name: name.to_string(),
             }
         }
         "tp" => {

@@ -26,6 +26,148 @@
 //! `protocol_id`.
 
 
+use std::collections::HashMap;
+
+/// What a player is entitled to be holding, by item id.
+///
+/// The right-hand side of `held <= issued`. It grows when the server gives
+/// something and shrinks when it leaves the player's possession -- placed,
+/// dropped, eaten, crafted away. Movement between slots never touches it,
+/// which is the entire point.
+///
+/// The server keeps the right-hand side and never has to know the left-hand
+/// side as anything more than a sum. That is what makes the check cheap: the
+/// server does not simulate what the player does with their things, it only
+/// knows how many there are.
+#[derive(Clone, Debug, Default)]
+pub struct Allowance {
+    by_item: HashMap<u32, i32>,
+}
+
+impl Allowance {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The server gives something.
+    pub fn given(&mut self, item: u32, count: i32) {
+        if count <= 0 {
+            return;
+        }
+        *self.by_item.entry(item).or_insert(0) += count;
+    }
+
+    /// The player loses something: placed down, dropped, eaten.
+    ///
+    /// The allowance never goes below zero. A player cannot spend what they
+    /// were never given, and a server that believes otherwise would be a
+    /// server that believes it owes them something.
+    pub fn spent(&mut self, item: u32, count: i32) {
+        if count <= 0 {
+            return;
+        }
+        let entry = self.by_item.entry(item).or_insert(0);
+        *entry -= count;
+        if *entry <= 0 {
+            self.by_item.remove(&item);
+        }
+    }
+
+    /// What the player may hold of this item.
+    pub fn entitled(&self, item: u32) -> i32 {
+        self.by_item.get(&item).copied().unwrap_or(0)
+    }
+
+    /// What the player is holding, by item id: every slot and the cursor.
+    ///
+    /// The cursor is counted because the player is holding it. A thing parked
+    /// on the mouse is still theirs, and a check that left it out would be a
+    /// check the client could walk around.
+    pub fn held_by(&self, inventory: &Inventory, carried: Option<ItemStack>) -> HashMap<u32, i32> {
+        let mut totals: HashMap<u32, i32> = HashMap::new();
+        for slot in 0..slots::COUNT {
+            if let Some(stack) = inventory.get(slot) {
+                *totals.entry(stack.item as u32).or_insert(0) += stack.count;
+            }
+        }
+        if let Some(stack) = carried
+            && !stack.is_empty()
+        {
+            *totals.entry(stack.item as u32).or_insert(0) += stack.count;
+        }
+        totals
+    }
+
+    /// Checks the shadow against the allowance and says which slots to correct.
+    ///
+    /// The slot the client put the surplus in is the one that is emptied: the
+    /// surplus came from the client's own report and there is nowhere else for
+    /// it to go. What the player were legitimately given is untouched, so the
+    /// correction costs a cheater nothing but the thing they made up.
+    ///
+    /// The cursor is corrected last, and only for what the slots could not
+    /// absorb: a stack on the mouse is worth less than a stack in a pocket,
+    /// and emptying a pocket over a cursor that is already empty would be
+    /// taking something away for nothing.
+    pub fn corrections(
+        &self,
+        inventory: &mut Inventory,
+        carried: Option<ItemStack>,
+    ) -> (Vec<(usize, Option<ItemStack>)>, Option<ItemStack>) {
+        let mut out: Vec<(usize, Option<ItemStack>)> = Vec::new();
+        let mut carried = carried;
+
+        let totals = self.held_by(inventory, carried);
+        for (item, held) in totals {
+            let entitled = self.entitled(item);
+            if held <= entitled {
+                continue;
+            }
+            let mut surplus = held - entitled;
+
+            // The slots first, in order, from the end of the hotbar back:
+            // the client put the surplus somewhere, and the last thing it
+            // touched is the most likely place.
+            for slot in (0..slots::COUNT).rev() {
+                if surplus <= 0 {
+                    break;
+                }
+                let Some(stack) = inventory.get(slot) else {
+                    continue;
+                };
+                if stack.item as u32 != item {
+                    continue;
+                }
+                let take = surplus.min(stack.count);
+                let left = stack.count - take;
+                surplus -= take;
+                let new = if left > 0 {
+                    Some(ItemStack::new(stack.item, left))
+                } else {
+                    None
+                };
+                inventory.set(slot, new);
+                out.push((slot, new));
+            }
+
+            // And then the cursor, for whatever is left.
+            if surplus > 0
+                && let Some(stack) = carried
+                && stack.item as u32 == item
+            {
+                let take = surplus.min(stack.count);
+                let left = stack.count - take;
+                carried = if left > 0 {
+                    Some(ItemStack::new(stack.item, left))
+                } else {
+                    None
+                };
+            }
+        }
+        (out, carried)
+    }
+}
+
 /// A stack of one item type.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ItemStack {

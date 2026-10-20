@@ -290,6 +290,24 @@ pub struct Click {
 
 /// Applies a click the way the game does.
 ///
+/// **The server does not use this any more, and it is not to be used again.**
+///
+/// The game simulates the click and then corrects the client wherever the two
+/// disagree: it is authoritative over every slot, which is a strong guarantee
+/// bought with code that has to model crafting grids, armour slots, fuel rules
+/// and stack limits -- none of which exist here. It was also wrong three times
+/// before it ever ran against a real client.
+///
+/// What the server does instead is take the client's word for the layout -- the
+/// slots that changed, with what is in them now -- and check the totals against
+/// what the player was issued. That is [`crate::protocol::item::Allowance`], and
+/// the check is one number per item instead of a simulation of a window.
+///
+/// So this is here as the record of what was replaced, and it is the wrong shape
+/// for this server: a server that models every slot has to know what a click
+/// means, and this one does not. It is not the authority over the player's
+/// pockets here, and nothing in the server calls it.
+///
 /// Only the twenty-seven carried slots and the nine on the hotbar are live. The
 /// crafting result, the four crafting slots, the armour and the off hand are
 /// wired up on the client and have nothing behind them here, so a click on one is

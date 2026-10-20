@@ -1,3 +1,4 @@
+use crate::protocol::item::Allowance;
 use crate::server::ticking::{state_id, to_state_id};
 use super::*;
 
@@ -495,77 +496,116 @@ fn a_tail_wait_collects_each_chunk_once_whatever_order_the_pool_finishes_in() {
 }
 
 #[test]
-fn a_click_the_player_got_right_costs_no_packets() {
-    // Vanilla sends a slot only where the client's guess and the server's answer
-    // differ. Sending it anyway would be a packet per click for a redraw the
-    // client has already done.
+fn a_client_that_claims_a_slot_it_was_never_given_anything_for_is_corrected() {
+    // The first of the attacks, and the simplest: the client reports a slot
+    // holding something the server never gave it. The allowance says zero,
+    // and the slot is emptied.
     let mut inv = Inventory::empty();
-    inv.set(slots::HOTBAR_START, Some(ItemStack::new(55, 20)));
-    let mut carried = None;
-    let got = c::click(&mut inv, &mut carried, slots::HOTBAR_START as i16, 0, c::ContainerInput::Pickup);
+    let allowance = Allowance::new();
 
-    let reported = vec![(slots::HOTBAR_START as i16, None)];
+    let (corrections, _) = allowance.corrections(&mut inv, None);
+    assert!(corrections.is_empty(), "nothing to correct yet");
+    // The client claims a stack of stone in a slot it has never been given.
+    inv.set(slots::HOTBAR_START, Some(ItemStack::new(1, 64)));
+    let (corrections, _) = allowance.corrections(&mut inv, None);
+
     assert_eq!(
-        corrections_needed(&got, &reported),
-        Vec::new(),
-        "the client already has this right"
-    );
-    assert_eq!(carried, Some(ItemStack::new(55, 20)));
-}
-
-#[test]
-fn a_click_the_player_got_wrong_is_corrected() {
-    // The server stays the authority. A player cannot decide what is in a slot;
-    // it can only be told.
-    let mut inv = Inventory::empty();
-    inv.set(slots::HOTBAR_START, Some(ItemStack::new(55, 20)));
-    let mut carried = None;
-    let got = c::click(&mut inv, &mut carried, slots::HOTBAR_START as i16, 0, c::ContainerInput::Pickup);
-
-    // The client thinks the slot still holds the stack it just picked up.
-    let wrong = vec![(slots::HOTBAR_START as i16, Some(ItemStack::new(55, 20)))];
-    assert_eq!(
-        corrections_needed(&got, &wrong),
+        corrections,
         vec![(slots::HOTBAR_START, None)],
-        "the slot is sent back empty, as it is"
+        "the slot is sent back empty"
     );
+    assert_eq!(inv.get(slots::HOTBAR_START), None, "and it is empty");
 }
 
 #[test]
-fn a_click_that_reports_a_slot_the_server_did_not_touch_is_still_told() {
-    // The client sent a guess for a slot the server's answer says nothing about.
-    // Trusting it would let a player put whatever they liked in a slot.
+fn a_client_that_inflates_a_count_it_legitimately_has_is_corrected() {
+    // The server gave one dirt. The client reports sixty-four of them.
     let mut inv = Inventory::empty();
-    inv.set(12, Some(ItemStack::new(55, 5)));
-    let mut carried = None;
-    let got = c::click(&mut inv, &mut carried, 12, 0, c::ContainerInput::Swap);
+    let mut allowance = Allowance::new();
+    allowance.given(55, 1);
 
-    // The client claims the hotbar slot holds a stack of stone.
-    let claims = vec![(36i16, Some(ItemStack::new(1, 64)))];
-    let fixes = corrections_needed(&got, &claims);
+    inv.set(slots::HOTBAR_START, Some(ItemStack::new(55, 64)));
+    let (corrections, _) = allowance.corrections(&mut inv, None);
 
-    // The number key moved the dirt up to the hotbar and left slot 12 empty, so
-    // those are what goes back -- and what the client claimed is ignored.
     assert_eq!(
-        fixes,
-        vec![(36, Some(ItemStack::new(55, 5))), (12, None)],
-        "the server's answer wins over the client's guess"
+        corrections,
+        vec![(slots::HOTBAR_START, Some(ItemStack::new(55, 1)))],
+        "the stack is cut back to what they were given"
     );
-    assert_eq!(inv.get(36), Some(ItemStack::new(55, 5)), "the dirt went up");
-    assert_eq!(inv.get(12), None, "and the slot it left is empty");
 }
 
 #[test]
-fn a_click_that_was_refused_corrects_nothing() {
-    // Nothing was computed, so there is no answer to disagree with -- and the
-    // client's guess is not adopted either. The slot keeps whatever it had.
+fn a_client_that_inflates_across_several_slots_is_corrected() {
+    // The one a per-slot check would miss: no single slot is over on its own,
+    // and the total is.
+    //
+    // The server gave two dirt. The client reports one in each of four slots.
     let mut inv = Inventory::empty();
-    let mut carried = None;
-    let got = c::click(&mut inv, &mut carried, 0, 0, c::ContainerInput::Pickup);
-    assert!(got.is_none(), "the crafting slot has nothing behind it");
-    let claims = vec![(0i16, Some(ItemStack::new(1, 64)))];
-    assert_eq!(corrections_needed(&got, &claims), Vec::new());
-    assert_eq!(inv.get(0), None, "and the server invented nothing");
+    let mut allowance = Allowance::new();
+    allowance.given(55, 2);
+
+    for slot in slots::HOTBAR_START..slots::HOTBAR_START + 4 {
+        inv.set(slot, Some(ItemStack::new(55, 1)));
+    }
+    let (corrections, _) = allowance.corrections(&mut inv, None);
+
+    let mut total = 0;
+    for slot in slots::HOTBAR_START..slots::HOTBAR_START + 4 {
+        total += inv.get(slot).map_or(0, |s| s.count);
+    }
+    assert_eq!(
+        total, 2,
+        "the total is what they were given, even though no slot was over"
+    );
+    assert!(
+        !corrections.is_empty(),
+        "and the slots that were over are told"
+    );
+}
+
+#[test]
+fn the_total_is_conserved_through_give_arrange_drop_and_place() {
+    // The whole of the design in one test: the total the player is holding is
+    // the total they were issued, and moving things around does not change it.
+    let mut inv = Inventory::empty();
+    let mut allowance = Allowance::new();
+
+    // Given ten dirt, in two stacks.
+    allowance.given(55, 10);
+    inv.set(slots::HOTBAR_START, Some(ItemStack::new(55, 4)));
+    inv.set(slots::HOTBAR_START + 1, Some(ItemStack::new(55, 6)));
+
+    // Arranged: the client moves one stack to another slot and says so.
+    inv.set(slots::HOTBAR_START, None);
+    inv.set(slots::HOTBAR_START + 2, Some(ItemStack::new(55, 4)));
+    let (corrections, _) = allowance.corrections(&mut inv, None);
+    assert!(
+        corrections.is_empty(),
+        "arranging is not a claim, and nothing is corrected"
+    );
+    assert_eq!(
+        allowance.held_by(&inv, None).get(&55).copied(),
+        Some(10),
+        "and the total is unchanged"
+    );
+
+    // Dropped: the client reports the slot empty, and the allowance follows it
+    // down, because the dirt has left the player's possession.
+    inv.set(slots::HOTBAR_START + 2, None);
+    let held = allowance.held_by(&inv, None);
+    assert_eq!(held.get(&55).copied(), Some(6), "six left");
+    allowance.spent(55, allowance.entitled(55) - held[&55]);
+    assert_eq!(allowance.entitled(55), 6, "and the allowance agrees");
+
+    // Placed: the server knows, and spends it.
+    allowance.spent(55, 1);
+    inv.set(slots::HOTBAR_START + 1, Some(ItemStack::new(55, 5)));
+    assert_eq!(allowance.entitled(55), 5, "five left of six");
+    assert_eq!(
+        allowance.held_by(&inv, None).get(&55).copied(),
+        Some(5),
+        "and the player is holding five"
+    );
 }
 
 #[test]

@@ -14,7 +14,6 @@ use std::thread;
 use crate::protocol::frame::{FrameDecoder, FrameEncoder, FrameError};
 use crate::protocol::handshake::{ClientIntent, ClientIntention, ServerStatus, status_response_body};
 use crate::protocol::item::{self, slots, Inventory, ItemStack};
-use crate::protocol::container as c;
 use crate::world::pos::Direction;
 use crate::protocol::VarInt;
 
@@ -1292,6 +1291,16 @@ fn play(
     // something they cannot put down.
     let mut inventory = Inventory::empty();
 
+    // What the player is entitled to be holding, by item id.
+    //
+    // The right-hand side of `held <= issued`. It grows when the server gives
+    // something -- a block broken, an item picked up, a command -- and shrinks
+    // when it leaves the player's possession. Moving a stack from one slot to
+    // another never touches it, which is the whole point: the server does not
+    // simulate what the player does with their things, it only knows how many
+    // there are.
+    let mut allowance = crate::protocol::item::Allowance::new();
+
     // Slot changes to tell them about, each already a whole packet.
     //
     // Kept apart from the block edits because they are answered to nobody else:
@@ -1301,10 +1310,8 @@ fn play(
     // What is on the cursor: the stack a player picked up but has not put down.
     //
     // It lives nowhere in the window, so it is the one thing that can be held
-    // without the server's slot numbering knowing, and it is what nearly every
-    // click changes. A server that did not keep it would answer the second click
-    // of a drag as though the first had never happened.
-    let mut carried: Option<ItemStack> = None;
+    // outside a slot -- and the client's word for it is the only word there is.
+    let mut carried: Option<ItemStack>;
 
     // Which of the nine is selected. The client sends this every time the wheel
     // turns, and it is the only way the server finds out which block a right
@@ -1886,6 +1893,9 @@ fn play(
                                         );
                                         session.wire.send_one(player_id, body);
                                     } else {
+                                        // The server gave it, so the allowance
+                                        // says they are holding it.
+                                        allowance.given(item, count);
                                         for slot in &used {
                                             slots.push((*slot, inventory.get(*slot)));
                                         }
@@ -2007,6 +2017,11 @@ fn play(
                         let left = inventory.take_one(held_slot as usize);
                         inventory.set(held_slot as usize, left);
                         slots.push((held_slot as usize, inventory.get(held_slot as usize)));
+                        // And the allowance shrinks: the block is in the world
+                        // now and not in their pocket, and it is their having
+                        // had it that is spent, not their having had it in a
+                        // particular slot.
+                        allowance.spent(item.item as u32, 1);
                         log.note(format!(
                             "placed a block at {} {} {} from {}",
                             target.x,
@@ -2208,47 +2223,50 @@ fn place_block(
             if id == p::id::SERVERBOUND_CONTAINER_CLICK {
                 match crate::protocol::container::ContainerClickPacket::read(&frame) {
                     Ok(packet) if packet.container_id == slots::CONTAINER_ID => {
-                        let got = c::click(
-                            &mut inventory,
-                            &mut carried,
-                            packet.slot,
-                            packet.button,
-                            packet.input,
-                        );
-
-                        // The answer, plus wherever the client's own guess was
-                        // wrong. Reporting a slot the client already has right
-                        // is a packet per click for no change; leaving one the
-                        // client has wrong is a window that stops matching.
-                        let corrections =
-                            corrections_needed(&got, &packet.changed);
-                        slots.extend(corrections.iter().copied());
-
-                        match got {
-                            Some(got) => {
-                                if got.carried != packet.carried {
-                                    // The cursor is not a slot, so it cannot be
-                                    // corrected by naming one. Saying so in the
-                                    // log is the honest answer for now.
-                                    log.note(format!(
-                                        "cursor is {}, the client thought {}",
-                                        describe(carried),
-                                        describe(packet.carried)
-                                    ));
-                                }
-                                if let Some(dropped) = got.dropped {
-                                    log.note(format!(
-                                        "dropped {} x{} -- there are no item entities yet",
-                                        crate::generated::item_name(dropped.item as u32)
-                                            .unwrap_or("?"),
-                                        dropped.count
-                                    ));
-                                }
+                        // The client's word for the layout.
+                        //
+                        // This is not a claim, it is the shadow: every slot
+                        // that changed, with what is in it now. The server
+                        // takes it and then checks the totals against what the
+                        // player was issued.
+                        for (slot, stack) in &packet.changed {
+                            // A slot outside the window is not a slot. The
+                            // count is the stack limit, because a stack that
+                            // is over it is not a stack.
+                            if *slot < 0 || *slot as usize >= slots::COUNT {
+                                log.note(format!("ignored a report about slot {slot}"));
+                                continue;
                             }
-                            None => log.note(format!(
-                                "refused {:?} on slot {}",
-                                packet.input, packet.slot
-                            )),
+                            let stack = stack.filter(|s| s.count <= crate::protocol::item::MAX_STACK);
+                            inventory.set(*slot as usize, stack);
+                        }
+                        carried = packet.carried;
+
+                        // And the check: what they are holding against what
+                        // they were issued.
+                        //
+                        // Where they are over, the slot that is over is
+                        // emptied and sent back. Where they are under, the
+                        // difference is something that has left their
+                        // possession -- dropped, eaten -- and the allowance
+                        // follows it down.
+                        let (corrections, cursor) = allowance.corrections(&mut inventory, carried);
+                        for (slot, stack) in corrections {
+                            slots.push((slot, stack));
+                        }
+                        if cursor != carried {
+                            carried = cursor;
+                            log.note(format!(
+                                "the cursor was taken back: {}",
+                                describe(carried)
+                            ));
+                        }
+                        let held = allowance.held_by(&inventory, carried);
+                        for (item, count) in held {
+                            let entitled = allowance.entitled(item);
+                            if count < entitled {
+                                allowance.spent(item, entitled - count);
+                            }
                         }
                     }
                     Ok(packet) if packet.container_id != slots::CONTAINER_ID => {
@@ -2674,6 +2692,9 @@ fn place_block(
                 // the game does when a pocket is full.
                 continue;
             }
+            // And the entitlement moves from the world to the player: they are
+            // holding it now, and the allowance says so.
+            allowance.given(item.item, item.count);
             for slot in &used {
                 slots.push((*slot, inventory.get(*slot)));
             }
@@ -3105,25 +3126,6 @@ fn wanted_positions(radius: i32) -> Vec<(i32, i32)> {
 /// So a click the player got right is silent, and a click the player got wrong
 /// is corrected rather than argued with -- the client keeps the last word on
 /// what it draws, the server keeps it on what is true.
-fn corrections_needed(
-    got: &Option<c::Click>,
-    reported: &[(i16, Option<ItemStack>)],
-) -> Vec<(usize, Option<ItemStack>)> {
-    let Some(got) = got else { return Vec::new() };
-    got.changed
-        .iter()
-        .filter(|(slot, stack)| {
-            // A slot the client did not mention at all has not been guessed at,
-            // so it is told rather than trusted.
-            reported
-                .iter()
-                .find(|(s, _)| *s as usize == *slot)
-                .is_none_or(|(_, claimed)| claimed != stack)
-        })
-        .copied()
-        .collect()
-}
-
 /// A stack in words, for the log.
 fn describe(stack: Option<ItemStack>) -> String {
     stack

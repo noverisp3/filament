@@ -809,6 +809,25 @@ impl World {
             self.store_chunk(pos, chunk);
             return true;
         }
+        // A chunk that is on the disk and cannot be read is not a chunk that
+        // is not there.
+        //
+        // Generating one in its place would put a piece of the generator's
+        // world where the game's world was, and -- because a generated chunk
+        // is a chunk that has been changed -- save it over the file. The one
+        // thing this server must never do is write over a world it did not
+        // read.
+        if self
+            .store
+            .as_ref()
+            .is_some_and(|store| store.has(pos))
+        {
+            eprintln!(
+                "the chunk at {pos:?} is on the disk and cannot be read; \
+                 leaving it alone rather than putting something else there"
+            );
+            return false;
+        }
         let chunk = generate_chunk(pos, &self.terrain);
         self.store_chunk(pos, chunk);
         self.dirty.insert(pos);
@@ -855,6 +874,31 @@ impl World {
         // it.
         if self.lamp_near(pos) {
             self.spread_chunk(pos);
+        }
+        // And the chunks around it, because a lamp in one of them lights this
+        // one and this one's lamps light them.
+        //
+        // The light is worked out when a chunk arrives, and at that moment the
+        // chunk next door may not have arrived yet -- so its lamps were not
+        // counted, and this chunk's light stops dead at the border. The game
+        // does not have this problem: it keeps the light of the sections
+        // around a change and works it out again for each of them.
+        //
+        // So the neighbours are worked out again too, and the light crosses
+        // into them the way it should.
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                if dx == 0 && dz == 0 {
+                    continue;
+                }
+                let neighbour = ChunkPos::new(pos.x + dx, pos.z + dz);
+                if !self.chunks.contains_key(&neighbour) {
+                    continue;
+                }
+                if self.lamp_near(neighbour) {
+                    self.spread_chunk(neighbour);
+                }
+            }
         }
         // And the light of the world as a whole is now out of date, because
         // this chunk's light has not been spread into its neighbours yet.

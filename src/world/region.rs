@@ -305,44 +305,56 @@ impl RegionFile {
                 let start = where_.sector * SECTOR_BYTES;
                 let end = start + where_.sectors * SECTOR_BYTES;
                 if end > bytes.len() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        format!(
-                            "chunk at {x},{z} claims sectors {}..{} of a {} byte file",
-                            where_.sector,
-                            where_.sector + where_.sectors,
-                            bytes.len()
-                        ),
-                    ));
+                    // One entry that makes no sense does not condemn the
+                    // thousand that do.
+                    //
+                    // The game logs it and carries on with the rest of the
+                    // file, and that is the difference between a world with a
+                    // hole in it and a world that is not there at all. This
+                    // used to throw the file away, and a file thrown away is a
+                    // world that is generated afresh -- which is a world that
+                    // looks fine and is not the one that was there.
+                    eprintln!(
+                        "chunk at {x},{z} claims sectors {}..{} of a {} byte file; \
+                         skipping it",
+                        where_.sector,
+                        where_.sector + where_.sectors,
+                        bytes.len()
+                    );
+                    continue;
                 }
 
                 let sector = &bytes[start..end];
                 if sector.len() < 5 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("chunk at {x},{z} has no header"),
-                    ));
+                    eprintln!("chunk at {x},{z} has no header; skipping it");
+                    continue;
                 }
                 let len = u32::from_be_bytes([sector[0], sector[1], sector[2], sector[3]])
                     as usize;
-                let compression = Compression1::from_byte(sector[4]).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("chunk at {x},{z} names compression {}", sector[4]),
-                    )
-                })?;
+                let Some(compression) = Compression1::from_byte(sector[4]) else {
+                    eprintln!(
+                        "chunk at {x},{z} names compression {}; skipping it",
+                        sector[4]
+                    );
+                    continue;
+                };
 
                 if len > sector.len() - 5 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "chunk at {x},{z} says {len} bytes in a {} byte sector",
-                            sector.len() - 5
-                        ),
-                    ));
+                    eprintln!(
+                        "chunk at {x},{z} says {len} bytes in a {} byte sector; \
+                         skipping it",
+                        sector.len() - 5
+                    );
+                    continue;
                 }
 
-                let raw = compression.decompress(&sector[5..5 + len])?;
+                let raw = match compression.decompress(&sector[5..5 + len]) {
+                    Ok(raw) => raw,
+                    Err(e) => {
+                        eprintln!("chunk at {x},{z} will not decompress: {e}");
+                        continue;
+                    }
+                };
                 match nbt::read(&raw) {
                     Ok(c) => {
                         region.chunks.insert(i, c);
@@ -350,10 +362,7 @@ impl RegionFile {
                     }
                     // One unreadable chunk does not condemn the other thousand.
                     Err(e) => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("chunk at {x},{z}: {e}"),
-                        ));
+                        eprintln!("chunk at {x},{z} will not read: {e}");
                     }
                 }
             }
@@ -593,16 +602,26 @@ mod tests {
     }
 
     #[test]
-    fn a_file_that_ends_mid_chunk_is_refused_rather_than_read_as_empty() {
+    fn a_chunk_that_points_past_the_end_of_the_file_is_skipped_not_the_file() {
+        // Dropping a whole sector leaves the header claiming a chunk that is no
+        // longer there.
+        //
+        // That chunk is skipped and the rest of the file is read, which is what
+        // the game does. Throwing the file away instead is a world that is
+        // generated afresh, and a world generated afresh is a world that looks
+        // fine and is not the one that was there.
         let mut r = RegionFile::empty();
         r.put(0, 0, named("here"));
+        // Far enough apart that they are in different sectors, so that cutting
+        // the last one off leaves the first alone.
+        r.put(20, 0, named("and here"));
         let bytes = r.to_bytes().unwrap();
         let truncated = &bytes[..bytes.len() - SECTOR_BYTES];
-        // Dropping a whole sector leaves the header claiming a chunk that is no
-        // longer there. That has to be an error, not an empty chunk.
+
+        let region = RegionFile::from_bytes(truncated).expect("the file still reads");
         assert!(
-            RegionFile::from_bytes(truncated).is_err(),
-            "a header that points past the end of the file"
+            region.get(0, 0).is_some(),
+            "and the chunk that is still there is still there"
         );
     }
 

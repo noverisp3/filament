@@ -262,12 +262,12 @@ impl Grid {
         let y = rest / self.depth;
 
         [
-            (x + 1 < self.width).then_some(cell + 1),
-            (x > 0).then_some(cell - 1),
-            (y + 1 < self.height).then_some(cell + self.plane),
-            (y > 0).then_some(cell - self.plane),
-            (z + 1 < self.depth).then_some(cell + self.width),
-            (z > 0).then_some(cell - self.width),
+            (x + 1 < self.width).then(|| cell + 1),
+            (x > 0).then(|| cell - 1),
+            (y + 1 < self.height).then(|| cell + self.plane),
+            (y > 0).then(|| cell - self.plane),
+            (z + 1 < self.depth).then(|| cell + self.width),
+            (z > 0).then(|| cell - self.width),
         ]
     }
 
@@ -583,12 +583,12 @@ impl Region {
         let z = self.z_of(cell);
         let y = self.y_of(cell);
         [
-            (x + 1 < self.width).then_some(cell + 1),
-            (x > 0).then_some(cell - 1),
-            (y + 1 < self.height).then_some(cell + self.plane),
-            (y > 0).then_some(cell - self.plane),
-            (z + 1 < self.depth).then_some(cell + self.width),
-            (z > 0).then_some(cell - self.width),
+            (x + 1 < self.width).then(|| cell + 1),
+            (x > 0).then(|| cell - 1),
+            (y + 1 < self.height).then(|| cell + self.plane),
+            (y > 0).then(|| cell - self.plane),
+            (z + 1 < self.depth).then(|| cell + self.width),
+            (z > 0).then(|| cell - self.width),
         ]
     }
 

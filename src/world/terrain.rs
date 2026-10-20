@@ -31,7 +31,14 @@ pub fn register_terrain(registry: &mut BlockRegistry) -> TerrainBlocks {
         stone: registry.register("stone", true, [0.50, 0.50, 0.52]),
         // A full opaque cube, so it lights the world without asking the mesher
         // to understand a new block shape. Bright on all 15 levels.
-        glowstone: registry.register_emitting("glowstone", true, [0.96, 0.85, 0.55], 15),
+        // The lamp the generator puts out, and how bright it is, from the
+        // game's own table rather than from a number typed here.
+        glowstone: registry.register_emitting(
+            "glowstone",
+            true,
+            [0.96, 0.85, 0.55],
+            super::block::emission_for_name("minecraft:glowstone"),
+        ),
     }
 }
 

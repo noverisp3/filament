@@ -18,11 +18,14 @@
 //! tag packet depends on. The hardness table comes from the decompiled source
 //! rather than from either, because hardness is static data compiled into the
 //! game jars and neither the reports nor the registry frames sent at login
-//! contain it.
+//! contain it. The light table is the same: how bright a block is is static
+//! data in the block definitions, and it is read out of them for the same
+//! reason.
 
 mod blocks;
 mod hardness;
 mod items;
+mod light;
 mod registries;
 mod tags;
 
@@ -31,6 +34,7 @@ pub use blocks::{
 };
 pub use hardness::{HARDNESS, REQUIRES_TOOL, hardness_of, requires_tool};
 pub use items::{ITEMS, item_id, item_name};
+pub use light::LIGHT;
 pub use registries::{REGISTRY_DATA_COUNT, REGISTRY_DATA_FRAMES};
 pub use tags::{TAG_COUNTS, TAG_TOTAL, UPDATE_TAGS_BODY};
 

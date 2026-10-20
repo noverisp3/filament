@@ -71,6 +71,11 @@ def read_chunk_light(buf, off):
         block.append(buf[off:off + length].hex())
         off += length
 
+    if os.environ.get("LIGHT_DEBUG"):
+        print(f"chunk {x},{z}: masks "
+              f"{[m.hex() for m in masks]} "
+              f"{len(sky)} sky arrays, {len(block)} block arrays")
+
     # The mask names the sections and the arrays follow it, one for each bit.
     def named(mask):
         out = []
@@ -96,6 +101,24 @@ def read_block_entity(buf, off):
     return off
 
 
+def read_light_update(buf, off):
+    """The light of a light update: the same two lists, per chunk."""
+    x, off = read_varint(buf, off)
+    z, off = read_varint(buf, off)
+    for _ in range(4):
+        off = read_byte_array(buf, off)
+    layers = []
+    for _ in range(2):
+        count, off = read_varint(buf, off)
+        out = []
+        for _ in range(count):
+            length, off = read_varint(buf, off)
+            out.append(buf[off:off + length].hex())
+            off += length
+        layers.append(out)
+    return (x, z), layers[0], layers[1]
+
+
 def main():
     host = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
     port = int(sys.argv[2]) if len(sys.argv) > 2 else 25566
@@ -117,6 +140,7 @@ def main():
     state = "login"
     answered = False
     chunks = {}
+    updates = {}
     deadline = time.time() + 60
     while time.time() < deadline and len(chunks) < 40:
         try:
@@ -164,11 +188,24 @@ def main():
             chunks[f"{key[0]},{key[1]}"] = {"sky": sky, "block": block}
             if len(chunks) >= 40:
                 break
+        if pid == 49:
+            # The light that moved: the same shape, per chunk.
+            try:
+                key, sky, block = read_light_update(body, off)
+            except Exception as e:  # noqa: BLE001
+                print(f"could not read a light update: {e}")
+                break
+            updates.setdefault(f"{key[0]},{key[1]}", {"sky": [], "block": []})
+            updates[f"{key[0]},{key[1]}"]["sky"] += sky
+            updates[f"{key[0]},{key[1]}"]["block"] += block
 
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(chunks, f)
-    print(f"{len(chunks)} chunks from {host}:{port} -> {out_path}")
+    with open(out_path.replace(".json", "_updates.json"), "w", encoding="utf-8") as f:
+        json.dump(updates, f)
+    print(f"{len(chunks)} chunks and {len(updates)} chunks of light updates "
+          f"from {host}:{port} -> {out_path}")
 
 
 def struct_pack_port(port):

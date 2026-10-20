@@ -5,29 +5,29 @@ use std::collections::HashMap;
 /// Light a named block gives off, 0 to 15.
 ///
 /// The game keeps this on the block state, and the state is what the world
-/// file names, so a name is all there is to go on here. The list is the
-/// game's own: a torch is fourteen and a redstone torch is seven, and a
-/// glowstone is fifteen like a sea lantern and a jack o'lantern.
+/// file names, so a name is all there is to go on here.
+///
+/// The numbers are the game's own, read out of the block definitions by
+/// `tools/extract_light.py` into `src/generated/light.rs`: a torch is fourteen
+/// and a redstone torch is seven, and a glowstone is fifteen like a sea
+/// lantern and a jack o'lantern.
+///
+/// They used to be a list typed by hand here, and a list typed by hand is a
+/// list that is always missing something -- and a lamp the server does not
+/// know about is a lamp the server does not light, which is a dark lamp in
+/// the world and no word about it.
 ///
 /// A name with no namespace and a name with one are the same block, so the
 /// namespace is dropped before the name is looked up.
 pub fn emission_for_name(name: &str) -> u8 {
     let name = name.rsplit(':').next().unwrap_or(name);
-    match name {
-        "glowstone" | "sea_lantern" | "lantern" | "jack_o_lantern" | "shroomlight"
-        | "beacon" | "conduit" | "fire" | "campfire" | "froglight" | "ochre_froglight"
-        | "verdant_froglight" | "pearlescent_froglight" | "chiseled_bookshelf" | "firefly_bush" => 15,
-        "torch" | "end_rod" => 14,
-        "soul_lantern" | "soul_torch" | "soul_campfire" | "crying_obsidian" => 10,
-        "redstone_torch" | "ender_chest" | "enchanting_table" | "glow_lichen" => 7,
-        "respawn_anchor" => 4,
-        "magma_block" => 3,
-        "nether_portal" => 11,
-        "brewing_stand" | "dragon_egg" | "end_portal" | "end_portal_frame" | "end_gateway"
-        | "sculk_shrieker" | "sea_pickle" | "mob_spawner" | "decorated_pot" | "torchflower"
-        | "pink_petals" => 1,
-        _ => 0,
-    }
+    let mut full = String::with_capacity(name.len() + 10);
+    full.push_str("minecraft:");
+    full.push_str(name);
+    crate::generated::LIGHT
+        .iter()
+        .find(|(block, _)| *block == full)
+        .map_or(0, |(_, light)| *light)
 }
 
 /// A dense index into [`BlockRegistry`].

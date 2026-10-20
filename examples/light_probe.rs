@@ -43,6 +43,72 @@ fn main() {
         world.registry().light_emission(glow)
     );
 
+    // Every block in the chunk that gives off light, and how much: this is
+    // where a lamp that the server does not know about shows up.
+    println!("\nthe blocks that give off light in this chunk:");
+    let mut found = std::collections::BTreeMap::new();
+    let base_x = pos.chunk_pos().x * 16;
+    let base_z = pos.chunk_pos().z * 16;    for dx in 0..16 {
+        for dz in 0..16 {
+            for y in -64..320 {
+                let at = BlockPos::new(base_x + dx, y, base_z + dz);
+                let Some(block) = world.block(at) else { continue };
+                let light = world.registry().light_emission(block);
+                if light > 0 {
+                    *found
+                        .entry((world.registry().name(block).to_string(), light))
+                        .or_insert(0) += 1;
+                    if *found
+                        .entry((world.registry().name(block).to_string(), light))
+                        .or_insert(0)
+                        <= 3
+                    {
+                        println!(
+                            "  {name} at {} {} {} emits {light}, and the light there is {}",
+                            at.x,
+                            at.y,
+                            at.z,
+                            world.block_light(at),
+                            name = world.registry().name(block),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    for ((name, light), count) in found {
+        println!("  {name}: {light}, in {count} places");
+    }
+
+    // Every kind of block in the chunk, so a block that is there and is not
+    // counted shows up.
+    println!("\nthe blocks in this chunk:");
+    let mut kinds = std::collections::BTreeMap::new();
+    let base_x = pos.chunk_pos().x * 16;
+    let base_z = pos.chunk_pos().z * 16;
+    for dx in 0..16 {
+        for dz in 0..16 {
+            for y in -64..320 {
+                let at = BlockPos::new(base_x + dx, y, base_z + dz);
+                let Some(block) = world.block(at) else { continue };
+                *kinds.entry(world.registry().name(block).to_string()).or_insert(0) += 1;
+            }
+        }
+    }
+    for (name, count) in kinds {
+        println!("  {name}: {count}");
+    }
+
+    // Whether the chunk still carries the body it was given when it was
+    // built. The body is a copy of the chunk made before the world worked out
+    // its light, so a body that is still there after the light was computed
+    // is a body that describes a world without light in it.
+    let chunk = world.chunk_mut(pos.chunk_pos()).expect("the chunk is there");
+    println!(
+        "\nthe chunk still carries the body it was built with: {}",
+        chunk.body_is_current()
+    );
+
     world.set_block(pos, glow);
     println!("placed at {x} {y} {z}");
 

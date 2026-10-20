@@ -39,7 +39,7 @@ SB_CLIENT_TICK_END = 13
 SB_KEEP_ALIVE = 28
 SB_PING_REQUEST = 38
 SB_PLAYER_ACTION = 41
-SB_PLAYER_POSITION = 30
+SB_PLAYER_POSITION = 31
 CB_SOUND = 119
 SB_CHANGE_GAME_MODE = 5
 
@@ -67,6 +67,10 @@ CB_SET_ENTITY_DATA = 101
 CB_TAKE_ITEM_ENTITY = 127
 CB_REMOVE_ENTITIES = 44
 
+# The damage that was done, and the health that is left.
+CB_DAMAGE_EVENT = 25
+CB_SET_HEALTH = 106
+
 INTERESTING = {
     CB_BLOCK_UPDATE: "block_update",
     CB_BLOCK_CHANGED_ACK: "block_changed_ack",
@@ -77,6 +81,8 @@ INTERESTING = {
     CB_SET_ENTITY_DATA: "set_entity_data",
     CB_TAKE_ITEM_ENTITY: "take_item_entity",
     CB_REMOVE_ENTITIES: "remove_entities",
+    CB_DAMAGE_EVENT: "damage_event",
+    CB_SET_HEALTH: "set_health",
 }
 
 
@@ -214,6 +220,25 @@ def decode(pid, body, offset):
                 entity, at = read_varint(body, at)
                 ids.append(entity)
             return "entities " + " ".join(str(i) for i in ids)
+        if pid == CB_DAMAGE_EVENT:
+            entity, at = read_varint(body, offset)
+            kind, at = read_varint(body, at)
+            cause, at = read_varint(body, at)
+            direct, at = read_varint(body, at)
+            has_place = body[at]
+            at += 1
+            where = ""
+            if has_place:
+                x, y, z = struct.unpack_from(">ddd", body, at)
+                where = f" at {x:.1f} {y:.1f} {z:.1f}"
+            return (
+                f"entity {entity} damage type {kind} cause {cause - 1} "
+                f"direct {direct - 1}{where}"
+            )
+        if pid == CB_SET_HEALTH:
+            health = struct.unpack_from(">f", body, offset)[0]
+            food, _ = read_varint(body, offset + 4)
+            return f"health {health} food {food}"
     except Exception as e:  # noqa: BLE001
         return f"undecodable: {type(e).__name__}: {e}"
     return None
@@ -243,6 +268,7 @@ def main():
     position = None
     chunks = 0
     broke = False
+    fell = False
     started = None
     index = []
     caught = []
@@ -361,22 +387,36 @@ def main():
                 time.sleep(1.2)
             continue
 
-        if broke and time.time() - started > 6:
+        if broke and not fell and time.time() - started > 6:
             print("six seconds after the break")
-            # Now fall, so that the server tells us the sound of being hurt.
-            # The sound ids a client knows are not the ones the report gives,
-            # and the only honest way to learn one is to watch a server send
-            # it.
-            up = struct.pack(">ddd", 0.5, 200.0, 0.5) + struct.pack(">ff", 0.0, 0.0)
-            c.send(SB_PLAYER_POSITION, up + b"\x00" + b"\x00")
+            # Now fall, so that the server tells us the sound of being hurt
+            # and what it says was the damage.
+            #
+            # The server refuses a move of more than a hundred blocks, so the
+            # fall is a staircase rather than one jump, and the last step says
+            # the player is on the ground: that is what makes the landing hurt.
+            def at(y, on_ground):
+                return (
+                    struct.pack(">ddd", 0.5, y, 0.5)
+                    + struct.pack(">ff", 0.0, 0.0)
+                    + bytes([1 if on_ground else 0])
+                )
+
+            c.send(SB_PLAYER_POSITION, at(60.0, False))
             print("went up")
+            for step, y in enumerate([40.0, 20.0, 0.0, -20.0]):
+                for _ in range(10):
+                    time.sleep(0.05)
+                    c.send(SB_CLIENT_TICK_END)
+                c.send(SB_PLAYER_POSITION, at(y, False))
+                print(f"fell to {y}")
             for _ in range(10):
-                time.sleep(0.1)
+                time.sleep(0.05)
                 c.send(SB_CLIENT_TICK_END)
-            down = struct.pack(">ddd", 0.5, 60.0, 0.5) + struct.pack(">ff", 0.0, 0.0)
-            c.send(SB_PLAYER_POSITION, down + b"\x00" + b"\x00")
-            print("fell")
+            c.send(SB_PLAYER_POSITION, at(-7.0, True))
+            print("landed")
             fell_at = time.time()
+            fell = True
             continue
 
         if broke and time.time() - started > 26:

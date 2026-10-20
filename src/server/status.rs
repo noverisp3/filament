@@ -212,6 +212,21 @@ const MAX_SATURATION: f32 = 5.0;
 /// damage is what is left of the fall after those three blocks are taken off.
 const SAFE_FALL_DISTANCE: f64 = 3.0;
 
+/// What lava takes, and how often.
+///
+/// The game's own figures: lava takes four half-hearts a second, and the
+/// invulnerability that goes with a hurt is half a second, so a player in
+/// lava loses two hearts a second and is dead in ten.
+const LAVA_DAMAGE: f64 = 4.0;
+const LAVA_EVERY: u32 = 10;
+
+/// What a cactus takes, and how often.
+///
+/// One half-heart, and then it waits: the game's own cooldown, so a player
+/// who leans on a cactus is hurt once and then left alone.
+const CACTUS_DAMAGE: f64 = 1.0;
+const CACTUS_EVERY: u32 = 10;
+
 /// Answers one connection's handshake and status exchange.
 ///
 /// Deliberately does not implement login: the point here is to be visible in
@@ -1244,6 +1259,15 @@ fn play(
     let mut dead = false;
     // How far the player has fallen since they were last on the ground.
     let mut fall_distance: f64 = 0.0;
+    // How long the player has been standing in lava, and how long since the
+    // cactus last had its say.
+    //
+    // Both are counted in movements rather than in ticks, because the server
+    // hears from the client when the client moves and not otherwise. A player
+    // standing still in lava is still sent a position a tick by a real
+    // client, so the count is very nearly the game's own.
+    let mut lava_ticks: u32 = 0;
+    let mut cactus_ticks: u32 = 0;
     // Where the player comes back to. The world's own spawn, asked for again
     // here because a respawn needs it and the world is the one that knows.
     let spawn_at = session.world.spawn_point().unwrap_or((0, 64, 0));
@@ -1427,6 +1451,7 @@ fn play(
                                     hurt(
                                         &mut health,
                                         damage,
+                                        p::damage::FALL,
                                         &mut out,
                                         &enc,
                                         &log,
@@ -1444,6 +1469,70 @@ fn play(
                             fall_distance = 0.0;
                         } else if drop > 0.0 {
                             fall_distance += drop;
+                        }
+
+                        // And the world hurts too: lava, and the cactus.
+                        //
+                        // The lava takes four half-hearts a second, which is
+                        // the game's own rate, and the cactus takes one and
+                        // then waits, because a cactus that keeps hurting is a
+                        // cactus a player cannot stand next to.
+                        if !dead {
+                            let feet = crate::world::pos::BlockPos::new(
+                                player.x.floor() as i32,
+                                player.y.floor() as i32,
+                                player.z.floor() as i32,
+                            );
+                            let head = crate::world::pos::BlockPos::new(
+                                player.x.floor() as i32,
+                                (player.y + 1.0).floor() as i32,
+                                player.z.floor() as i32,
+                            );
+                            let name_at = |pos: crate::world::pos::BlockPos| {
+                                session
+                                    .world
+                                    .block_at(pos)
+                                    .flatten()
+                                    .map(crate::server::ticking::state_id_name)
+                            };
+
+                            lava_ticks += 1;
+                            cactus_ticks += 1;
+                            if name_at(feet) == Some("minecraft:lava") && lava_ticks >= LAVA_EVERY {
+                                lava_ticks = 0;
+                                hurt(
+                                    &mut health,
+                                    LAVA_DAMAGE,
+                                    p::damage::LAVA,
+                                    &mut out,
+                                    &enc,
+                                    &log,
+                                    entity_id,
+                                    (feet.x, feet.y, feet.z),
+                                )?;
+                                if health <= 0.0 {
+                                    dead = true;
+                                }
+                            }
+                            if cactus_ticks >= CACTUS_EVERY
+                                && (name_at(feet) == Some("minecraft:cactus")
+                                    || name_at(head) == Some("minecraft:cactus"))
+                            {
+                                cactus_ticks = 0;
+                                hurt(
+                                    &mut health,
+                                    CACTUS_DAMAGE,
+                                    p::damage::CACTUS,
+                                    &mut out,
+                                    &enc,
+                                    &log,
+                                    entity_id,
+                                    (feet.x, feet.y, feet.z),
+                                )?;
+                                if health <= 0.0 {
+                                    dead = true;
+                                }
+                            }
                         }
                     }
                 } else {
@@ -3404,13 +3493,17 @@ fn fall_damage(fall_distance: f64) -> f64 {
 
 /// Takes health off a player and tells them about it.
 ///
-/// The health is the server's own number, and the client is told twice: once
-/// with the new number, which is the bar of hearts, and once with the flash,
-/// which is the red that goes across the screen. The game sends both, and the
-/// flash without the number is a picture of a hurt that did not happen.
+/// The health is the server's own number, and the client is told three times:
+/// once with the new number, which is the bar of hearts, once with the flash,
+/// which is the red that goes across the screen, and once with what hurt it,
+/// which is the kind of damage. The game sends all three, and the kind is
+/// what makes the client play the right sound and write the right death
+/// message: a fall and a lava burn are not the same news.
+#[allow(clippy::too_many_arguments)]
 fn hurt(
     health: &mut f32,
     damage: f64,
+    damage_type: i32,
     out: &mut Vec<u8>,
     enc: &FrameEncoder,
     log: &ConnLog,
@@ -3419,8 +3512,29 @@ fn hurt(
 ) -> std::io::Result<()> {
     *health = (*health as f64 - damage).max(0.0) as f32;
 
+    log.note(format!(
+        "hurt for {damage} by damage type {damage_type}, {health} left"
+    ));
+
     let mut body = Vec::new();
     crate::protocol::play::write_set_health(&mut body, *health, MAX_FOOD, MAX_SATURATION);
+    enc.encode(&body, out).map_err(io_err)?;
+
+    // What hurt it, and that nothing caused it: a fall comes from the ground
+    // and a lava burn from the lava, and neither of them is anybody's doing.
+    let mut body = Vec::new();
+    crate::protocol::play::write_damage_event(
+        &mut body,
+        entity_id,
+        damage_type,
+        -1,
+        -1,
+        Some((
+            at.0 as f64 + 0.5,
+            at.1 as f64 + 0.5,
+            at.2 as f64 + 0.5,
+        )),
+    );
     enc.encode(&body, out).map_err(io_err)?;
 
     // The flash, and the way the hit came from: a fall comes from above, so

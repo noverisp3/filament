@@ -20,6 +20,7 @@ pub mod id {
     pub const CHUNK_BATCH_FINISHED: i32 = 11;
     pub const CHUNK_BATCH_START: i32 = 12;
     pub const CHUNKS_BIOMES: i32 = 13;
+    pub const DAMAGE_EVENT: i32 = 25;
     pub const GAME_EVENT: i32 = 39;
     pub const INITIALIZE_BORDER: i32 = 44;
     pub const KEEP_ALIVE: i32 = 45;
@@ -757,6 +758,67 @@ pub mod sound {
 
     /// Which slider a sound plays on. The order is the enum's own.
     pub const SOURCE_PLAYER: i32 = 6;
+}
+
+/// The damage types of the game, by the id the client was told.
+///
+/// The registry is one of the ones the client is sent, and the order it is
+/// sent in is the order the damage types go in. These are read out of that
+/// capture: `minecraft:fall` is the tenth, `minecraft:lava` the twenty-fourth,
+/// and so on.
+pub mod damage {
+    /// A fall from too high up.
+    pub const FALL: i32 = 10;
+    /// Touching a cactus.
+    pub const CACTUS: i32 = 2;
+    /// Being in lava.
+    pub const LAVA: i32 = 24;
+    /// Being on fire.
+    pub const IN_FIRE: i32 = 21;
+    /// Being under water with no air left.
+    pub const DROWN: i32 = 6;
+    /// Damage with no other name.
+    pub const GENERIC: i32 = 18;
+}
+
+/// Writes the news that something hurt an entity.
+///
+/// ```text
+/// VarInt   the entity id
+/// VarInt   which damage it was
+/// VarInt   what caused it, plus one, and zero for nothing
+/// VarInt   what hit it directly, plus one, and zero for nothing
+/// byte     whether there is a place it came from
+/// double   x, y, z   when there is
+/// ```
+///
+/// The two ids are counted from one, because zero is the way of saying there
+/// was nothing there. The damage type is the one the client was sent in the
+/// registry, so the client can play the right sound and write the right
+/// death message.
+pub fn write_damage_event(
+    out: &mut Vec<u8>,
+    entity_id: i32,
+    damage_type: i32,
+    cause_id: i32,
+    direct_id: i32,
+    from: Option<(f64, f64, f64)>,
+) {
+    VarInt(id::DAMAGE_EVENT).write(out);
+    VarInt(entity_id).write(out);
+    VarInt(damage_type).write(out);
+    // Plus one, so that zero means there was nothing there.
+    VarInt(cause_id + 1).write(out);
+    VarInt(direct_id + 1).write(out);
+    match from {
+        Some((x, y, z)) => {
+            out.push(1);
+            out.extend_from_slice(&x.to_be_bytes());
+            out.extend_from_slice(&y.to_be_bytes());
+            out.extend_from_slice(&z.to_be_bytes());
+        }
+        None => out.push(0),
+    }
 }
 
 pub fn write_hurt_animation(out: &mut Vec<u8>, entity_id: i32, yaw: f32) {

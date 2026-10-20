@@ -1488,3 +1488,51 @@ fn taking_an_item_says_which_one_and_how_many() {
     assert_eq!(amount, 3, "and how many the player got");
     assert!(r.is_empty(), "and the packet ends there");
 }
+
+#[test]
+fn the_news_of_a_hurt_says_what_hurt_it() {
+    // The client plays a different sound for a fall and for a burn, and
+    // writes a different death message, so it has to be told which one it
+    // was. The type is the one the client was sent in the registry.
+    let mut body = Vec::new();
+    write_damage_event(&mut body, 42, damage::FALL, -1, -1, None);
+
+    let mut r = &body[..];
+    let (VarInt(packet), _) = VarInt::read(&mut r).expect("a packet id");
+    assert_eq!(packet, id::DAMAGE_EVENT);
+    let (VarInt(entity), _) = VarInt::read(&mut r).expect("an entity id");
+    assert_eq!(entity, 42);
+    let (VarInt(kind), _) = VarInt::read(&mut r).expect("a damage type");
+    assert_eq!(kind, damage::FALL, "a fall is the tenth of them");
+
+    // Nothing caused it and nothing hit it, and both say so with a zero.
+    let (VarInt(cause), _) = VarInt::read(&mut r).expect("a cause");
+    assert_eq!(cause, 0, "nothing caused it");
+    let (VarInt(direct), _) = VarInt::read(&mut r).expect("a direct cause");
+    assert_eq!(direct, 0, "and nothing hit it either");
+
+    // And there is no place it came from.
+    assert_eq!(r[0], 0, "no place");
+    assert_eq!(r.len(), 1, "and nothing after it");
+}
+
+#[test]
+fn a_hurt_can_say_where_it_came_from() {
+    let mut body = Vec::new();
+    write_damage_event(&mut body, 42, damage::LAVA, -1, -1, Some((1.0, 2.0, 3.0)));
+
+    let mut r = &body[..];
+    for _ in 0..5 {
+        let _ = VarInt::read(&mut r).expect("a field");
+    }
+    assert_eq!(r[0], 1, "there is a place");
+    let mut at = 1;
+    let mut pos = [0.0f64; 3];
+    for slot in &mut pos {
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&r[at..at + 8]);
+        *slot = f64::from_be_bytes(bytes);
+        at += 8;
+    }
+    assert_eq!(pos, [1.0, 2.0, 3.0]);
+}

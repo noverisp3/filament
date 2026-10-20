@@ -2082,7 +2082,10 @@ fn place_block(
             why: "the world has no terrain palette",
         });
     };
-    let block = ticking::block_for_name(&terrain, name);
+    let block = match world.registry() {
+        Some(registry) => ticking::block_for_name(&registry, &terrain, name),
+        None => ticking::block_for_name_terrain_only(&terrain, name),
+    };
     let Some(block) = block else {
         return Some(Placement::Refused {
             why: "not a block this world has",

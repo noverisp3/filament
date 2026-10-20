@@ -45,11 +45,19 @@ pub const TICK_BUDGET: usize = 16_384;
 /// we want next is the smallest. The counter breaks ties so that two things due
 /// at the same moment run in the order they were scheduled, which is the
 /// difference between a stable world and one where water oscillates.
+///
+/// The flag says whether this is one of the game's **random** ticks: the ones
+/// the game rolls for the blocks that change on their own, a hillside healing
+/// itself or a crop deciding it has grown. Those are not answered on the
+/// change that touched the block but now and then, and the difference is the
+/// whole of it: a rule that answers every time is a rule that answers
+/// immediately.
 #[derive(Debug, PartialEq, Eq, Clone)]
 struct Due {
     tick: u64,
     order: u64,
     pos: BlockPos,
+    random: bool,
 }
 
 impl Ord for Due {
@@ -96,11 +104,27 @@ impl BlockTicks {
     /// the order they were asked for. Collapsing them would quietly change what
     /// any repeating rule means.
     pub fn schedule(&mut self, now: u64, delay: u64, pos: BlockPos) {
+        self.push(now, delay, pos, false);
+    }
+
+    /// Promises to come back to this position in `delay` ticks, as one of the
+    /// game's random ticks.
+    ///
+    /// The same promise, but flagged as the game's own randomness: the rules
+    /// that grow grass and grow crops are answered by these and by nothing
+    /// else, so they happen now and then rather than the moment a block
+    /// changes.
+    pub fn schedule_random(&mut self, now: u64, delay: u64, pos: BlockPos) {
+        self.push(now, delay, pos, true);
+    }
+
+    fn push(&mut self, now: u64, delay: u64, pos: BlockPos, random: bool) {
         self.order += 1;
         self.due.push(Due {
             tick: now.saturating_add(delay),
             order: self.order,
             pos,
+            random,
         });
     }
 
@@ -114,7 +138,9 @@ impl BlockTicks {
     /// What does not fit stays in the heap and is picked up next tick, which is
     /// the whole point of the budget: a spike of work is spread rather than
     /// dropped and rather than paid for all at once.
-    pub fn take_due(&mut self, now: u64, budget: usize) -> Vec<BlockPos> {
+    ///
+    /// Each one comes with whether it is one of the game's random ticks.
+    pub fn take_due(&mut self, now: u64, budget: usize) -> Vec<(BlockPos, bool)> {
         let mut out = Vec::new();
         while out.len() < budget
             && let Some(next) = self.due.peek()
@@ -122,7 +148,7 @@ impl BlockTicks {
         {
             // `peek` has just said this is there, so it is there.
             if let Some(due) = self.due.pop() {
-                out.push(due.pos);
+                out.push((due.pos, due.random));
             }
         }
         out
@@ -143,6 +169,7 @@ impl BlockTicks {
                 tick: d.tick,
                 order: d.order,
                 pos: d.pos,
+                random: d.random,
             })
             .collect();
         self.due = kept;

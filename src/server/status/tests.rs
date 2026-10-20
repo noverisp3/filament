@@ -1224,7 +1224,7 @@ fn an_item_name_finds_the_block_the_world_will_send_for_it() {
         "minecraft:stone",
         "minecraft:glowstone",
     ] {
-        let block = crate::server::ticking::block_for_name(&terrain, name)
+        let block = crate::server::ticking::block_for_name_terrain_only(&terrain, name)
             .unwrap_or_else(|| panic!("{name} is a block this world has"));
         assert_eq!(
             crate::server::ticking::to_state_name(block, &terrain),
@@ -1240,12 +1240,12 @@ fn an_item_name_finds_the_block_the_world_will_send_for_it() {
         "grass",
         "the game does not call the block grass"
     );
-    assert!(crate::server::ticking::block_for_name(&terrain, "minecraft:grass_block").is_some());
+    assert!(crate::server::ticking::block_for_name_terrain_only(&terrain, "minecraft:grass_block").is_some());
 
     // And things that are items but not blocks this world has.
     for name in ["minecraft:stick", "minecraft:diamond_pickaxe", "grass_block", ""] {
         assert!(
-            crate::server::ticking::block_for_name(&terrain, name).is_none(),
+            crate::server::ticking::block_for_name_terrain_only(&terrain, name).is_none(),
             "{name} is not a block to put down here"
         );
     }

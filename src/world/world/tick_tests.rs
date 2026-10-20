@@ -89,40 +89,55 @@ fn a_tick_answers_deferred_work_and_not_inline_work() {
     // is being measured.
     let mut world = test_world();
     let terrain = *world.terrain_blocks();
-    let pos = BlockPos::new(8, 64, 8);
+    let pos = BlockPos::new(8, 120, 8);
 
-    world.set_block(pos.offset(Direction::Down), terrain.grass);
-    world.set_block(pos, terrain.dirt);
-    world.set_block(pos.offset(Direction::Up), terrain.air);
-
-    let owed = world.scheduled_ticks();
-    assert!(
-        owed > 0,
-        "three edits left the world owing {} neighbour updates it has not told yet",
-        owed
+    // A grass block with nothing under it: the world owes it an answer, and
+    // the answer is not given here.
+    world.set_block(pos.offset(Direction::Down), terrain.air);
+    world.set_block(pos, terrain.grass);
+    assert_eq!(
+        world.block(pos),
+        Some(terrain.grass),
+        "not yet: the answer is owed"
     );
 
     world.tick();
-    assert!(
-        world.scheduled_ticks() < owed,
-        "and one tick started answering them: {} owed, was {}",
-        world.scheduled_ticks(),
-        owed
+    assert_eq!(
+        world.block(pos),
+        Some(terrain.dirt),
+        "and the tick is what gives it"
     );
 }
 
 #[test]
-fn grass_comes_back_to_dirt_with_grass_under_it_and_air_over_it() {
-    // The rule that makes a dug hillside green again instead of leaving a bare
-    // stripe across it. It is the first thing the tick does here because it is
-    // the first thing that needed the tick to exist.
+fn grass_with_nothing_under_it_turns_to_dirt() {
+    // The block below is what a grass block stands on, and when that is gone
+    // the grass has nothing to be grass about. The game answers this at once,
+    // and so does this: a hole dug under a hillside shows dirt.
     let mut world = test_world();
     let terrain = *world.terrain_blocks();
-    let pos = BlockPos::new(8, 64, 8);
+    let pos = BlockPos::new(8, 120, 8);
 
-    world.set_block(pos.offset(Direction::Down), terrain.grass);
-    world.set_block(pos, terrain.dirt);
-    world.set_block(pos.offset(Direction::Up), terrain.air);
+    world.set_block(pos.offset(Direction::Down), terrain.air);
+    world.set_block(pos, terrain.grass);
+
+    world.tick();
+
+    assert_eq!(
+        world.block(pos),
+        Some(terrain.dirt),
+        "a grass block with no dirt under it is dirt"
+    );
+}
+
+#[test]
+fn grass_that_stands_on_dirt_stays_grass() {
+    let mut world = test_world();
+    let terrain = *world.terrain_blocks();
+    let pos = BlockPos::new(8, 120, 8);
+
+    world.set_block(pos.offset(Direction::Down), terrain.dirt);
+    world.set_block(pos, terrain.grass);
 
     for _ in 0..3 {
         world.tick();
@@ -131,62 +146,72 @@ fn grass_comes_back_to_dirt_with_grass_under_it_and_air_over_it() {
     assert_eq!(
         world.block(pos),
         Some(terrain.grass),
-        "dirt under open air with grass below becomes grass"
+        "grass on dirt is grass"
     );
 }
 
 #[test]
-fn dirt_that_does_not_earn_it_stays_dirt() {
-    // The rule has three parts and dropping any one of them grows grass
-    // everywhere, which is a green planet and a very visible bug.
+fn dirt_put_down_on_grass_stays_dirt() {
+    // The rule that used to be here was written the other way round: dirt with
+    // grass under it became grass, at once, and every block a player put down
+    // next to a hillside turned into a lawn.
+    //
+    // The game's rule is the other way round and much slower: grass spreads
+    // onto dirt near it, and only when the game rolls for it.
     let mut world = test_world();
     let terrain = *world.terrain_blocks();
-    let pos = BlockPos::new(8, 64, 8);
+    let pos = BlockPos::new(8, 120, 8);
 
-    // No grass underneath.
-    world.set_block(pos.offset(Direction::Down), terrain.dirt);
-    world.set_block(pos, terrain.dirt);
-    world.set_block(pos.offset(Direction::Up), terrain.air);
-    for _ in 0..3 {
-        world.tick();
-    }
-    assert_eq!(world.block(pos), Some(terrain.dirt), "nothing under it");
-
-    // Grass underneath, but something solid on top.
     world.set_block(pos.offset(Direction::Down), terrain.grass);
-    world.set_block(pos.offset(Direction::Up), terrain.stone);
-    for _ in 0..3 {
+    world.set_block(pos, terrain.dirt);
+
+    for _ in 0..5 {
         world.tick();
     }
-    assert_eq!(world.block(pos), Some(terrain.dirt), "and no air over it");
+
+    assert_eq!(
+        world.block(pos),
+        Some(terrain.dirt),
+        "dirt put down on grass is still dirt"
+    );
 }
 
 #[test]
-fn grass_does_not_spread_sideways_or_downwards() {
-    // Grass spreading is only ever onto dirt that has grass *below* it. A rule
-    // that looked at any neighbour would turn the whole hillside green.
+fn grass_spreads_onto_dirt_beside_it_when_the_game_rolls_for_it() {
+    // The game's own rule: a grass block spreads onto a dirt block near it,
+    // when the game rolls for it and when the place is bright enough.
     let mut world = test_world();
     let terrain = *world.terrain_blocks();
-    let grass = BlockPos::new(8, 64, 8);
+    let grass = BlockPos::new(8, 120, 8);
+    let beside = grass.offset(Direction::East);
 
-    world.set_block(grass, terrain.grass);
-
-    // Dirt beside it and dirt under it: neither has grass beneath.
-    world.set_block(grass.offset(Direction::East), terrain.dirt);
     world.set_block(grass.offset(Direction::Down), terrain.dirt);
+    world.set_block(grass, terrain.grass);
+    world.set_block(beside, terrain.dirt);
+    world.set_block(beside.offset(Direction::Up), terrain.air);
+
+    // Before the roll, the dirt is dirt.
     for _ in 0..3 {
         world.tick();
     }
+    assert_eq!(world.block(beside), Some(terrain.dirt), "not yet");
+
+    // And the roll is what makes it grass.
+    assert!(
+        world.sky_light(beside.offset(Direction::Up)) >= 9,
+        "the place is bright enough: {}",
+        world.sky_light(beside.offset(Direction::Up))
+    );
+    let mut edit = crate::world::world::BlockEdit {
+        chunks: Vec::new(),
+        sections: Vec::new(),
+    };
+    world.random_update(beside, &mut edit);
 
     assert_eq!(
-        world.block(grass.offset(Direction::East)),
-        Some(terrain.dirt),
-        "dirt beside grass is not grass"
-    );
-    assert_eq!(
-        world.block(grass.offset(Direction::Down)),
-        Some(terrain.dirt),
-        "nor is dirt under it"
+        world.block(beside),
+        Some(terrain.grass),
+        "dirt beside grass becomes grass when the game rolls for it"
     );
 }
 
@@ -197,11 +222,10 @@ fn a_tick_says_what_it_changed_so_somebody_can_be_told() {
     // world they are standing in, with nothing to point at.
     let mut world = test_world();
     let terrain = *world.terrain_blocks();
-    let pos = BlockPos::new(8, 64, 8);
+    let pos = BlockPos::new(8, 120, 8);
 
-    world.set_block(pos.offset(Direction::Down), terrain.grass);
-    world.set_block(pos, terrain.dirt);
-    world.set_block(pos.offset(Direction::Up), terrain.air);
+    world.set_block(pos.offset(Direction::Down), terrain.air);
+    world.set_block(pos, terrain.grass);
 
     assert!(
         world.pending_tick_changes() == 0,

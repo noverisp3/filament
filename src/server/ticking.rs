@@ -1056,7 +1056,37 @@ pub fn to_state_name(block: BlockId, terrain: &TerrainBlocks) -> &'static str {
 ///
 /// Asking the other direction means the two cannot drift: whatever
 /// `to_state_name` sends is exactly what this accepts back.
-pub fn block_for_name(terrain: &TerrainBlocks, name: &str) -> Option<BlockId> {
+pub fn block_for_name(
+    registry: &crate::world::block::BlockRegistry,
+    terrain: &TerrainBlocks,
+    name: &str,
+) -> Option<BlockId> {
+    // The world's own block with that name, if it has one.
+    //
+    // A world read from a file has its own dirt and its own grass, registered
+    // under the game's names, and they are not the blocks the generator made:
+    // the generator's dirt is called "dirt" and the world's is called
+    // "minecraft:dirt". Putting the generator's block into a world that came
+    // from a file is putting a different block there, and a block the game
+    // will not recognise when the world is saved and read again.
+    if let Some(id) = registry.id(name) {
+        return Some(id);
+    }
+    // Otherwise the generator's blocks, which the game names differently:
+    // "grass" is "minecraft:grass_block".
+    [
+        terrain.air,
+        terrain.grass,
+        terrain.dirt,
+        terrain.stone,
+        terrain.glowstone,
+    ]
+    .into_iter()
+    .find(|block| to_state_name(*block, terrain) == name)
+}
+
+/// The same lookup, for a world with no registry of its own.
+pub fn block_for_name_terrain_only(terrain: &TerrainBlocks, name: &str) -> Option<BlockId> {
     [
         terrain.air,
         terrain.grass,

@@ -688,6 +688,41 @@ fn air_is_not_something_a_player_can_be_handed() {
 /// thread saw on its way down. A shutdown that never answered would hang the
 /// accept loop forever, which is what this has to catch.
 #[test]
+fn a_world_uses_its_own_block_and_not_the_generators() {
+    // A world read from a file has its own dirt and its own grass, registered
+    // under the game's names. The generator's blocks are called "dirt" and
+    // "grass", and they are different blocks.
+    //
+    // Putting the generator's block into a world that came from a file is
+    // putting a different block there, and one the game will not recognise
+    // when the world is saved and read again.
+    let mut registry = crate::world::block::BlockRegistry::new();
+    let terrain = crate::world::terrain::register_terrain(&mut registry);
+    let worlds_own_dirt = registry.register("minecraft:dirt", true, [0.45, 0.32, 0.20]);
+
+    let block = super::block_for_name(&registry, &terrain, "minecraft:dirt")
+        .expect("the world has a dirt");
+    assert_eq!(
+        block, worlds_own_dirt,
+        "and it is the world's own dirt, not the generator's"
+    );
+    assert_ne!(
+        block, terrain.dirt,
+        "which is a different block from the one the generator made"
+    );
+
+    // A block the world does not have still falls back to the generator's, so
+    // a world of generated terrain can still be played with.
+    let mut registry = crate::world::block::BlockRegistry::new();
+    let terrain = crate::world::terrain::register_terrain(&mut registry);
+    assert_eq!(
+        super::block_for_name(&registry, &terrain, "minecraft:stone"),
+        Some(terrain.stone),
+        "the generator's blocks are still there for a world that has them"
+    );
+}
+
+#[test]
 fn shutdown_saves_answers_and_ends_the_thread() {
     // No `FILAMENT_WORLD` here, so the save is a no-op with a store that does
     // not exist: what is under test is the plumbing, not the files.

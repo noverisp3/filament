@@ -464,6 +464,12 @@ impl World {
         self.ticks.schedule(self.game_time, delay, pos);
     }
 
+    /// Promises to come back to this position in `delay` ticks, as one of the
+    /// game's random ticks.
+    pub fn schedule_random_tick(&mut self, pos: BlockPos, delay: u64) {
+        self.ticks.schedule_random(self.game_time, delay, pos);
+    }
+
     /// What the world promised itself and not yet did.
     pub fn scheduled_ticks(&self) -> usize {
         self.ticks.len()
@@ -553,8 +559,12 @@ impl World {
         let due = self
             .ticks
             .take_due(self.game_time, crate::world::ticks::TICK_BUDGET);
-        for pos in due {
-            self.block_update(pos, &mut edit);
+        for (pos, random) in due {
+            if random {
+                self.random_update(pos, &mut edit);
+            } else {
+                self.block_update(pos, &mut edit);
+            }
         }
         self.tick_items();
         edit
@@ -624,25 +634,140 @@ impl World {
     fn block_update(&mut self, pos: BlockPos, edit: &mut BlockEdit) {
         let Some(block) = self.block(pos) else { return };
 
-        // Grass comes back to dirt that has grass under it and air over it.
+        // Grass with nothing under it turns to dirt.
         //
-        // That is the rule that makes a dug hillside green again instead of
-        // leaving a stripe of bare dirt across it, and it is the first thing the
-        // tick does here because it is the first thing that needed the tick to
-        // exist at all. Everything else this will eventually run -- water,
-        // crops, growing saplings -- is the same shape.
-        if block == self.terrain.dirt {
-            let above = self.block(pos.offset(Direction::Up));
+        // The block below is what a grass block stands on, and when that is
+        // gone the grass has nothing to be grass about. The game answers this
+        // at once: a hole dug under a hillside shows the dirt that was under
+        // the grass, not a floating sheet of green.
+        //
+        // This is the rule that used to be written the other way round, and
+        // written the other way round it turned every block a player put down
+        // next to a hillside into grass.
+        if self.is_grass(block) {
             let below = self.block(pos.offset(Direction::Down));
-            let open_above = above.map(|b| b == self.terrain.air).unwrap_or(true);
-            let grass_under = below.map(|b| b == self.terrain.grass).unwrap_or(false);
-            if open_above && grass_under
-                && let Some(made) = self.set_block(pos, self.terrain.grass)
-            {
-                self.tick_changes.push((pos, self.terrain.grass));
-                edit.merge(made);
+            // Nothing below at all is the bottom of the world, and the world
+            // holds the grass up there.
+            let stands_on_dirt = below.map(|b| self.is_dirt(b)).unwrap_or(true);
+            if !stands_on_dirt {
+                let dirt = self.dirt_block();
+                if let Some(made) = self.set_block(pos, dirt) {
+                    self.tick_changes.push((pos, dirt));
+                    edit.merge(made);
+                }
             }
         }
+    }
+
+    /// The rule the game leaves to chance: dirt near a grass block becomes
+    /// grass.
+    ///
+    /// The game rolls this on a random tick and it needs light: a dirt block
+    /// in the dark stays dirt. It is rare, and it is meant to be -- a hillside
+    /// heals itself over minutes, and not the moment a player puts a block
+    /// down.
+    ///
+    /// The grass is the one that is near, not necessarily the one underneath:
+    /// the game looks a block across and three up or down, which is how grass
+    /// climbs a wall of dirt.
+    fn random_update(&mut self, pos: BlockPos, edit: &mut BlockEdit) {
+        let Some(block) = self.block(pos) else { return };
+        if !self.is_dirt(block) {
+            return;
+        }
+
+        // Light. The game will not grow grass in the dark.
+        //
+        // The light is read in the air above, because that is where the grass
+        // will be: the light inside a block of dirt is nothing at all, being
+        // inside a block.
+        let above = pos.offset(Direction::Up);
+        if self.sky_light(above).max(self.block_light(above)) < 9 {
+            return;
+        }
+
+        // And room above it: grass needs the air.
+        let above = self.block(above);
+        if !above.map(|b| self.is_air(b)).unwrap_or(true) {
+            return;
+        }
+
+        // A grass block within reach: one across, and three up or down.
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                for dy in -3..=3 {
+                    let at = BlockPos::new(pos.x + dx, pos.y + dy, pos.z + dz);
+                    let Some(other) = self.block(at) else {
+                        continue;
+                    };
+                    if !self.is_grass(other) {
+                        continue;
+                    }
+                    let grass = self.grass_block();
+                    if let Some(made) = self.set_block(pos, grass) {
+                        self.tick_changes.push((pos, grass));
+                        edit.merge(made);
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Whether a block is grass, by the name the game gives it.
+    ///
+    /// By name and not by id, because a world read from a file has its own
+    /// grass block and its own dirt, registered under the game's names, and
+    /// they are not the blocks the generator made.
+    pub fn is_grass(&self, id: BlockId) -> bool {
+        id == self.terrain.grass || self.registry.name(id) == "minecraft:grass_block"
+    }
+
+    /// Whether a block is dirt, by the name the game gives it.
+    pub fn is_dirt(&self, id: BlockId) -> bool {
+        id == self.terrain.dirt || self.registry.name(id) == "minecraft:dirt"
+    }
+
+    /// Whether a block is air, by the name the game gives it.
+    pub fn is_air(&self, id: BlockId) -> bool {
+        id == self.terrain.air || self.registry.name(id) == "minecraft:air"
+    }
+
+    /// The dirt this world uses.
+    ///
+    /// The world's own dirt if it has one -- a world read from a file has the
+    /// game's dirt -- and the generator's otherwise.
+    pub fn dirt_block(&self) -> BlockId {
+        self.registry
+            .id("minecraft:dirt")
+            .unwrap_or(self.terrain.dirt)
+    }
+
+    /// The grass this world uses, in the same way as [`Self::dirt_block`].
+    pub fn grass_block(&self) -> BlockId {
+        self.registry
+            .id("minecraft:grass_block")
+            .unwrap_or(self.terrain.grass)
+    }
+
+    /// A number that changes, for the rules the game leaves to chance.
+    ///
+    /// The game rolls dice for the rules that happen now and then, and this is
+    /// that dice: the same block at the same moment always gets the same
+    /// answer, and a different moment gets a different one.
+    fn dice(&self, pos: BlockPos, salt: u64) -> u64 {
+        let mut hash = self.game_time ^ salt.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        hash ^= u64::from(pos.x as u32) << 32
+            | u64::from(pos.y as u32) << 16
+            | u64::from(pos.z as u32);
+        // The mix is splitmix64's: it spreads a small change in the input
+        // across the whole output, so two neighbouring blocks do not get the
+        // same answer.
+        hash = hash.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = hash;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+        z ^ (z >> 31)
     }
 
     /// A full day, in ticks. Twenty-four thousand, which is what a Minecraft day
@@ -1113,6 +1238,28 @@ impl World {
           Direction::East,
       ] {
           self.schedule_tick(pos.offset(face), 1);
+      }
+
+      // And the game's own random ticks, for the block and the six around
+      // it: the rules that happen now and then, and not the moment something
+      // changed.
+      //
+      // The delay is a long one and a different one each time, because the
+      // game does not roll these on a schedule either: it rolls them by
+      // chance, and a hillside that heals itself the instant a block goes
+      // down is not a hillside healing itself. A minute and a bit is the
+      // game's own rate, near enough.
+      for at in [
+          pos,
+          pos.offset(Direction::Down),
+          pos.offset(Direction::Up),
+          pos.offset(Direction::North),
+          pos.offset(Direction::South),
+          pos.offset(Direction::West),
+          pos.offset(Direction::East),
+      ] {
+          let delay = 1200 + self.dice(at, 1) % 2400;
+          self.schedule_random_tick(at, delay);
       }
 
       Some(BlockEdit { chunks, sections })

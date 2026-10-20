@@ -92,8 +92,11 @@ def pack_block_pos(x, y, z):
 
 def unpack_block_pos(packed):
     x = packed >> 38
-    z = (packed << 26) >> 38
-    y = ((packed << 52) >> 52) & 0xFFF
+    # The z field is masked before it is moved: shifting the whole long left
+    # first pushes the x field off the end of the word and the z that comes
+    # back is the x field's.
+    z = (packed >> 12) & 0x3FFFFFF
+    y = (packed << 52) >> 52 & 0xFFF
     if y >= 2048:
         y -= 4096
     return x, y, z

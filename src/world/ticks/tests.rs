@@ -4,6 +4,12 @@ fn pos(x: i32, y: i32, z: i32) -> BlockPos {
     BlockPos::new(x, y, z)
 }
 
+/// The positions of the ticks that ran, without the flag that says which
+/// kind of tick they were.
+fn positions(due: Vec<(BlockPos, bool)>) -> Vec<BlockPos> {
+    due.into_iter().map(|(pos, _)| pos).collect()
+}
+
 #[test]
 fn nothing_runs_before_its_tick() {
     // The whole point of scheduling rather than doing it inline: this is work
@@ -14,7 +20,7 @@ fn nothing_runs_before_its_tick() {
     assert!(ticks.take_due(19, TICK_BUDGET).is_empty(), "not one tick early");
     assert_eq!(ticks.len(), 1, "and it is still waiting");
     assert_eq!(
-        ticks.take_due(20, TICK_BUDGET),
+        positions(ticks.take_due(20, TICK_BUDGET)),
         vec![pos(1, 2, 3)],
         "and it runs on the tick it was promised for"
     );
@@ -29,7 +35,7 @@ fn work_runs_soonest_first() {
     ticks.schedule(0, 20, pos(6, 0, 0));
 
     assert_eq!(
-        ticks.take_due(30, TICK_BUDGET),
+        positions(ticks.take_due(30, TICK_BUDGET)),
         vec![pos(3, 0, 0), pos(6, 0, 0), pos(9, 0, 0)],
         "three due, soonest first"
     );
@@ -45,7 +51,7 @@ fn two_things_due_at_once_run_in_the_order_they_were_asked_for() {
     ticks.schedule(0, 5, pos(5, 0, 0));
 
     assert_eq!(
-        ticks.take_due(5, TICK_BUDGET),
+        positions(ticks.take_due(5, TICK_BUDGET)),
         vec![pos(7, 0, 0), pos(2, 0, 0), pos(5, 0, 0)],
         "scheduled order, not position order and not reverse"
     );
@@ -128,7 +134,7 @@ fn a_chunk_that_goes_takes_its_promises_with_it() {
     let dropped = ticks.forget_chunk(|p| p.x < 16);
     assert_eq!(dropped, 2, "both promises in the first chunk");
     assert_eq!(
-        ticks.take_due(5, TICK_BUDGET),
+        positions(ticks.take_due(5, TICK_BUDGET)),
         vec![pos(16, 0, 0)],
         "and the chunk that stayed keeps its own"
     );

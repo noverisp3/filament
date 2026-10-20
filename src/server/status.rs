@@ -1042,13 +1042,9 @@ fn play(
 
     // The light of the world, worked out now that the ground is all here.
     //
-    // The chunks above carry the light of their own columns, which is the sun
-    // coming straight down and is right above the ground and under it. What it
-    // does not have is the light that comes in sideways from a lit column next
-    // door, which is what a cave mouth looks like. The game works that out
-    // with a light engine and a queue of updates; here it is one pass over the
-    // world, which is the same answer for a world nobody is editing while it
-    // happens.
+    // The chunks above carry the light of their own columns. What they do not
+    // have is the light that comes in sideways from a lit column next door,
+    // which is what a cave mouth looks like.
     session.world.recompute_light();
     let light = session.world.light_changes();
     if !light.is_empty() {
@@ -1064,27 +1060,20 @@ fn play(
                 &block_sections,
             );
             // The body, not a framed packet: every connection frames it for
-            // itself, because compression is per connection. A body framed
-            // here and framed again there is a packet with a length in front
-            // of a length, and the client reads the second one as the first
-            // byte of the next packet.
+            // itself, because compression is per connection.
             session.wire.send_all(body);
         }
     }
 
     // Emptied by `flush_buffer` above, and that is the whole of a fault that
-    // took a long time to find. Without it, the second write below -- the one
-    // that puts the introductions on the wire, added after the chunk batch --
-    // carried everything the first write had as well, all of it again: the
-    // login packet, and every one of the chunks above.
+    // took a long time to find. Without it, the second write below carried
+    // everything the first write had as well: the login packet, and every one
+    // of the chunks above.
     //
     // It looked like nothing for as long as it was there. A chunk arriving
     // twice is the same chunk arriving twice, and a world made of chunks does
-    // not visibly object. What it does do is arrive late: those chunks reach a
-    // client that has already started playing, and by then some of them have
-    // been edited. The copy generated before the edit turns up afterwards and
-    // undoes it, so the block is whole on the server and gone in the client's
-    // hands.
+    // not visibly object. What it does do is arrive late, after some of them
+    // have been edited, and the copy generated before the edit undoes it.
     log.note(if std::env::var_os("FILAMENT_WORLD").is_some() {
         "chunks sent, and edits land in the world folder"
     } else {
@@ -1095,16 +1084,11 @@ fn play(
     //
     //     Two directions, and both are needed. A player who arrives into an
     //     empty-looking world is not being told about anybody, and the players
-    //     already here have no reason to know a new one turned up. Doing only one
-    //     of the two is the usual way this goes wrong: everyone can see who is
-    //     already there and the new arrival appears to be alone.
+    //     already here have no reason to know a new one turned up.
     //
-    //     They go out after the chunks, because a body needs somewhere to stand.
-    //
-    //     Order matters within each player: the tab list entry first, then the
-    //     body. The other way round is a client that has an entity it has never
-    //     been told the name of, which it renders as a nameless figure or, on
-    //     some versions, does not render at all.
+    //     They go out after the chunks, because a body needs somewhere to stand,
+    //     and the tab list entry comes before the body: the other way round is a
+    //     client that has an entity it has never been told the name of.
     let others = session.wire.snapshot();
     for other in &others {
         if other.id == player_id {
@@ -1218,23 +1202,19 @@ fn play(
     // 14. Keep the connection alive, and follow the player.
     //
     //     The client hangs up after thirty seconds of silence and reads silence
-    //     as "the server has stopped answering". There is no tick loop yet, so
-    //     the only traffic there is to send is this.
+    //     as "the server has stopped answering".
     //
-    //     A read timeout rather than a second thread, so the deadline is checked
-    //     in the same loop that drains packets and there is no writer to lock
-    //     against.
+    //     A read timeout rather than a second thread, so the deadline is
+    //     checked in the same loop that drains packets and there is no writer to
+    //     lock against.
     //
     //     The movement packets update where the player is, and when that moves
     //     the chunk it stands in outside the square already sent, the new edge
-    //     follows. That is the difference between a world and a diorama: without
-    //     it the player walks off the terrain into white nothing.
-    //     Fifty milliseconds, which is one game tick. It used to be a second,
-    //     because the only thing this loop had to do was answer a keep alive on
-    //     a fifteen second deadline and there was no reason to wake sooner.
-    //     Mining progress is that reason: a crack has ten stages and moves
-    //     through them in about a second, which a loop that wakes once a second
-    //     cannot show.
+    //     follows. That is the difference between a world and a diorama.
+    //
+    //     Fifty milliseconds, which is one game tick: a crack has ten stages
+    //     and moves through them in about a second, which a loop that wakes
+    //     once a second cannot show.
     stream.set_read_timeout(Some(LOOP_INTERVAL))?;
     let mut keep_alive = KeepAlive::new();
     let mut last_keep_alive = std::time::Instant::now();
@@ -1243,19 +1223,17 @@ fn play(
 
     // The block this player is currently breaking, if any.
     //
-    // Cracks are drawn by the client but paced by the server, so the server has to
-    // keep track of how far along it is. It is per connection because mining is per
-    // player: two people can be breaking different blocks at once and neither should
-    // be told about the other's.
+    // Cracks are drawn by the client but paced by the server, so the server has
+    // to keep track of how far along it is. It is per connection because mining
+    // is per player.
     let mut mining: Option<Mining> = None;
     // The stage the other players were last told about, and `None` for "no crack
     // has been sent at all".
     //
-    // An `Option` rather than a number outside the range, because zero is a real
-    // stage: a crack that has just started *is* stage zero, and a sentinel that
-    // reads as zero makes the first stage compare equal to it and never go out.
-    // The block then stays uncracked until stage one, which is most of a second
-    // of it looking like nothing happened.
+    // An `Option` rather than a number outside the range, because zero is a
+    // real stage: a crack that has just started *is* stage zero, and a sentinel
+    // that reads as zero makes the first stage compare equal to it and never go
+    // out.
     let mut last_stage: Option<i8> = None;
 
     // Where the player is, updated by the movement packets. The spawn is where
@@ -1345,13 +1323,10 @@ fn play(
     //
     // An item on the ground belongs to the world, so every player who can see
     // it is told about it on their own account. Remembering which ones this
-    // player has been told is what keeps that from being said twice, and what
-    // lets a player who walks up to an item that was dropped before they
-    // arrived be told about it then.
+    // player has been told keeps that from being said twice.
     //
     // The place is remembered as well, because a movement is a distance from
-    // where the client last thought the thing was, and a client that is told
-    // the same item in two places is a client that draws it in the wrong one.
+    // where the client last thought the thing was.
     let mut seen_items: std::collections::HashMap<i32, (f64, f64, f64)> =
         std::collections::HashMap::new();
 
@@ -1359,10 +1334,8 @@ fn play(
     //
     // One packet each, not one packet per pass. A frame carries a length and
     // then exactly one packet, so two edits written into one buffer and framed
-    // once arrive as a single frame holding two packets: the client reads the
-    // first, finds ten bytes where there should be none, and hangs up. Two edits
-    // in one pass is not exotic, it is what a player holding the mouse down
-    // does.
+    // once arrive as a single frame holding two packets, and the client hangs
+    // up. Two edits in one pass is what a player holding the mouse down does.
     let mut edits: Vec<Vec<u8>> = Vec::new();
 
     // The dust and noise a break makes, as whole packets, kept apart from the
@@ -2401,14 +2374,9 @@ fn place_block(
                                 // And into their hand, which is how a player
                                 // gets something to build with. The game drops
                                 // an item entity for the player to walk over
-                                // and pick up; there is no item entity here yet,
-                                // so the block goes straight into the inventory,
-                                // and a player who digs a hole has the dirt to
-                                // fill it in again.
-                                //
-                                // What was there, what is there now, and the
-                                // prediction number the client asked about, and
-                                // what went into the hand that broke it.
+                                // and pick up; there is no item entity here
+                                // yet, so the block goes straight into the
+                                // inventory.
                                 //
                                 // The names are the point. A state id on its
                                 // own cannot be read by eye, and a block sent
@@ -2424,18 +2392,15 @@ fn place_block(
                                 };
 
                                 // The block that was there has a name, and
-                                // that name is usually also an item -- grass
-                                // block is `minecraft:grass_block` both ways.
-                                // The name already carries its namespace, so it
-                                // is looked up as it stands: adding
+                                // that name is usually also an item. The name
+                                // already carries its namespace, so adding
                                 // `minecraft:` to it again asks for
                                 // `minecraft:minecraft:grass_block`, which is
-                                // not an item, and a server that quietly got
-                                // that wrong would hand out nothing at all.
+                                // not an item.
                                 //
                                 // The item id is a different number from the
-                                // block state id, though: dirt is state 10 and
-                                // item 484, grass block is 9 and 613.
+                                // block state id: dirt is state 10 and item
+                                // 484, grass block is 9 and 613.
                                 if session.world.terrain_blocks().is_some() {
                                     let held = crate::server::ticking::state_id_name(was);
                                     match crate::server::ticking::held_item(was) {
@@ -2446,10 +2411,7 @@ fn place_block(
                                             // walking over it. It does not go
                                             // straight into a pocket, because
                                             // a thing on the ground can be
-                                            // lost, dropped, or fought over,
-                                            // and a block that vanishes and
-                                            // appears in the hand skips all
-                                            // of that.
+                                            // lost, dropped, or fought over.
                                             let entity_id = crate::server::next_entity_id();
                                             let uuid = crate::world::item_entity::new_uuid(
                                                 entity_id as u64,
@@ -2461,15 +2423,12 @@ fn place_block(
                                                 item,
                                                 1,
                                             );
-                                            // The client is not told here.
-                                            // An item on the ground belongs to
+                                            // The client is not told here. An
+                                            // item on the ground belongs to
                                             // the world and not to the player
                                             // who broke the block, so every
                                             // player who can see it is told
-                                            // about it on their own account,
-                                            // and the one who broke it is
-                                            // told the same way as everybody
-                                            // else.
+                                            // about it on their own account.
                                             log.note(format!(
                                                 "{held} is lying on the ground"
                                             ));
@@ -2495,20 +2454,13 @@ fn place_block(
                                 // arrives, but the shape it used to have is
                                 // kept until the guess that removed it is
                                 // confirmed, and until then it is invisible
-                                // and still solid: a player stands on air and
-                                // walks into a wall that is not drawn. It only
-                                // comes right when the chunk is sent again from
-                                // the server, which is why it looked like the
-                                // world was only right after reconnecting.
+                                // and still solid.
                                 //
                                 // The number to confirm it with is the one the
-                                // player sent with their action. It is their
-                                // prediction number and not one of ours: the
-                                // client ends its predictions up to that
-                                // number and no other, so a number of our own
-                                // would settle nothing, and a number of ours
-                                // that happened to be too large would settle
-                                // guesses that had not been made yet.
+                                // player sent with their action: the client
+                                // ends its predictions up to that number and
+                                // no other, so a number of our own would
+                                // settle nothing.
                                 let mut ack = Vec::new();
                                 p::write_block_changed_ack(&mut ack, action.sequence);
                                 acks.push(ack);
@@ -2567,23 +2519,15 @@ fn place_block(
         //
         // Without the first half the change exists on the server and nowhere
         // else: the client keeps drawing the block it was sent and never learns
-        // it is gone. Without the second half the other player keeps drawing it
-        // as well, until they walk away and back and the chunk is sent again.
+        // it is gone.
         //
         // Each edit is framed on its own, and each body goes out whole: framing
         // adds a length and nothing else, so a body sent without the packet id
-        // arrives with the first byte of the position standing in for it, and
-        // two bodies framed together arrive as one packet with ten bytes over.
-        //
-        // The framed bytes cannot be shared between connections, because
-        // compression is per connection, so each one is framed again on the far
-        // side with that player's encoder.
+        // arrives with the first byte of the position standing in for it.
         //
         // Both lists are taken, not iterated. Leaving them in place makes every
         // pass send everything since the connection began, twenty times a
-        // second: a repeated block update is invisible because it says the same
-        // thing, and a repeated level event is a burst of particles that does
-        // not stop until the player who caused it leaves.
+        // second.
         //
         // And they go to different places, which is not a detail. The block
         // update tells the client what is there now, and goes to everyone
@@ -2593,21 +2537,20 @@ fn place_block(
         // it predicted the block going: the game excludes them, and sending it
         // to them gives everyone watching a single break and the player who did
         // it two.
+        //
         // What the world has done to itself since this connection last looked.
         //
         // Drained, not read, so two players are not both sent the same change
         // and it is not sent twice because of that. It goes to everyone in
         // range rather than to whoever asked: a block that turned to grass
         // because something above it was mined is not one player's news.
+        //
         // The items this player can see and has not been told about.
         //
         // The client needs two things to draw an item: the entity, and the
-        // stack it is holding. The entity says where it is and what it is;
-        // the stack says what the thing on the ground actually is.
-        //
-        // An item that is still falling is told about again as it falls, as a
-        // distance from where the client last thought it was, so the thing on
-        // the ground lands where the server says it lands.
+        // stack it is holding. An item that is still falling is told about
+        // again as it falls, as a distance from where the client last thought
+        // it was, so the thing on the ground lands where the server says.
         //
         // The reach is the view distance in blocks, so an item far away is
         // left for later, when the player walks towards it.

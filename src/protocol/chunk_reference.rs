@@ -144,6 +144,77 @@ fn the_reference_packet_is_the_shape_this_module_writes() {
 }
 
 #[test]
+fn the_captured_server_numbers_its_light_sections_from_one_below_the_world() {
+    // The bits in the light masks name the sections, and the client's light
+    // engine numbers its sections from one below the world:
+    //
+    //     LevelLightEngine.getMinLightSection() = getMinSectionY() - 1
+    //
+    // so the world's own bottom section is bit 1 and bit 0 is the padding
+    // section below the world, which holds nothing.
+    //
+    // The capture says the same, and it can be checked against the terrain
+    // rather than taken on trust: the chunk is a flat world whose ground is
+    // in its lowest section, so the section with the ground is the one the
+    // sky mask names, and the sky in it is lit everywhere above the ground
+    // and dark in it.
+    let mut i = 0;
+
+    let (_, next) = varint_at(REFERENCE, i);
+    i = next + 8; // the packet id and the coordinates
+
+    let (maps, next) = varint_at(REFERENCE, i);
+    i = next;
+    for _ in 0..maps {
+        let (_, n1) = varint_at(REFERENCE, i);
+        let (longs, n2) = varint_at(REFERENCE, n1);
+        i = n2 + longs as usize * 8;
+    }
+
+    let (buffer_len, next) = varint_at(REFERENCE, i);
+    i = next;
+    let buffer = &REFERENCE[i..i + buffer_len as usize];
+    i += buffer_len as usize;
+
+    // The first section of the buffer is the world's bottom section, and it
+    // holds the ground.
+    let blocks = i16::from_be_bytes(buffer[0..2].try_into().unwrap());
+    assert_eq!(blocks, 1024, "the ground is in the lowest section");
+
+    let (entities, next) = varint_at(REFERENCE, i);
+    assert_eq!(entities, 0, "a flat world has no block entities");
+    i = next;
+
+    // The four masks.
+    let mut masks = Vec::new();
+    for _ in 0..4 {
+        let (len, next) = varint_at(REFERENCE, i);
+        i = next;
+        masks.push(&REFERENCE[i..i + len as usize]);
+        i += len as usize;
+    }
+
+    // The sky present mask names the sections that have sky light.
+    let sky_present = masks[0];
+    let named: Vec<usize> = sky_present
+        .iter()
+        .enumerate()
+        .flat_map(|(index, byte)| {
+            (0..8).filter(move |bit| byte >> bit & 1 == 1).map(move |bit| index * 8 + bit)
+        })
+        .collect();
+    assert!(
+        named.contains(&1),
+        "the section with the ground is bit 1, so the sections are numbered \
+         from one below the world: {named:?}"
+    );
+    assert!(
+        !named.contains(&0),
+        "bit 0 is the padding section below the world, which holds nothing"
+    );
+}
+
+#[test]
 fn the_biome_is_the_one_the_captured_server_used() {
     // Read past the coordinates and the heightmaps, then to the first section's
     // biome container.

@@ -57,6 +57,19 @@ fn a_block_that_glows_lights_the_air_around_it() {
         MAX_LIGHT - 3,
         "and so on, until the light runs out"
     );
+    // And it keeps going for the whole fifteen blocks the game allows, which
+    // is the difference between a lamp that lights a room and a lamp that
+    // lights a chair.
+    assert_eq!(
+        world.block_light(BlockPos::new(8 + 14, surface + 1, 8)),
+        MAX_LIGHT - 14,
+        "the light reaches fifteen blocks"
+    );
+    assert_eq!(
+        world.block_light(BlockPos::new(8 + 15, surface + 1, 8)),
+        0,
+        "and no further"
+    );
 }
 
 #[test]
@@ -72,6 +85,50 @@ fn the_light_of_a_lamp_does_not_go_through_the_ground() {
         0,
         "the ground under the lamp is dark"
     );
+}
+
+#[test]
+fn the_light_the_client_is_told_after_a_placement_is_the_whole_pool() {
+    // The client is told about the light that moved, and what it is told has to
+    // be the whole pool. A smaller pool is a client that draws a lamp lighting
+    // a chair.
+    let mut world = World::generate(1);
+    let glowstone = world
+        .registry()
+        .id("glowstone")
+        .expect("the world knows a glowstone");
+    let pos = BlockPos::new(8, 120, 8);
+
+    world.set_block(pos, glowstone);
+
+    // What the server would send: the sections whose light moved.
+    let changes = world.take_light_changes();
+    assert!(
+        !changes.is_empty(),
+        "placing a lamp moves light, and the client has to be told"
+    );
+
+    // And the light in the section the lamp is in is the whole pool.
+    assert!(
+        changes
+            .iter()
+            .any(|s| s.y == pos.section_pos().y && s.chunk_pos() == pos.chunk_pos()),
+        "the lamp's own section is among the changes"
+    );
+    for distance in 1..=14u8 {
+        let at = BlockPos::new(8 + distance as i32, 120, 8);
+        // The light is in the section of the block it is in, and a lamp eight
+        // blocks from the edge of its chunk lights the next one.
+        let chunk = world.chunk(at.chunk_pos()).expect("the chunk is there");
+        let light = chunk
+            .section_light(at.section_pos())
+            .expect("the section is there");
+        assert_eq!(
+            light.block(at.local_pos()),
+            MAX_LIGHT - distance,
+            "the light at {distance} blocks is what the client will draw"
+        );
+    }
 }
 
 #[test]

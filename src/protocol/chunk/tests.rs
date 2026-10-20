@@ -233,13 +233,13 @@ fn the_light_carries_the_sections_that_have_it() {
     // A bit set is a byte count and then the bytes, so the first section is
     // one bit in one byte.
     assert_eq!(w[0], 1, "the sky mask is one byte");
-    assert_eq!(w[1], 0b0000_0001, "the first section has sky light");
+    assert_eq!(w[1], 0b0000_0010, "the first section has sky light");
 
     assert_eq!(w[2], 0, "the block mask is empty, not zero");
 
     // The empty sky mask names the second section.
     assert_eq!(w[3], 1, "the empty sky mask is one byte");
-    assert_eq!(w[4], 0b0000_0010, "the second section is dark");
+    assert_eq!(w[4], 0b0000_0100, "the second section is dark");
 
     assert_eq!(w[5], 0, "the empty block mask is empty");
 
@@ -248,6 +248,37 @@ fn the_light_carries_the_sections_that_have_it() {
     assert_eq!(updates.0, 1);
     let (len, _) = VarInt::read(&mut &w[6 + after..]).expect("a length");
     assert_eq!(len.0, 2048, "a section of light is two thousand and forty-eight bytes");
+}
+
+#[test]
+fn the_worlds_bottom_section_is_bit_one() {
+    // The game's light engine numbers its sections from one below the world,
+    // so that light can spread off the bottom edge:
+    //
+    //     LevelLightEngine.getMinLightSection() = getMinSectionY() - 1
+    //
+    // The world's own bottom section is therefore bit 1, and bit 0 is the
+    // padding section below the world. A server that counts from the world's
+    // bottom instead puts every section one too low, and the light of a lamp
+    // lands on the floor beneath it.
+    //
+    // The capture of a stock server agrees, and it can be checked against the
+    // terrain rather than taken on trust: the chunk is a flat world whose
+    // ground is in its lowest section, so the section with the ground is the
+    // one the sky mask names, and the sky in it is lit everywhere above the
+    // ground and dark in it.
+    let lit = vec![0xFFu8; 2048];
+    let sky = vec![Some(lit)];
+
+    let mut w = Vec::new();
+    write_light(&mut w, &sky, &[]);
+
+    assert_eq!(w[0], 1, "one byte of mask");
+    assert_eq!(
+        w[1],
+        0b0000_0010,
+        "the bottom section of the world is bit one, not bit zero"
+    );
 }
 
 #[test]
@@ -281,8 +312,8 @@ fn a_light_update_carries_one_array_for_each_section_it_names() {
         r = &r[len as usize..];
     }
     // The first mask names the two lit sections, the third the dark one.
-    assert_eq!(masks[0], vec![0b0000_0101], "sections zero and two have light");
-    assert_eq!(masks[2], vec![0b0000_0010], "section one is empty of it");
+    assert_eq!(masks[0], vec![0b0000_1010], "sections zero and two have light");
+    assert_eq!(masks[2], vec![0b0000_0100], "section one is empty of it");
 
     // And the list holds one array for each of the two lit sections.
     let (VarInt(layers), _) = VarInt::read(&mut r).expect("a layer count");
@@ -313,15 +344,15 @@ fn the_light_of_the_blocks_travels_with_the_light_of_the_sun() {
 
     // The sky mask names the first section, and the block mask names it too.
     assert_eq!(w[0], 1, "the sky mask is one byte");
-    assert_eq!(w[1], 0b0000_0001, "the first section has sky light");
+    assert_eq!(w[1], 0b0000_0010, "the first section has sky light");
     assert_eq!(w[2], 1, "the block mask is one byte");
-    assert_eq!(w[3], 0b0000_0001, "and the first section has block light");
+    assert_eq!(w[3], 0b0000_0010, "and the first section has block light");
 
     // Then the two empty masks, naming the second section each.
     assert_eq!(w[4], 1, "the empty sky mask is one byte");
-    assert_eq!(w[5], 0b0000_0010, "the second section has no sky light");
+    assert_eq!(w[5], 0b0000_0100, "the second section has no sky light");
     assert_eq!(w[6], 1, "the empty block mask is one byte");
-    assert_eq!(w[7], 0b0000_0010, "and no block light either");
+    assert_eq!(w[7], 0b0000_0100, "and no block light either");
 
     // And one array for the sun and one for the lamps.
     let mut r = &w[8..];
@@ -365,9 +396,9 @@ fn a_light_update_names_each_section_once_and_carries_one_array_for_it() {
     //
     //   31          the packet
     //   01 02       the chunk
-    //   01 08       the sky mask: one byte, section three
+    //   01 10       the sky mask: one byte, section three
     //   00          the block mask: nothing
-    //   01 10       the empty sky mask: one byte, section four
+    //   01 20       the empty sky mask: one byte, section four
     //   00          the empty block mask: nothing
     //   01          one array
     //   80 10       two thousand and forty-eight bytes
@@ -375,9 +406,9 @@ fn a_light_update_names_each_section_once_and_carries_one_array_for_it() {
         &w[..12],
         &[
             0x31, 0x01, 0x02, // the packet and the chunk
-            0x01, 0x08, // the sky mask names section three
+            0x01, 0x10, // the sky mask names section three
             0x00, // the block mask names nothing
-            0x01, 0x10, // the empty sky mask names section four
+            0x01, 0x20, // the empty sky mask names section four
             0x00, // and the empty block mask names nothing
             0x01, // one array
             0x80, 0x10, // two thousand and forty-eight bytes
@@ -412,10 +443,14 @@ fn the_sky_updates_are_one_layer_per_section_that_has_light() {
     let mut w = Vec::new();
     write_light(&mut w, &lit, &[]);
 
-    // Four masks (seven bytes: the sky mask carries three and the other three
+    // Four masks (eight bytes: the sky mask carries four and the other three
     // carry none), then a count, then a layer each: a VarInt length of 2048,
     // which is two bytes, and 2048 bytes of light.
-    let expected = 7 + 1 + SECTIONS * (2 + LIGHT_BYTES) + 1;
+    //
+    // The sky mask is four bytes because the sections are numbered from one
+    // below the world: the top section of the world is bit 24, and bit 24 is
+    // in the fourth byte.
+    let expected = 8 + 1 + SECTIONS * (2 + LIGHT_BYTES) + 1;
     assert_eq!(
         w.len(),
         expected,

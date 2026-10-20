@@ -43,6 +43,22 @@ pub struct Chunk {
 
 pub const MIN_SECTION_Y: i32 = MIN_BLOCK_Y / SECTION_DIM;
 
+/// The lowest section the game's light engine numbers.
+///
+/// One below the bottom of the world. The game keeps a padding section under
+/// every world so that light can spread off the bottom edge, and the light
+/// masks name it like any other section:
+///
+/// ```text
+/// LevelLightEngine.getMinLightSection() = getMinSectionY() - 1
+/// ```
+///
+/// So the world's own bottom section (y = -64) is bit 1 and bit 0 is the
+/// padding section below it, which holds nothing. The capture says the same:
+/// the chunk recorded from a stock server names its bottom section bit 1 and
+/// leaves bit 0 to the empty padding section.
+pub const MIN_LIGHT_SECTION_Y: i32 = MIN_SECTION_Y - 1;
+
 impl Chunk {
     /// A chunk filled with `fill`, uniformly in every section — so an empty
     /// chunk costs 24 * (palette of one), and nothing per section beyond that.

@@ -20,6 +20,27 @@
 //! state the world storage starts in.
 
 use crate::protocol::VarInt;
+use crate::world::chunk::{MIN_LIGHT_SECTION_Y, MIN_SECTION_Y};
+
+/// The bit that names a section of light in a mask.
+///
+/// The game's light engine numbers its sections from one below the world, so
+/// that light can spread off the bottom edge:
+///
+/// ```text
+/// LevelLightEngine.getMinLightSection() = getMinSectionY() - 1
+/// ```
+///
+/// The world's own bottom section (y = -64) is therefore bit 1 and bit 0 is
+/// the padding section below the world, which holds nothing. The capture of a
+/// stock server says the same: the chunk whose ground is in its lowest
+/// section names that section bit 1, and leaves bit 0 to the padding.
+///
+/// A section one too low is a lamp lighting the floor below it, so the
+/// numbering is not a detail of the packet but the whole of it.
+fn light_bit(section_y: i32) -> usize {
+    (section_y - MIN_LIGHT_SECTION_Y) as usize
+}
 
 /// Blocks along one edge of a chunk.
 pub const WIDTH: i32 = 16;
@@ -368,15 +389,16 @@ fn write_light(out: &mut Vec<u8>, sky: &[Option<Vec<u8>>], block: &[Option<Vec<u
     let mut sky_empty: Vec<u8> = Vec::new();
     let mut sky_updates: Vec<Vec<u8>> = Vec::new();
     for (index, section) in sky.iter().enumerate() {
+        let bit = light_bit(MIN_SECTION_Y + index as i32);
         match section {
             Some(bytes) if bytes.iter().any(|b| *b != 0) => {
-                set_bit(&mut sky_present, index);
+                set_bit(&mut sky_present, bit);
                 sky_updates.push(bytes.clone());
             }
             Some(_) => {
                 // Every cell in it is dark: the game says so with the empty
                 // mask and sends no data for it.
-                set_bit(&mut sky_empty, index);
+                set_bit(&mut sky_empty, bit);
             }
             None => {}
         }
@@ -387,13 +409,14 @@ fn write_light(out: &mut Vec<u8>, sky: &[Option<Vec<u8>>], block: &[Option<Vec<u
     let mut block_empty: Vec<u8> = Vec::new();
     let mut block_updates: Vec<Vec<u8>> = Vec::new();
     for (index, section) in block.iter().enumerate() {
+        let bit = light_bit(MIN_SECTION_Y + index as i32);
         match section {
             Some(bytes) if bytes.iter().any(|b| *b != 0) => {
-                set_bit(&mut block_present, index);
+                set_bit(&mut block_present, bit);
                 block_updates.push(bytes.clone());
             }
             Some(_) => {
-                set_bit(&mut block_empty, index);
+                set_bit(&mut block_empty, bit);
             }
             None => {}
         }
@@ -466,11 +489,12 @@ pub fn write_light_update(
     let mut empty: Vec<u8> = Vec::new();
     let mut updates: Vec<Vec<u8>> = Vec::new();
     for (index, bytes) in sections {
+        let bit = light_bit(MIN_SECTION_Y + *index);
         if bytes.iter().any(|b| *b != 0) {
-            set_bit(&mut present, *index as usize);
+            set_bit(&mut present, bit);
             updates.push(bytes.clone());
         } else {
-            set_bit(&mut empty, *index as usize);
+            set_bit(&mut empty, bit);
         }
     }
 
@@ -480,11 +504,12 @@ pub fn write_light_update(
     let mut block_empty: Vec<u8> = Vec::new();
     let mut block_updates: Vec<Vec<u8>> = Vec::new();
     for (index, bytes) in block_sections {
+        let bit = light_bit(MIN_SECTION_Y + *index);
         if bytes.iter().any(|b| *b != 0) {
-            set_bit(&mut block_present, *index as usize);
+            set_bit(&mut block_present, bit);
             block_updates.push(bytes.clone());
         } else {
-            set_bit(&mut block_empty, *index as usize);
+            set_bit(&mut block_empty, bit);
         }
     }
 

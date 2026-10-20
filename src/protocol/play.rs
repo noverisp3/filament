@@ -32,6 +32,7 @@ pub mod id {
     pub const SET_CHUNK_CACHE_CENTER: i32 = 96;
     pub const SET_DEFAULT_SPAWN: i32 = 99;
     pub const SET_HELD_SLOT: i32 = 107;
+    pub const TAKE_ITEM_ENTITY: i32 = 127;
 
     // The inventory. container_set_content replaces every slot of a window and
     // container_set_slot changes one, which is what a player watches when a
@@ -1033,6 +1034,13 @@ pub fn write_block_destruction(out: &mut Vec<u8>, breaker: i32, pos: (i32, i32, 
 /// wrong thing and, most likely, refusing to spawn anything at all.
 pub const PLAYER_ENTITY_TYPE: i32 = 159;
 
+/// The entity type id for an item, in the registry the client was sent.
+///
+/// Seventy-two, from the same report as the player's one hundred and fifty
+/// nine. An item on the ground is an entity of this type, and the client
+/// draws it as the little spinning cube of whatever it is holding.
+pub const ITEM_ENTITY_TYPE: i32 = 72;
+
 /// The actions of `player_info_update`, by their position in the enum.
 ///
 /// Named rather than written as bare bit numbers because the numbers are the
@@ -1164,6 +1172,7 @@ pub fn write_player_info_remove(out: &mut Vec<u8>, uuids: &[[u8; 16]]) {
 /// A player being spawned has not moved yet, so the delta is zero and the one
 /// byte is the whole of it. Movement after this arrives as its own packet with
 /// relative deltas and never needs the other branch.
+#[allow(clippy::too_many_arguments)]
 pub fn write_add_entity(
     out: &mut Vec<u8>,
     entity_id: i32,
@@ -1172,6 +1181,7 @@ pub fn write_add_entity(
     pos: (f64, f64, f64),
     yaw: f32,
     pitch: f32,
+    data: i32,
 ) {
     VarInt(id::ADD_ENTITY).write(out);
     VarInt(entity_id).write(out);
@@ -1208,8 +1218,9 @@ pub fn write_add_entity(
     out.push(angle_byte(yaw));
     out.push(angle_byte(yaw));
 
-    // The data value: zero for a player, one for living things generally.
-    VarInt(1).write(out);
+    // The data value: zero for a player, one for living things generally, and
+    // zero for an item, which is not a living thing and carries nothing else.
+    VarInt(data).write(out);
 }
 
 /// Writes a `remove_entities`, taking them out of the world.
@@ -1273,6 +1284,66 @@ pub const ENTITY_DATA_SERIALIZER_POSE: i32 = 20;
 /// A byte, not a VarInt, and 255 rather than -1: the ids above it are unsigned
 /// bytes and this is the one value left over.
 pub const ENTITY_DATA_END: u8 = 255;
+
+/// Which piece of an item entity's metadata holds the item.
+///
+/// Zero: it is the first thing an item entity defines, and the order is the
+/// order the fields are declared on the entity.
+pub const ENTITY_DATA_ITEM: u8 = 0;
+
+/// Which serializer reads an item stack, out of the table the game registers
+/// them in.
+///
+/// Seven, counted from the static initialiser in `EntityDataSerializers`: byte,
+/// int, long, float, string, component, optional component, and then the item
+/// stack. The pose is twenty, which is what the other writer here uses, and
+/// the two together are the check that the count is right.
+pub const ENTITY_DATA_SERIALIZER_ITEM_STACK: i32 = 7;
+
+/// Writes an item entity's stack, which is how a client learns what an item on
+/// the ground is.
+///
+/// ```text
+/// VarInt   the entity id
+/// byte     which piece of metadata this is
+/// VarInt   which serializer reads what follows
+/// VarInt   how many
+/// VarInt   which item
+/// VarInt   zero
+/// VarInt   zero
+/// byte     255, and nothing after it
+/// ```
+///
+/// The two zeroes are the patch of data components, which is empty when there
+/// is nothing to say about the stack.
+pub fn write_entity_item(out: &mut Vec<u8>, entity_id: i32, stack: &crate::protocol::item::ItemStack) {
+    VarInt(id::SET_ENTITY_DATA).write(out);
+    VarInt(entity_id).write(out);
+    out.push(ENTITY_DATA_ITEM);
+    VarInt(ENTITY_DATA_SERIALIZER_ITEM_STACK).write(out);
+    stack.write(out);
+    out.push(ENTITY_DATA_END);
+}
+
+/// The packet id of `take_item_entity`.
+pub const TAKE_ITEM_ENTITY: i32 = id::TAKE_ITEM_ENTITY;
+
+/// Writes a `take_item_entity`: the item went to the player.
+///
+/// ```text
+/// VarInt   the item's entity id
+/// VarInt   the player who took it
+/// VarInt   how many
+/// ```
+///
+/// The client plays the sound of a pickup and counts the stack, and the count
+/// is how many the player got rather than how many there were.
+pub fn write_take_item_entity(out: &mut Vec<u8>, item_id: i32, player_id: i32, amount: i32) {
+    VarInt(TAKE_ITEM_ENTITY).write(out);
+    VarInt(item_id).write(out);
+    VarInt(player_id).write(out);
+    VarInt(amount).write(out);
+}
 
 /// Writes an entity's pose, which is how a crouch reaches other people.
 ///

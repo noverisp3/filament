@@ -119,6 +119,22 @@ pub struct World {
     /// rather than once per player.
     pub(crate) light_stale: bool,
 
+    /// The items lying on the ground, waiting to be picked up.
+    ///
+    /// A broken block becomes one of these instead of going straight into a
+    /// player's pocket: the game drops it, and the player walks over it to
+    /// pick it up. An item that is still falling moves every tick, and one
+    /// that has landed stays where it is until somebody picks it up or it
+    /// goes away of its own accord.
+    items: Vec<super::item_entity::ItemEntity>,
+
+    /// The items that moved, waiting to be told about.
+    ///
+    /// A client is told where an item is when it appears and when it is
+    /// picked up, and in between it does not need to be told: an item that
+    /// has landed does not move.
+    pub(crate) item_changes: Vec<super::item_entity::ItemEntity>,
+
     /// Where the world came from and will go back to. None means memory only.
     store: Option<std::sync::Arc<super::storage::WorldStore>>,
 
@@ -175,6 +191,8 @@ impl Clone for World {
             tick_changes: Vec::new(),
             light_changes: Vec::new(),
             light_stale: false,
+            items: Vec::new(),
+            item_changes: Vec::new(),
             // A clone has no folder of its own; sharing one would mean two
             // worlds writing the same region files.
             store: None,
@@ -214,6 +232,8 @@ impl World {
         tick_changes: Vec::new(),
         light_changes: Vec::new(),
         light_stale: false,
+        items: Vec::new(),
+        item_changes: Vec::new(),
         store: store.map(std::sync::Arc::new),
         spawn: (0, 64, 0),
         spawn_from_file: false,
@@ -536,7 +556,54 @@ impl World {
         for pos in due {
             self.block_update(pos, &mut edit);
         }
+        self.tick_items();
         edit
+    }
+
+    /// The items on the ground fall, and the ones nobody wants go away.
+    ///
+    /// An item falls until it meets something solid and then it lies there.
+    /// The game's item falls a little slower than a body does and stops
+    /// sooner, and the difference does not matter to anybody watching.
+    fn tick_items(&mut self) {
+        if self.items.is_empty() {
+            return;
+        }
+        let mut gone: Vec<i32> = Vec::new();
+        // The items are taken out while they are moved, because asking the
+        // world whether a block is solid needs the world, and the world is
+        // busy holding the items.
+        let mut items = std::mem::take(&mut self.items);
+        for item in &mut items {
+            item.age = item.age.wrapping_add(1);
+            if !item.falling {
+                continue;
+            }
+            // Down it goes, until the block underneath says stop.
+            let below = BlockPos::new(
+                item.x.floor() as i32,
+                (item.y - 0.05).floor() as i32,
+                item.z.floor() as i32,
+            );
+            if self.is_solid(below) {
+                item.falling = false;
+                item.y = below.y as f64 + 1.0;
+            } else {
+                item.y -= 0.1;
+            }
+        }
+        // And an item that has been lying about for five minutes is gone,
+        // which is the game's own rule: the world does not fill up with the
+        // rubble of a week.
+        for item in &items {
+            if item.age >= super::item_entity::LIFETIME {
+                gone.push(item.id);
+            }
+        }
+        if !gone.is_empty() {
+            items.retain(|item| !gone.contains(&item.id));
+        }
+        self.items = items;
     }
 
     /// One block's turn to notice something.
@@ -694,6 +761,64 @@ impl World {
         false
     }
 
+    /// The items lying on the ground.
+    pub fn items(&self) -> &[super::item_entity::ItemEntity] {
+        &self.items
+    }
+
+    /// Drops an item into the world, and says where it is.
+    ///
+    /// The item starts in the middle of the block and falls, the way the
+    /// game's does: a thing on the ground is not in mid-air, it is on the
+    /// ground, and it gets there by falling.
+    pub fn drop_item(&mut self, id: i32, uuid: [u8; 16], pos: BlockPos, item: u32, count: i32) {
+        let entity = super::item_entity::ItemEntity::new(id, uuid, pos, item, count);
+        self.items.push(entity.clone());
+        self.item_changes.push(entity);
+    }
+
+    /// The items that are near a point, and can therefore be picked up.
+    pub fn items_near(&self, x: f64, y: f64, z: f64) -> Vec<super::item_entity::ItemEntity> {
+        self.items
+            .iter()
+            .filter(|item| item.within_reach(x, y, z))
+            .cloned()
+            .collect()
+    }
+
+    /// The items within a radius of a point, which are the ones a player there
+    /// can see.
+    pub fn items_within(
+        &self,
+        x: f64,
+        y: f64,
+        z: f64,
+        radius: f64,
+    ) -> Vec<super::item_entity::ItemEntity> {
+        let square = radius * radius;
+        self.items
+            .iter()
+            .filter(|item| {
+                let dx = item.x - x;
+                let dy = item.y - y;
+                let dz = item.z - z;
+                dx * dx + dy * dy + dz * dz <= square
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Takes an item off the ground, and says it is gone.
+    pub fn take_item(&mut self, id: i32) -> Option<super::item_entity::ItemEntity> {
+        let index = self.items.iter().position(|item| item.id == id)?;
+        Some(self.items.remove(index))
+    }
+
+    /// The items that moved, waiting to be told about.
+    pub fn take_item_changes(&mut self) -> Vec<super::item_entity::ItemEntity> {
+        std::mem::take(&mut self.item_changes)
+    }
+
     /// What has been changed in each chunk, and how much.
     ///
     /// This is the whole of what a server needs to keep to have a world that
@@ -742,6 +867,8 @@ impl World {
             tick_changes: Vec::new(),
             light_changes: Vec::new(),
             light_stale: false,
+            items: Vec::new(),
+            item_changes: Vec::new(),
             spawn: (0, 64, 0),
             spawn_from_file: false,
         };
@@ -1057,3 +1184,6 @@ mod sky_light_tests;
 
 #[cfg(test)]
 mod block_light_tests;
+
+#[cfg(test)]
+mod item_tests;

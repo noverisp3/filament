@@ -124,6 +124,34 @@ pub enum Command {
     SpawnPoint { reply: Sender<(i32, i32, i32)> },
     /// Moves the sun, for the command that does that.
     SetDayTime { ticks: u64 },
+    /// Drops an item into the world, for the player who broke a block.
+    DropItem {
+        id: i32,
+        uuid: [u8; 16],
+        pos: BlockPos,
+        item: u32,
+        count: i32,
+    },
+    /// The items near a point, which are the ones a player can pick up.
+    ItemsNear {
+        pos: (f64, f64, f64),
+        reply: Sender<Vec<crate::world::item_entity::ItemEntity>>,
+    },
+    /// The items a player can see, which is every item within a radius.
+    ItemsWithin {
+        pos: (f64, f64, f64),
+        radius: f64,
+        reply: Sender<Vec<crate::world::item_entity::ItemEntity>>,
+    },
+    /// Every item in the world.
+    AllItems {
+        reply: Sender<Vec<crate::world::item_entity::ItemEntity>>,
+    },
+    /// Takes an item off the ground.
+    TakeItem {
+        id: i32,
+        reply: Sender<Option<crate::world::item_entity::ItemEntity>>,
+    },
     /// The light of the sections that moved, so a client can be told.
     LightChanges { reply: Sender<LightChanges> },
     /// Works the light of the whole loaded world out again.
@@ -326,6 +354,47 @@ impl WorldHandle {
     /// Moves the sun, for the command that does that.
     pub fn set_day_time(&self, ticks: u64) {
         let _ = self.to_world.send(Command::SetDayTime { ticks });
+    }
+
+    /// Drops an item into the world, for the player who broke a block.
+    pub fn drop_item(&self, id: i32, uuid: [u8; 16], pos: BlockPos, item: u32, count: i32) {
+        let _ = self.to_world.send(Command::DropItem {
+            id,
+            uuid,
+            pos,
+            item,
+            count,
+        });
+    }
+
+    /// The items near a point, which are the ones a player can pick up.
+    pub fn items_near(
+        &self,
+        pos: (f64, f64, f64),
+    ) -> Vec<crate::world::item_entity::ItemEntity> {
+        self.ask(|reply| Command::ItemsNear { pos, reply })
+            .unwrap_or_default()
+    }
+
+    /// The items a player can see, which is every item within a radius.
+    pub fn items_within(
+        &self,
+        pos: (f64, f64, f64),
+        radius: f64,
+    ) -> Vec<crate::world::item_entity::ItemEntity> {
+        self.ask(|reply| Command::ItemsWithin { pos, radius, reply })
+            .unwrap_or_default()
+    }
+
+    /// Every item in the world, which is what a client is compared against to
+    /// find the ones that have gone.
+    pub fn items(&self) -> Vec<crate::world::item_entity::ItemEntity> {
+        self.ask(|reply| Command::AllItems { reply }).unwrap_or_default()
+    }
+
+    /// Takes an item off the ground.
+    pub fn take_item(&self, id: i32) -> Option<crate::world::item_entity::ItemEntity> {
+        self.ask(|reply| Command::TakeItem { id, reply }).unwrap_or(None)
     }
 
     /// What the world has changed by itself since this was last asked.
@@ -740,6 +809,32 @@ Command::Chunk { pos, reply } => {
 
         Command::SetDayTime { ticks } => {
             world.set_day_time(ticks);
+        }
+
+        Command::DropItem {
+            id,
+            uuid,
+            pos,
+            item,
+            count,
+        } => {
+            world.drop_item(id, uuid, pos, item, count);
+        }
+
+        Command::ItemsNear { pos, reply } => {
+            let _ = reply.send(world.items_near(pos.0, pos.1, pos.2));
+        }
+
+        Command::ItemsWithin { pos, radius, reply } => {
+            let _ = reply.send(world.items_within(pos.0, pos.1, pos.2, radius));
+        }
+
+        Command::AllItems { reply } => {
+            let _ = reply.send(world.items().to_vec());
+        }
+
+        Command::TakeItem { id, reply } => {
+            let _ = reply.send(world.take_item(id));
         }
 
         Command::LightChanges { reply } => {

@@ -1,4 +1,5 @@
 use super::*;
+use crate::protocol::item::ItemStack;
 
 /// Reads a VarInt back out of a body, for tests that care about what a
 /// packet actually says rather than that it was produced.
@@ -508,6 +509,7 @@ fn the_client_reads_add_entity_and_lands_exactly_at_the_end() {
         (1.5, 64.0, -2.5),
         90.0,
         0.0,
+        1,
     );
     let (read, _) = decode_add_entity_as_client(&body);
     assert_eq!(
@@ -536,6 +538,7 @@ fn add_entity_puts_the_pitch_where_the_pitch_goes() {
         (0.0, 64.0, 0.0),
         90.0,  // facing east
         45.0,  // looking forty-five degrees down
+        1,
     );
     let (read, (x_rot, y_rot, y_head_rot)) = decode_add_entity_as_client(&body);
     assert_eq!(read, body.len(), "and the packet is still well formed");
@@ -594,6 +597,7 @@ fn an_entity_is_exactly_the_fields_the_game_reads() {
         (0.0, 64.0, 0.0),
         0.0,
         0.0,
+        1,
     );
     // The registry id is 159, and 159 does not fit in one VarInt byte. It
     // is two, which is worth being explicit about: it is the one field here
@@ -629,6 +633,7 @@ fn an_entity_carries_a_zero_delta_because_it_has_not_moved_yet() {
         (1.5, 64.0, -2.5),
         90.0,
         0.0,
+        1,
     );
 
     let mut b = &body[..];
@@ -1320,6 +1325,7 @@ fn the_play_ids_are_the_ones_the_game_uses() {
             (id::MOVE_PLAYER_ROT, "move_player_rot", false),
             (id::MOVE_PLAYER_STATUS_ONLY, "move_player_status_only", false),
             (id::SERVERBOUND_DEBUG_SUBSCRIPTION, "debug_subscription_request", false),
+            (id::TAKE_ITEM_ENTITY, "take_item_entity", true),
         ];
 
         for (ours, name, clientbound) in cases {
@@ -1422,4 +1428,63 @@ fn a_packet_that_cuts_off_mid_position_is_rejected() {
         short
     ))
     .is_err());
+}
+
+#[test]
+fn an_item_entity_is_told_what_it_is_holding() {
+    // The client draws the little spinning thing on the ground, and it can
+    // only draw it if it knows what the thing is. So the entity is followed by
+    // its stack: the entity id, the piece of metadata it is, the serializer
+    // that reads a stack, the stack, and the end marker.
+    let mut body = Vec::new();
+    write_entity_item(&mut body, 42, &ItemStack::new(55, 1));
+
+    let mut r = &body[..];
+    let (VarInt(packet), _) = VarInt::read(&mut r).expect("a packet id");
+    assert_eq!(packet, id::SET_ENTITY_DATA);
+    let (VarInt(entity), _) = VarInt::read(&mut r).expect("an entity id");
+    assert_eq!(entity, 42);
+
+    // The metadata piece is a byte, and the serializer is a VarInt.
+    let accessor = r[0];
+    assert_eq!(accessor, ENTITY_DATA_ITEM, "the item is the first thing");
+    r = &r[1..];
+    let (VarInt(serializer), _) = VarInt::read(&mut r).expect("a serializer");
+    assert_eq!(
+        serializer, ENTITY_DATA_SERIALIZER_ITEM_STACK,
+        "and the stack is read by the stack serializer"
+    );
+
+    // And the stack itself: a count, an item, and two zeroes for the patch of
+    // data components.
+    let (VarInt(count), _) = VarInt::read(&mut r).expect("a count");
+    assert_eq!(count, 1);
+    let (VarInt(item), _) = VarInt::read(&mut r).expect("an item");
+    assert_eq!(item, 55, "dirt is item 55");
+    let (VarInt(patch), _) = VarInt::read(&mut r).expect("a patch");
+    assert_eq!(patch, 0, "and the patch of data components is empty");
+    let (VarInt(patch), _) = VarInt::read(&mut r).expect("a patch");
+    assert_eq!(patch, 0);
+
+    // And the end marker, which is not optional: a packet that stops in the
+    // middle of its list is a packet the client is still waiting on.
+    assert_eq!(r[0], ENTITY_DATA_END, "and the list ends");
+    assert_eq!(r.len(), 1, "with nothing after it");
+}
+
+#[test]
+fn taking_an_item_says_which_one_and_how_many() {
+    let mut body = Vec::new();
+    write_take_item_entity(&mut body, 42, 7, 3);
+
+    let mut r = &body[..];
+    let (VarInt(packet), _) = VarInt::read(&mut r).expect("a packet id");
+    assert_eq!(packet, TAKE_ITEM_ENTITY);
+    let (VarInt(item), _) = VarInt::read(&mut r).expect("an item id");
+    assert_eq!(item, 42);
+    let (VarInt(player), _) = VarInt::read(&mut r).expect("a player id");
+    assert_eq!(player, 7);
+    let (VarInt(amount), _) = VarInt::read(&mut r).expect("an amount");
+    assert_eq!(amount, 3, "and how many the player got");
+    assert!(r.is_empty(), "and the packet ends there");
 }

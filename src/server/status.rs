@@ -1100,6 +1100,7 @@ fn play(
             other.pos,
             other.yaw,
             other.pitch,
+            1,
         );
         send(&mut out, &entity_packet, "add_entity", &log)?;
 
@@ -1137,6 +1138,7 @@ fn play(
             player_spawn,
             player_yaw,
             player_pitch,
+            1,
         );
         session.wire.send_others(player_id, entity_packet);
 
@@ -1290,6 +1292,21 @@ fn play(
     // player: left at the spawn forever, the world renders as a fixed window
     // that the player walks out of, with chunks arriving that never draw.
     let mut center_sent = (0i32, 0i32);
+
+    // The items this player has been told about, and where they were told it
+    // was.
+    //
+    // An item on the ground belongs to the world, so every player who can see
+    // it is told about it on their own account. Remembering which ones this
+    // player has been told is what keeps that from being said twice, and what
+    // lets a player who walks up to an item that was dropped before they
+    // arrived be told about it then.
+    //
+    // The place is remembered as well, because a movement is a distance from
+    // where the client last thought the thing was, and a client that is told
+    // the same item in two places is a client that draws it in the wrong one.
+    let mut seen_items: std::collections::HashMap<i32, (f64, f64, f64)> =
+        std::collections::HashMap::new();
 
     // Blocks changed by the player, each already a whole packet.
     //
@@ -2270,29 +2287,39 @@ fn place_block(
                                     let held = crate::server::ticking::state_id_name(was);
                                     match crate::server::ticking::held_item(was) {
                                         Some(item) => {
-                                            // `add` says which slots it used. The
-                                            // client is told about those and no
-                                            // others, because a slot reported
-                                            // changed that did not is a slot the
-                                            // client redraws for nothing, and a
-                                            // real change left unreported is a
-                                            // hotbar that never fills.
-                                            let used =
-                                                inventory.add(ItemStack::new(item as i32, 1));
-                                            let named = used.first().copied();
-                                            for slot in &used {
-                                                slots.push((*slot, inventory.get(*slot)));
-                                            }
-                                            if used.is_empty() {
-                                                log.note(format!(
-                                                    "{held} has nowhere to go and is lost"
-                                                ));
-                                            } else {
-                                                log.note(format!(
-                                                    "{held} went into slot {}",
-                                                    named.unwrap_or_default()
-                                                ));
-                                            }
+                                            // The game drops what a broken
+                                            // block was into the world, and
+                                            // the player picks it up by
+                                            // walking over it. It does not go
+                                            // straight into a pocket, because
+                                            // a thing on the ground can be
+                                            // lost, dropped, or fought over,
+                                            // and a block that vanishes and
+                                            // appears in the hand skips all
+                                            // of that.
+                                            let entity_id = crate::server::next_entity_id();
+                                            let uuid = crate::world::item_entity::new_uuid(
+                                                entity_id as u64,
+                                            );
+                                            session.world.drop_item(
+                                                entity_id,
+                                                uuid,
+                                                pos,
+                                                item,
+                                                1,
+                                            );
+                                            // The client is not told here.
+                                            // An item on the ground belongs to
+                                            // the world and not to the player
+                                            // who broke the block, so every
+                                            // player who can see it is told
+                                            // about it on their own account,
+                                            // and the one who broke it is
+                                            // told the same way as everybody
+                                            // else.
+                                            log.note(format!(
+                                                "{held} is lying on the ground"
+                                            ));
                                         }
                                         // A block with no item of that name is
                                         // simply not something that can be held.
@@ -2419,6 +2446,144 @@ fn place_block(
         // and it is not sent twice because of that. It goes to everyone in
         // range rather than to whoever asked: a block that turned to grass
         // because something above it was mined is not one player's news.
+        // The items this player can see and has not been told about.
+        //
+        // The client needs two things to draw an item: the entity, and the
+        // stack it is holding. The entity says where it is and what it is;
+        // the stack says what the thing on the ground actually is.
+        //
+        // An item that is still falling is told about again as it falls, as a
+        // distance from where the client last thought it was, so the thing on
+        // the ground lands where the server says it lands.
+        //
+        // The reach is the view distance in blocks, so an item far away is
+        // left for later, when the player walks towards it.
+        let view_blocks = (radius as f64 + 1.0) * 16.0;
+        for item in session
+            .world
+            .items_within((player.x, player.y, player.z), view_blocks)
+        {
+            match seen_items.get(&item.id).copied() {
+                None => {
+                    let mut body = Vec::new();
+                    p::write_add_entity(
+                        &mut body,
+                        item.id,
+                        item.uuid,
+                        p::ITEM_ENTITY_TYPE,
+                        (item.x, item.y, item.z),
+                        0.0,
+                        0.0,
+                        0,
+                    );
+                    enc.encode(&body, &mut out).map_err(io_err)?;
+
+                    let mut body = Vec::new();
+                    p::write_entity_item(
+                        &mut body,
+                        item.id,
+                        &ItemStack::new(item.item as i32, item.count),
+                    );
+                    enc.encode(&body, &mut out).map_err(io_err)?;
+
+                    seen_items.insert(item.id, (item.x, item.y, item.z));
+                }
+                Some(where_it_was) => {
+                    let delta = (
+                        item.x - where_it_was.0,
+                        item.y - where_it_was.1,
+                        item.z - where_it_was.2,
+                    );
+                    if delta.0 == 0.0 && delta.1 == 0.0 && delta.2 == 0.0 {
+                        continue;
+                    }
+                    let mut body = Vec::new();
+                    if p::write_move_entity_pos_rot(
+                        &mut body,
+                        item.id,
+                        delta,
+                        0.0,
+                        0.0,
+                        !item.falling,
+                    ) {
+                        enc.encode(&body, &mut out).map_err(io_err)?;
+                        seen_items.insert(item.id, (item.x, item.y, item.z));
+                    }
+                }
+            }
+        }
+
+        // And the items this player was told about that are no longer there:
+        // somebody picked one up, or it lay about for five minutes and went
+        // away by itself. Either way it leaves this player's world.
+        let gone: Vec<i32> = seen_items
+            .keys()
+            .copied()
+            .filter(|id| {
+                !session
+                    .world
+                    .items()
+                    .iter()
+                    .any(|item| item.id == *id)
+            })
+            .collect();
+        for id in gone {
+            let mut body = Vec::new();
+            p::write_remove_entities(&mut body, &[id]);
+            enc.encode(&body, &mut out).map_err(io_err)?;
+            seen_items.remove(&id);
+        }
+
+        // The items lying on the ground that this player is standing on.
+        //
+        // The game picks an item up when the player walks over it, so this is
+        // the other half of dropping one: the item was on the ground, and now
+        // it is in a pocket. The count that was picked up is what the client
+        // is told, and the item leaves the world for everybody, not only for
+        // the player who picked it up.
+        for item in session.world.items_near((player.x, player.y, player.z)) {
+            // Only an item this player has been told about. Picking up one
+            // they have not been told about is a thing happening on the
+            // server that the client never saw: the sound of a pickup for an
+            // item that is not there.
+            if !seen_items.contains_key(&item.id) {
+                continue;
+            }
+            let used = inventory.add(ItemStack::new(item.item as i32, item.count));
+            if used.is_empty() {
+                // Nowhere to put it: the item stays where it is, which is what
+                // the game does when a pocket is full.
+                continue;
+            }
+            for slot in &used {
+                slots.push((*slot, inventory.get(*slot)));
+            }
+            session.world.take_item(item.id);
+
+            // The pickup is everybody's news: the client plays the sound of
+            // it and counts the stack, and everybody watching sees the thing
+            // leave the ground.
+            //
+            // This player's own copy goes into the same buffer as the entity
+            // that was the item, so it arrives after it: a pickup of
+            // something the client has not been told about is a pickup of
+            // nothing.
+            let mut body = Vec::new();
+            p::write_take_item_entity(&mut body, item.id, entity_id, item.count);
+            enc.encode(&body, &mut out).map_err(io_err)?;
+            session.wire.send_others(player_id, body);
+
+            // And the item leaves this player's world, which the tracker
+            // above notices on its next pass.
+            seen_items.remove(&item.id);
+
+            log.note(format!(
+                "picked up {} x{}",
+                crate::generated::item_name(item.item).unwrap_or("?"),
+                item.count
+            ));
+        }
+
         for (pos, _block) in session.world.take_tick_changes() {
             let now = session
                 .world

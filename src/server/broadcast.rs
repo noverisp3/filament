@@ -433,6 +433,7 @@ impl Broadcast {
                     subject_pos,
                     subject_yaw,
                     subject_pitch,
+                    1,
                 );
                 deliveries.push((sink.id, back));
 
@@ -500,6 +501,7 @@ impl Broadcast {
                     subject_pos,
                     subject_yaw,
                     subject_pitch,
+                    1,
                 );
             }
             deliveries.push((sink.id, body));

@@ -61,12 +61,22 @@ CB_BLOCK_DESTRUCTION = 5
 CB_LEVEL_EVENT = 47
 CB_SECTION_BLOCKS_UPDATE = 86
 
+# The item that a broken block leaves behind, and the picking up of it.
+CB_ADD_ENTITY = 1
+CB_SET_ENTITY_DATA = 101
+CB_TAKE_ITEM_ENTITY = 127
+CB_REMOVE_ENTITIES = 44
+
 INTERESTING = {
     CB_BLOCK_UPDATE: "block_update",
     CB_BLOCK_CHANGED_ACK: "block_changed_ack",
     CB_BLOCK_DESTRUCTION: "block_destruction",
     CB_LEVEL_EVENT: "level_event",
     CB_SECTION_BLOCKS_UPDATE: "section_blocks_update",
+    CB_ADD_ENTITY: "add_entity",
+    CB_SET_ENTITY_DATA: "set_entity_data",
+    CB_TAKE_ITEM_ENTITY: "take_item_entity",
+    CB_REMOVE_ENTITIES: "remove_entities",
 }
 
 
@@ -170,6 +180,40 @@ def decode(pid, body, offset):
                     f"({short & 0xF},{short >> 8},{short >> 4})->{state}"
                 )
             return f"section y {section_y}, {count} blocks: " + " ".join(pairs)
+        if pid == CB_ADD_ENTITY:
+            entity, at = read_varint(body, offset)
+            uuid = body[at : at + 16]
+            at += 16
+            kind, at = read_varint(body, at)
+            x, y, z = struct.unpack_from(">ddd", body, at)
+            at += 24
+            return (
+                f"entity {entity} type {kind} at {x:.2f} {y:.2f} {z:.2f} "
+                f"uuid {uuid.hex()[:8]}"
+            )
+        if pid == CB_SET_ENTITY_DATA:
+            entity, at = read_varint(body, offset)
+            accessor = body[at]
+            at += 1
+            serializer, at = read_varint(body, at)
+            count, at = read_varint(body, at)
+            item, at = read_varint(body, at)
+            return (
+                f"entity {entity} piece {accessor} serializer {serializer} "
+                f"count {count} item {item}"
+            )
+        if pid == CB_TAKE_ITEM_ENTITY:
+            item, at = read_varint(body, offset)
+            player, at = read_varint(body, at)
+            amount, at = read_varint(body, at)
+            return f"item {item} to player {player}, {amount} of them"
+        if pid == CB_REMOVE_ENTITIES:
+            count, at = read_varint(body, offset)
+            ids = []
+            for _ in range(count):
+                entity, at = read_varint(body, at)
+                ids.append(entity)
+            return "entities " + " ".join(str(i) for i in ids)
     except Exception as e:  # noqa: BLE001
         return f"undecodable: {type(e).__name__}: {e}"
     return None

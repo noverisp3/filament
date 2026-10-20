@@ -6,7 +6,7 @@ use super::*;
 /// nothing here looks at one. Naming the helper rather than spelling out
 /// four arguments at each call keeps the tests about the queue, which is
 /// what they are actually about.
-fn join(wire: &Broadcast, name: &str) -> Registration {
+fn join(wire: &std::sync::Arc<Broadcast>, name: &str) -> Registration {
     wire.register(name, [0u8; 16], 1, crate::world::terrain::spawn_point())
 }
 
@@ -55,7 +55,7 @@ fn drain_raw(reg: &Registration) -> Vec<Vec<u8>> {
         // of a length, and the client reads the second one as the first byte
         // of the next packet: "unknown packet id" with nothing wrong with
         // the packet before it.
-        let wire = Broadcast::new();
+        let wire = std::sync::Arc::new(Broadcast::new());
         let reg = join(&wire, "noverisp3");
 
         let mut body = Vec::new();
@@ -77,7 +77,7 @@ fn drain_raw(reg: &Registration) -> Vec<Vec<u8>> {
 
     #[test]
     fn an_answer_reaches_the_player_who_asked_and_nobody_else() {
-        let wire = Broadcast::new();
+        let wire = std::sync::Arc::new(Broadcast::new());
         let first = join(&wire, "noverisp3");
         let second = join(&wire, "other");
 
@@ -99,7 +99,7 @@ fn drain_raw(reg: &Registration) -> Vec<Vec<u8>> {
         // step, which is the same mistake the level event made at the start of
         // this: a packet that is harmless for the sender and wrong for the
         // sender.
-        let wire = Broadcast::new();
+        let wire = std::sync::Arc::new(Broadcast::new());
         let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
         let watcher = wire.register("watcher", [2u8; 16], 2, (0.0, 64.0, 0.0));
         wire.note_told(watcher.id, mover.id, (0.0, 64.0, 0.0), 0.0, 0.0);
@@ -134,7 +134,7 @@ fn drain_raw(reg: &Registration) -> Vec<Vec<u8>> {
         // place, so a fourth wrong count has to get past this to reach anyone.
         use crate::protocol::play::id;
 
-        let wire = Broadcast::new();
+        let wire = std::sync::Arc::new(Broadcast::new());
         let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
         let watcher = wire.register("watcher", [2u8; 16], 2, (0.0, 64.0, 0.0));
         wire.note_told(watcher.id, mover.id, (0.0, 64.0, 0.0), 0.0, 0.0);
@@ -204,7 +204,7 @@ fn drain_raw(reg: &Registration) -> Vec<Vec<u8>> {
     fn a_crouch_is_a_pose_travelling_as_entity_metadata() {
         use crate::protocol::play::id;
 
-        let wire = Broadcast::new();
+        let wire = std::sync::Arc::new(Broadcast::new());
         let croucher = wire.register("croucher", [1u8; 16], 11, (0.0, 64.0, 0.0));
         let watcher = wire.register("watcher", [2u8; 16], 12, (0.0, 64.0, 0.0));
 
@@ -243,7 +243,7 @@ fn drain_raw(reg: &Registration) -> Vec<Vec<u8>> {
 
     #[test]
     fn standing_up_is_the_same_packet_with_the_other_pose() {
-        let wire = Broadcast::new();
+        let wire = std::sync::Arc::new(Broadcast::new());
         let player = wire.register("player", [1u8; 16], 11, (0.0, 64.0, 0.0));
         let watcher = wire.register("watcher", [2u8; 16], 12, (0.0, 64.0, 0.0));
 
@@ -267,7 +267,7 @@ fn drain_raw(reg: &Registration) -> Vec<Vec<u8>> {
         // as it is down. Sending the pose each time is a packet per observer per
         // movement packet for a value that has not moved, and a client that
         // receives them redraws the player each time.
-        let wire = Broadcast::new();
+        let wire = std::sync::Arc::new(Broadcast::new());
         let player = wire.register("player", [1u8; 16], 11, (0.0, 64.0, 0.0));
         let watcher = wire.register("watcher", [2u8; 16], 12, (0.0, 64.0, 0.0));
 
@@ -290,7 +290,7 @@ fn drain_raw(reg: &Registration) -> Vec<Vec<u8>> {
     fn a_swing_reaches_the_watchers_and_not_the_one_who_swung() {
         use crate::protocol::play::id;
 
-        let wire = Broadcast::new();
+        let wire = std::sync::Arc::new(Broadcast::new());
         let swinger = wire.register("swinger", [1u8; 16], 5, (0.0, 64.0, 0.0));
         let watcher = wire.register("watcher", [2u8; 16], 6, (0.0, 64.0, 0.0));
 
@@ -314,7 +314,7 @@ fn drain_raw(reg: &Registration) -> Vec<Vec<u8>> {
         // The entity id is not the registration id. One is ours, the other is
         // what this client's world calls the body, and sending the wrong one is
         // a swing nobody performs.
-        let wire = Broadcast::new();
+        let wire = std::sync::Arc::new(Broadcast::new());
         let swinger = wire.register("swinger", [1u8; 16], 41, (0.0, 64.0, 0.0));
         let _watcher = wire.register("watcher", [2u8; 16], 42, (0.0, 64.0, 0.0));
 
@@ -370,8 +370,52 @@ fn drain_raw(reg: &Registration) -> Vec<Vec<u8>> {
 
 
 #[test]
+fn a_player_who_never_reached_the_world_gives_their_seat_back() {
+    // A player takes their place in the list of players at the login, because
+    // a push that arrives between the login and the play phase has to go
+    // somewhere. A client that cancels while the world is loading never
+    // reaches the play phase, so the seat has to be given back by the
+    // registration, which is dropped however the connection ends.
+    //
+    // Without that, the count of players only ever went up: a server that
+    // had had twenty people try to join had twenty people on it and nobody
+    // playing.
+    let wire = std::sync::Arc::new(Broadcast::new());
+    let reg = wire.register("early", [1u8; 16], 7, (0.0, 64.0, 0.0));
+    assert_eq!(wire.player_count(), 1, "the seat is taken at the login");
+
+    // The connection ends before the player is in the world.
+    drop(reg);
+
+    assert_eq!(
+        wire.player_count(),
+        0,
+        "and given back when the connection ends, however it ended"
+    );
+}
+
+#[test]
+fn a_player_who_was_never_introduced_is_not_taken_away_from_anybody() {
+    // A player who never reached the play phase was never introduced to the
+    // others, so there is nobody to take them away from. Saying otherwise
+    // sends a removal for a body nobody has ever heard of.
+    let wire = std::sync::Arc::new(Broadcast::new());
+    let reg = wire.register("early", [1u8; 16], 7, (0.0, 64.0, 0.0));
+    let watcher = wire.register("watcher", [2u8; 16], 9, (0.0, 64.0, 0.0));
+
+    {
+        let _departure = Departure::arm(wire.clone(), &reg);
+    }
+
+    assert!(
+        watcher.inbox.try_recv().is_err(),
+        "the watcher was told nothing: there was no player to take away"
+    );
+}
+
+#[test]
 fn a_push_reaches_everyone_but_the_one_who_caused_it() {
-    let wire = Broadcast::new();
+    let wire = std::sync::Arc::new(Broadcast::new());
     let mine = join(&wire, "digger");
     let theirs = join(&wire, "watcher");
 
@@ -389,7 +433,7 @@ fn a_push_reaches_everyone_but_the_one_who_caused_it() {
 
 #[test]
 fn a_removed_player_is_reached_by_nothing_further() {
-    let wire = Broadcast::new();
+    let wire = std::sync::Arc::new(Broadcast::new());
     let gone = join(&wire, "leaving");
     let stayer = join(&wire, "staying");
 
@@ -405,7 +449,7 @@ fn a_removed_player_is_reached_by_nothing_further() {
 
 #[test]
 fn ids_do_not_repeat_when_someone_comes_back() {
-    let wire = Broadcast::new();
+    let wire = std::sync::Arc::new(Broadcast::new());
     let first = join(&wire, "first");
     wire.remove(first.id);
     let second = join(&wire, "second");
@@ -422,7 +466,7 @@ fn a_push_carries_the_packet_id_and_the_body_together() {
     // of the position: id 8, which is bundle_delimiter, a packet with no
     // body at all, and the client reports the position as eight bytes it
     // did not expect.
-    let wire = Broadcast::new();
+    let wire = std::sync::Arc::new(Broadcast::new());
     let mine = join(&wire, "digger");
     let theirs = join(&wire, "watcher");
 
@@ -455,7 +499,7 @@ fn two_observers_who_joined_at_different_times_get_different_deltas() {
     //
     // A server that kept one copy of "where the mover is" would send the
     // second observer a delta of two, and that observer would jump.
-    let wire = Broadcast::new();
+    let wire = std::sync::Arc::new(Broadcast::new());
     let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
     let watcher = wire.register("watcher", [2u8; 16], 2, (0.0, 64.0, 0.0));
     let late = wire.register("late", [3u8; 16], 3, (0.0, 64.0, 0.0));
@@ -514,7 +558,7 @@ fn two_observers_who_joined_at_different_times_get_different_deltas() {
 #[test]
 fn every_observer_gets_one_packet_and_not_one_per_observer() {
     // Three watchers, so the mistake would have tripled the speed.
-    let wire = Broadcast::new();
+    let wire = std::sync::Arc::new(Broadcast::new());
     let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
     let mut watchers = Vec::new();
     for i in 0..3 {
@@ -546,7 +590,7 @@ fn every_observer_gets_one_packet_and_not_one_per_observer() {
 
 #[test]
 fn a_player_standing_still_sends_nothing() {
-    let wire = Broadcast::new();
+    let wire = std::sync::Arc::new(Broadcast::new());
     let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
     let watcher = wire.register("watcher", [2u8; 16], 2, (0.0, 64.0, 0.0));
     wire.note_told(watcher.id, mover.id, (0.0, 64.0, 0.0), 0.0, 0.0);
@@ -566,7 +610,7 @@ fn a_movement_too_small_to_see_is_not_sent() {
     // The client rounds to 1/4096, so anything under half of that arrives
     // as zero. The test has to be on the rounded value, because that is
     // what the client ends up holding.
-    let wire = Broadcast::new();
+    let wire = std::sync::Arc::new(Broadcast::new());
     let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
     let watcher = wire.register("watcher", [2u8; 16], 2, (0.0, 64.0, 0.0));
     wire.note_told(watcher.id, mover.id, (0.0, 64.0, 0.0), 0.0, 0.0);
@@ -593,7 +637,7 @@ fn a_movement_too_small_to_see_is_not_sent() {
 
 #[test]
 fn a_movement_is_not_sent_to_somebody_who_has_never_heard_of_the_player() {
-    let wire = Broadcast::new();
+    let wire = std::sync::Arc::new(Broadcast::new());
     let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
     let stranger = wire.register("stranger", [2u8; 16], 2, (0.0, 64.0, 0.0));
 
@@ -608,7 +652,7 @@ fn a_movement_is_not_sent_to_somebody_who_has_never_heard_of_the_player() {
 
 #[test]
 fn a_movement_is_not_sent_across_the_room() {
-    let wire = Broadcast::new();
+    let wire = std::sync::Arc::new(Broadcast::new());
     let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
     let far = wire.register("far", [2u8; 16], 2, (1000.0, 64.0, 0.0));
     wire.note_told(far.id, mover.id, (0.0, 64.0, 0.0), 0.0, 0.0);
@@ -625,7 +669,7 @@ fn a_movement_is_not_sent_across_the_room() {
 
 #[test]
 fn turning_in_place_is_worth_a_packet() {
-    let wire = Broadcast::new();
+    let wire = std::sync::Arc::new(Broadcast::new());
     let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
     let watcher = wire.register("watcher", [2u8; 16], 2, (0.0, 64.0, 0.0));
     wire.note_told(watcher.id, mover.id, (0.0, 64.0, 0.0), 0.0, 0.0);
@@ -650,7 +694,7 @@ fn a_movement_on_one_axis_only_is_still_a_movement() {
         ("along z", (0.0, 64.0, -3.0)),
         ("diagonally", (3.0, 67.0, -3.0)),
     ] {
-        let wire = Broadcast::new();
+        let wire = std::sync::Arc::new(Broadcast::new());
         let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
         let watcher = wire.register("watcher", [2u8; 16], 2, (0.0, 64.0, 0.0));
         wire.note_told(watcher.id, mover.id, (0.0, 64.0, 0.0), 0.0, 0.0);
@@ -671,7 +715,7 @@ fn a_turn_sends_the_head_separately_from_the_body() {
     // move_entity_pos_rot carries yRot and xRot, and yRot is the body's.
     // The head is a different packet, and a player looking sideways while
     // walking straight ahead is exactly the case that needs it.
-    let wire = Broadcast::new();
+    let wire = std::sync::Arc::new(Broadcast::new());
     let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
     let watcher = wire.register("watcher", [2u8; 16], 2, (0.0, 64.0, 0.0));
     wire.note_told(watcher.id, mover.id, (0.0, 64.0, 0.0), 0.0, 0.0);
@@ -704,7 +748,7 @@ fn a_straight_walk_does_not_send_a_head_packet() {
     // The head only moves when the body angle changes, and a walk down a
     // straight line does not change it. Sending one anyway would be a
     // packet per observer per movement packet for nothing.
-    let wire = Broadcast::new();
+    let wire = std::sync::Arc::new(Broadcast::new());
     let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
     let watcher = wire.register("watcher", [2u8; 16], 2, (0.0, 64.0, 0.0));
     wire.note_told(watcher.id, mover.id, (0.0, 64.0, 0.0), 90.0, 0.0);
@@ -728,7 +772,7 @@ fn a_player_straight_above_you_is_still_visible() {
     // two players standing three blocks apart on a hillside, which is the
     // case somebody on the ridge below most wants to be able to see. The
     // game measures x and z and ignores y entirely.
-    let wire = Broadcast::new();
+    let wire = std::sync::Arc::new(Broadcast::new());
     let lower = wire.register("lower", [1u8; 16], 1, (0.0, 0.0, 0.0));
     let upper = wire.register("upper", [2u8; 16], 2, (3.0, 300.0, 0.0));
     wire.set_view_distance(lower.id, 8);
@@ -750,7 +794,7 @@ fn how_far_a_player_is_visible_is_the_observers_own_view_distance() {
     for (chunks, expect_visible, expect_gone) in
         [(2, 32.0, 33.0), (8, 128.0, 129.0), (16, 256.0, 257.0)]
     {
-        let wire = Broadcast::new();
+        let wire = std::sync::Arc::new(Broadcast::new());
         let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
         let watcher = wire.register("watcher", [2u8; 16], 2, (0.0, 64.0, 0.0));
         wire.set_view_distance(watcher.id, chunks);
@@ -807,7 +851,7 @@ fn walking_out_of_range_removes_the_body_rather_than_freezing_it() {
     // different from the client: the client still holds the entity and
     // keeps drawing it, so the player stands frozen in mid-air for as long
     // as they care to walk away. The body has to be taken away.
-    let wire = Broadcast::new();
+    let wire = std::sync::Arc::new(Broadcast::new());
     let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
     let watcher = wire.register("watcher", [2u8; 16], 2, (0.0, 64.0, 0.0));
     wire.note_told(watcher.id, mover.id, (0.0, 64.0, 0.0), 0.0, 0.0);
@@ -828,7 +872,7 @@ fn walking_out_of_range_removes_the_body_rather_than_freezing_it() {
 
 #[test]
 fn going_still_out_of_range_does_not_keep_saying_it() {
-    let wire = Broadcast::new();
+    let wire = std::sync::Arc::new(Broadcast::new());
     let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
     let watcher = wire.register("watcher", [2u8; 16], 2, (0.0, 64.0, 0.0));
     wire.note_told(watcher.id, mover.id, (0.0, 64.0, 0.0), 0.0, 0.0);
@@ -851,7 +895,7 @@ fn walking_back_puts_them_down_where_they_actually_are() {
     // Not a delta from where they left. That entry is hundreds of blocks
     // stale by now, and a delta from it would put them somewhere neither
     // of them has ever been.
-    let wire = Broadcast::new();
+    let wire = std::sync::Arc::new(Broadcast::new());
     let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
     let watcher = wire.register("watcher", [2u8; 16], 2, (0.0, 64.0, 0.0));
     wire.note_told(watcher.id, mover.id, (0.0, 64.0, 0.0), 0.0, 0.0);
@@ -887,7 +931,7 @@ fn walking_back_puts_them_down_where_they_actually_are() {
 fn a_player_who_was_never_introduced_is_not_spawned_into_a_client_that_has_not_been_told_their_name() {
     // The window between one connection registering and the other
     // finishing its chunks. Distinct from having been removed.
-    let wire = Broadcast::new();
+    let wire = std::sync::Arc::new(Broadcast::new());
     let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
     let stranger = wire.register("stranger", [2u8; 16], 2, (0.0, 64.0, 0.0));
 
@@ -905,7 +949,7 @@ fn a_move_that_cannot_be_a_delta_arrives_as_a_position() {
     // The self-healing path: a player who fell, or was teleported, or was
     // simply too far, is put down again rather than nudged. This is what a
     // player arriving used to need and did not get.
-    let wire = Broadcast::new();
+    let wire = std::sync::Arc::new(Broadcast::new());
     let mover = wire.register("mover", [1u8; 16], 1, (0.0, 64.0, 0.0));
     let watcher = wire.register("watcher", [2u8; 16], 2, (0.0, 64.0, 0.0));
     wire.note_told(watcher.id, mover.id, (0.0, 64.0, 0.0), 0.0, 0.0);
@@ -931,16 +975,18 @@ fn a_move_that_cannot_be_a_delta_arrives_as_a_position() {
 
 #[test]
 fn nobody_listening_is_not_a_problem() {
-    let wire = Broadcast::new();
+    let wire = std::sync::Arc::new(Broadcast::new());
     wire.send_others(0, b"into the void".to_vec());
     assert_eq!(wire.player_count(), 0);
 }
 
 #[test]
 fn names_come_back_for_the_log() {
-    let wire = Broadcast::new();
-    join(&wire, "noverisp3");
-    join(&wire, "notrealyet_");
+    let wire = std::sync::Arc::new(Broadcast::new());
+    // Held, because a registration is the connection: the player is here for
+    // as long as it is.
+    let _first = join(&wire, "noverisp3");
+    let _second = join(&wire, "notrealyet_");
     assert_eq!(wire.names(), vec!["noverisp3", "notrealyet_"]);
 }
 

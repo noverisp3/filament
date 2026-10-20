@@ -157,6 +157,41 @@ pub struct Registration {
     pub entity_id: i32,
     /// The connection's end of the queue.
     pub inbox: Receiver<Vec<u8>>,
+    /// The seat this player holds, given back when this value is dropped.
+    ///
+    /// The seat is taken at the login, because a push that arrives in the
+    /// moment between the login and the play phase must not be lost. That means
+    /// the seat has to be given back when the connection ends however it ends,
+    /// and a connection that dies in the configuration phase never reaches the
+    /// play phase at all: a client that cancels while the world is loading
+    /// would take a seat with it, and the count of players would only ever go
+    /// up.
+    ///
+    /// Underscored because it is never read: it is here to be dropped.
+    _seat: Option<Seat>,
+}
+
+/// The place a player holds while they are connected.
+///
+/// Dropped with the registration, so the seat is released however the
+/// connection ends and without anything having to remember to release it.
+struct Seat {
+    wire: std::sync::Arc<Broadcast>,
+    id: u64,
+    entity_id: i32,
+    name: String,
+}
+
+impl Drop for Seat {
+    fn drop(&mut self) {
+        self.wire.remove(self.id);
+        crate::server::log::note(format!(
+            "player {:?} (entity {}) left, {} remaining",
+            self.name,
+            self.entity_id,
+            self.wire.player_count()
+        ));
+    }
 }
 
 impl std::fmt::Debug for Registration {
@@ -198,8 +233,12 @@ impl Broadcast {
     ///
     /// The receiver is the connection's to drain. It ends when the player is
     /// removed, or when the broadcast is dropped.
+    ///
+    /// The seat the player holds is released when the registration is dropped,
+    /// so a connection that ends before the player is in the world still gives
+    /// its place back.
     pub fn register(
-        &self,
+        self: &std::sync::Arc<Self>,
         name: &str,
         uuid: [u8; 16],
         entity_id: i32,
@@ -232,6 +271,12 @@ impl Broadcast {
             uuid,
             entity_id,
             inbox,
+            _seat: Some(Seat {
+                wire: self.clone(),
+                id,
+                entity_id,
+                name: name.to_string(),
+            }),
         }
     }
 
@@ -700,12 +745,28 @@ id::LEVEL_EVENT => {
 /// cleanup written at the bottom of a function is reached by none of the others.
 /// A value that is dropped is reached by all of them, including the ones nobody
 /// writes down.
+///
+/// It is armed at the **login**, not at the play phase, because a player takes
+/// their place in the list of players when they log in: a push that arrives
+/// between the login and the play phase has to go somewhere, and the list of
+/// players is where it goes. A seat taken at the login and given back at the
+/// play phase is a seat nobody gives back when the client cancels while the
+/// world is loading, and the count of players only ever goes up.
+///
+/// The seat itself is not this guard's business: that is the registration's,
+/// and the registration is dropped however the connection ends and in whatever
+/// phase it was in.
 pub struct Departure {
     wire: std::sync::Arc<Broadcast>,
     id: u64,
     entity_id: i32,
     uuid: [u8; 16],
-    name: String,
+    /// Whether the other players have been told about this one.
+    ///
+    /// A player who never reached the play phase was never introduced to
+    /// anybody, so there is nobody to take them away from. Saying otherwise
+    /// sends a removal for a body the others have never heard of.
+    introduced: bool,
 }
 
 impl Departure {
@@ -716,8 +777,16 @@ impl Departure {
             id: reg.id,
             entity_id: reg.entity_id,
             uuid: reg.uuid,
-            name: reg.name.clone(),
+            introduced: false,
         }
+    }
+
+    /// The other players have been told about this one.
+    ///
+    /// Called when they are, so that a player who never got that far is not
+    /// taken away from people who never knew of them.
+    pub fn introduced(&mut self) {
+        self.introduced = true;
     }
 }
 
@@ -726,7 +795,7 @@ impl Drop for Departure {
         // Only worth announcing to somebody. A server that just lost its first
         // player has nobody to tell, and building the packets for nobody is
         // work that grows with every join on an empty server.
-        if self.wire.player_count() > 1 {
+        if self.introduced && self.wire.player_count() > 1 {
             // The body first, then the tab list entry, matching the order they
             // arrived in: the client is holding a name for a body it is about to
             // stop drawing, which is briefly a ghost in the tab list.
@@ -738,16 +807,6 @@ impl Drop for Departure {
             crate::protocol::play::write_player_info_remove(&mut info, &[self.uuid]);
             self.wire.send_others(self.id, info);
         }
-
-        // After the announcement, so the packets are queued to the sinks that
-        // are still there rather than to one that has already been dropped.
-        self.wire.remove(self.id);
-        crate::server::log::note(format!(
-            "player {:?} (entity {}) left, {} remaining",
-            self.name,
-            self.entity_id,
-            self.wire.player_count()
-        ));
     }
 }
 

@@ -452,6 +452,11 @@ fn login(
         session.wire.player_count()
     ));
 
+    // The seat this player holds is the registration's, and the registration is
+    // dropped however the connection ends: a client that cancels while the
+    // world is loading never reaches the play phase, and the count of players
+    // has to come back down all the same.
+
     // 1. Announce compression, still uncompressed.
     let mut out = Vec::new();
     let mut compression_packet = Vec::new();
@@ -660,7 +665,15 @@ fn configure(
             match id {
                 crate::protocol::configuration::id::SERVERBOUND_FINISH_CONFIGURATION => {
                     log.note("client finished configuration");
-                    return play(stream, dec, enc, log, view_distance, session, registration);
+                    return play(
+                        stream,
+                        dec,
+                        enc,
+                        log,
+                        view_distance,
+                        session,
+                        registration,
+                    );
                 }
                 crate::protocol::configuration::id::SERVERBOUND_CLIENT_INFORMATION => {
                     match crate::protocol::configuration::ClientInformation::read(&frame) {
@@ -817,7 +830,11 @@ fn play(
 
     // Armed here and dropped however this function returns, so a player who
     // disconnects mid-write is announced the same as one who leaves politely.
-    let _departure = super::broadcast::Departure::arm(session.wire.clone(), &registration);
+    //
+    // The seat the player held is the registration's, and the registration is
+    // dropped when this function returns as well -- after this guard, so the
+    // announcement goes to the players who are still there.
+    let mut departure = super::broadcast::Departure::arm(session.wire.clone(), &registration);
 
     // Compression carries over from the configuration phase; both sides keep
     // it for the rest of the connection.
@@ -1188,6 +1205,10 @@ fn play(
                     .note_told(other.id, player_id, player_spawn, player_yaw, player_pitch);
             }
         }
+
+        // The others know about this one now, so there is somebody to take them
+        // away from when they go.
+        departure.introduced();
 
         log.note(format!("announced to the {} already here", others.len() - 1));
     }

@@ -937,7 +937,7 @@ fn the_dust_goes_to_everyone_but_the_one_who_broke_it() {
     // predicted the block going, so telling them as well makes a single
     // break look like two. The block update is the opposite case and does go
     // to them: it says what is there now, and their guess may be wrong.
-    let wire = crate::server::broadcast::Broadcast::new();
+    let wire = std::sync::Arc::new(crate::server::broadcast::Broadcast::new());
     let breaker = wire.register("breaker", [1u8; 16], 1, crate::world::terrain::spawn_point());
     let watcher = wire.register("watcher", [2u8; 16], 2, crate::world::terrain::spawn_point());
 

@@ -75,6 +75,68 @@ fn the_light_of_a_lamp_does_not_go_through_the_ground() {
 }
 
 #[test]
+fn a_lamp_lights_across_a_chunk_boundary() {
+    // The bug this catches: a chunk that hangs over the edge of the region the
+    // light is worked out in was refused whole, so the cells it covers inside
+    // the region were never read, and the light stopped dead at the chunk
+    // boundary.
+    //
+    // A lamp near the edge of a chunk therefore lit a pool that ended in a
+    // straight line, and the same lamp three blocks further on lit a bigger
+    // one, and the map looked like a fault in the wiring.
+    let mut world = World::generate(2);
+    let glowstone = world
+        .registry()
+        .id("glowstone")
+        .expect("the world knows a glowstone");
+
+    // Two blocks from the edge of the chunk at x = 0, so the light has to
+    // cross into the next one.
+    let pos = BlockPos::new(14, 100, 8);
+    world.set_block(pos, glowstone);
+
+    assert_eq!(
+        world.block_light(BlockPos::new(15, 100, 8)),
+        14,
+        "the cell across the chunk boundary is lit"
+    );
+    assert_eq!(
+        world.block_light(BlockPos::new(20, 100, 8)),
+        9,
+        "and the light carries on past it"
+    );
+    assert_eq!(
+        world.block_light(BlockPos::new(14, 100, 9)),
+        14,
+        "and across the other way"
+    );
+}
+
+#[test]
+fn a_lamp_lights_across_a_chunk_boundary_in_z() {
+    // The same in the other direction: the boundary is a line, not a point.
+    let mut world = World::generate(2);
+    let glowstone = world
+        .registry()
+        .id("glowstone")
+        .expect("the world knows a glowstone");
+
+    let pos = BlockPos::new(8, 100, 14);
+    world.set_block(pos, glowstone);
+
+    assert_eq!(
+        world.block_light(BlockPos::new(8, 100, 15)),
+        14,
+        "the cell across the chunk boundary is lit"
+    );
+    assert_eq!(
+        world.block_light(BlockPos::new(8, 100, 20)),
+        9,
+        "and the light carries on past it"
+    );
+}
+
+#[test]
 fn a_lamp_that_is_taken_away_takes_its_light_with_it() {
     let mut world = World::generate(1);
     let surface = surface_y(8, 8);

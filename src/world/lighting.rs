@@ -644,20 +644,32 @@ impl Region {
     /// Clamping the ranges up front is what keeps a chunk sitting partly off the
     /// left or bottom edge from indexing before the bounds check.
     fn overlap(&self, chunk_x: i32, chunk_z: i32) -> Option<(usize, usize, usize, usize)> {
-        let clamp = |value: i32, origin: i32, size: usize| -> Option<usize> {
-            let offset = value - origin;
-            if offset < 0 || offset >= size as i32 {
-                None
-            } else {
-                Some(offset as usize)
+        let dim = SECTION_DIM;
+
+        // The part of the chunk that is inside the region, in world
+        // coordinates and then in the region's own.
+        //
+        // The intersection, and not the chunk's own extent: a chunk that hangs
+        // over the region's edge still covers the part of it that is inside.
+        //
+        // This is what the light stops at when it is wrong. A chunk that
+        // reached past the edge was refused whole, so the cells it covers
+        // inside the region were never read and kept the region's initial
+        // value -- opaque -- and the light stopped dead at the chunk boundary.
+        // A lamp lit a pool that ended in a straight line across the middle of
+        // a chunk, and another one three blocks away, and the map looked like a
+        // fault in the wiring.
+        let span = |chunk_start: i32, origin: i32, size: usize| -> Option<(usize, usize)> {
+            let start = chunk_start.max(origin);
+            let end = (chunk_start + dim).min(origin + size as i32);
+            if start >= end {
+                return None;
             }
+            Some(((start - origin) as usize, (end - origin) as usize))
         };
 
-        let dim = SECTION_DIM;
-        let x0 = clamp(chunk_x * dim, self.origin_x, self.width)?;
-        let x1 = clamp(chunk_x * dim + dim - 1, self.origin_x, self.width)? + 1;
-        let z0 = clamp(chunk_z * dim, self.origin_z, self.depth)?;
-        let z1 = clamp(chunk_z * dim + dim - 1, self.origin_z, self.depth)? + 1;
+        let (x0, x1) = span(chunk_x * dim, self.origin_x, self.width)?;
+        let (z0, z1) = span(chunk_z * dim, self.origin_z, self.depth)?;
         Some((x0, x1, z0, z1))
     }
 

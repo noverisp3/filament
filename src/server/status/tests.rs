@@ -641,6 +641,89 @@ fn a_section_of_light_that_moved_twice_is_named_once() {
 }
 
 #[test]
+fn the_light_update_names_the_section_the_light_is_in() {
+    // The end of the road: a block changes, the world works out the light
+    // around it, and the client is told which sections moved. The mask that
+    // says so has to name the section the way the client counts them, which
+    // is from one below the world:
+    //
+    //     LevelLightEngine.getMinLightSection() = getMinSectionY() - 1
+    //
+    // so the world's own bottom section is bit 1. A mask that counted from
+    // the world's bottom instead would put the light a section below where it
+    // belongs, and a lamp would light the floor under it.
+    use crate::world::pos::BlockPos;
+
+    let mut world = crate::world::world::World::generate(1);
+    let glowstone = world
+        .registry()
+        .id("glowstone")
+        .expect("the world knows a glowstone");
+    let pos = BlockPos::new(8, 120, 8);
+    world.set_block(pos, glowstone);
+
+    // The sections whose light moved, as the server collects them.
+    let changes = world.take_light_changes();
+    assert!(!changes.is_empty(), "a lamp moves light");
+
+    // The world's own section index: where the section sits in its chunk.
+    let section = changes
+        .iter()
+        .find(|s| s.chunk_pos() == pos.chunk_pos() && s.y == pos.section_pos().y)
+        .expect("the lamp's own section moved");
+
+    let sky = world.section_sky_bytes(*section).expect("the sky is there");
+    let block = world.section_block_bytes(*section).expect("the block light is there");
+    let index = section.y - crate::world::chunk::MIN_SECTION_Y;
+
+    // And the packet that tells the client about it.
+    let mut body = Vec::new();
+    crate::protocol::chunk::write_light_update(
+        &mut body,
+        section.chunk_pos().x,
+        section.chunk_pos().z,
+        &[(index, sky)],
+        &[(index, block)],
+    );
+
+    // The mask is the third thing after the id and the two coordinates.
+    let mut i = 0;
+    let varint = |i: &mut usize| -> i32 {
+        let (value, used) = crate::protocol::VarInt::read(&mut &body[*i..]).expect("a VarInt");
+        *i += used;
+        value.0
+    };
+    assert_eq!(varint(&mut i), 49, "the light update packet id");
+    varint(&mut i); // x
+    varint(&mut i); // z
+
+    let (len, used) = crate::protocol::VarInt::read(&mut &body[i..]).expect("a length");
+    i += used;
+    let mask = &body[i..i + len.0 as usize];
+
+    // The bit that names the section: the mask is a byte per eight sections,
+    // and the section's own bit is the one that matters.
+    let bit = index + 1; // the sections are numbered from one below the world
+    let byte = (bit / 8) as usize;
+    let within = bit % 8;
+    assert!(
+        byte < mask.len(),
+        "the mask has a byte for the section: {mask:02x?}"
+    );
+    assert_eq!(
+        mask[byte] & (1 << within),
+        1 << within,
+        "the section's own bit is set, so the client reads the light where \
+         the server put it"
+    );
+    assert_eq!(
+        mask[byte] & !(1 << within),
+        0,
+        "and no other bit in that byte is set"
+    );
+}
+
+#[test]
 fn a_stack_is_described_in_words_for_the_log() {
     assert_eq!(describe(None), "nothing");
     assert_eq!(describe(Some(ItemStack::new(55, 20))), "minecraft:dirt x20");

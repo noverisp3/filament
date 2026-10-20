@@ -728,27 +728,22 @@ pub fn write_sound(out: &mut Vec<u8>, sound: &Sound) {
 
 /// The sound of a player being hurt, and of one dying.
 ///
-/// The ids are the registry ids the client knows them by, taken from the data
-/// generator's report (`extracted/registries.json`, the `minecraft:sound_event`
-/// registry), because a sound is a number on the wire and the number has to be
-/// the one the client has.
+/// The ids are the ones the **client** uses, and they are not the ones the
+/// data generator's report gives: the client numbers the sounds two lower
+/// than the report does. Both were measured by sending a number and
+/// listening to what came out -- 759 came out as a golden dandelion, which
+/// the report calls 757, and 1316 came out as a burp, which it calls 1314.
+///
+/// A block being broken is not here: the level event that says a block was
+/// destroyed is enough, and the client plays that block's own sound from it.
 pub mod sound {
     /// A player being hurt.
-    pub const PLAYER_HURT: i32 = 1316;
+    pub const PLAYER_HURT: i32 = 1314;
     /// A player dying.
-    pub const PLAYER_DEATH: i32 = 1315;
-    /// A block of grass being broken.
-    pub const GRASS_BREAK: i32 = 759;
-    /// A block of stone being broken.
-    pub const STONE_BREAK: i32 = 1600;
-    /// A block of gravel being broken.
-    pub const GRAVEL_BREAK: i32 = 764;
-    /// A block of wood being broken.
-    pub const WOOD_BREAK: i32 = 1857;
+    pub const PLAYER_DEATH: i32 = 1313;
 
     /// Which slider a sound plays on. The order is the enum's own.
     pub const SOURCE_PLAYER: i32 = 6;
-    pub const SOURCE_BLOCK: i32 = 3;
 }
 
 pub fn write_hurt_animation(out: &mut Vec<u8>, entity_id: i32, yaw: f32) {

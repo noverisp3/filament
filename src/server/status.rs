@@ -2248,6 +2248,11 @@ fn place_block(
                                 // The dust and the sound. Without this a block
                                 // is simply deleted rather than broken, which
                                 // looks like the server lost it.
+                                //
+                                // The sound is in this packet: the client
+                                // plays the broken block's own sound from the
+                                // state it carries, so a sound of its own
+                                // would be the same noise twice.
                                 let mut effect = Vec::new();
                                 p::write_level_event(
                                     &mut effect,
@@ -2255,26 +2260,6 @@ fn place_block(
                                     (bx, by, bz),
                                     was,
                                     false,
-                                );
-                                effects.push(effect);
-
-                                // And the sound of the block breaking, which
-                                // the game plays and the client only hears.
-                                // Which sound depends on what was broken, and
-                                // the state id is what says what it was.
-                                let mut effect = Vec::new();
-                                p::write_sound(
-                                    &mut effect,
-                                    &p::Sound {
-                                        id: break_sound_of(was),
-                                        source: p::sound::SOURCE_BLOCK,
-                                        x: bx,
-                                        y: by,
-                                        z: bz,
-                                        volume: 1.0,
-                                        pitch: 1.0,
-                                        seed: 0,
-                                    },
                                 );
                                 effects.push(effect);
 
@@ -3227,22 +3212,6 @@ fn hurt(
 
     log.note(format!("hurt for {damage}, {health} health left"));
     Ok(())
-}
-
-/// The sound a block makes when it breaks.
-///
-/// Which sound it is depends on what was broken, and the state id says what
-/// that was. The ids are the registry ids the client knows the sounds by, from
-/// the data generator's report.
-fn break_sound_of(state: i32) -> i32 {
-    use crate::protocol::play::sound;
-    match crate::server::ticking::state_id_name(state) {
-        "minecraft:grass_block" | "minecraft:tall_grass" | "minecraft:fern" => sound::GRASS_BREAK,
-        "minecraft:stone" | "minecraft:cobblestone" | "minecraft:deepslate" => sound::STONE_BREAK,
-        "minecraft:gravel" => sound::GRAVEL_BREAK,
-        "minecraft:oak_log" | "minecraft:spruce_log" | "minecraft:birch_log" => sound::WOOD_BREAK,
-        _ => sound::GRASS_BREAK,
-    }
 }
 
 /// Answers a command, the way the game does.

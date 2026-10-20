@@ -1,16 +1,14 @@
-//! World-level sky light: the driver that lights every loaded chunk at once.
+//! World-level light: the driver that lights every loaded chunk at once.
 //!
-//! `world::light` knows the *rules* for one section. This knows the *order*, and
-//! the order is the whole difficulty: light crosses section and chunk
-//! boundaries, so lighting each section independently leaves a visible seam at
-//! every border.
+//! `world::light` knows the *rules* for one section; this knows the *order*.
+//! Light crosses section and chunk boundaries, so lighting each section on its
+//! own leaves a visible seam at every border.
 //!
-//! The approach is to stop thinking in sections. The loaded world is flattened
-//! into one grid with a one-chunk border of opaque cells around it, which buys
-//! two things: a neighbour is a fixed arithmetic offset away, and light cannot
-//! run off the edge of the loaded area without a special case. Light falls off
-//! after fifteen blocks and a chunk is sixteen wide, so one chunk of border is
-//! comfortably more than enough.
+//! The loaded world is flattened into one grid with a chunk of opaque border
+//! around it: a neighbour is then a fixed arithmetic offset away, and light
+//! cannot run off the edge without a special case. Light falls off after
+//! fifteen blocks and a chunk is sixteen wide, so one chunk of border is
+//! comfortably enough.
 
 use super::chunk::{MIN_BLOCK_Y, SECTIONS_PER_CHUNK, WORLD_HEIGHT};
 use super::light::MAX_LIGHT;
@@ -22,25 +20,18 @@ use super::world::World;
 const MIN_SECTION: i32 = MIN_BLOCK_Y / SECTION_DIM;
 
 impl World {
-    /// Recomputes sky light for every loaded chunk.
+    /// Recomputes the light of every loaded chunk.
     ///
-    /// Three passes over a flat grid:
+    /// Three passes over a flat grid: sunlight falls down each column until an
+    /// opaque block stops it, the cells that could brighten a neighbour are
+    /// queued into sixteen buckets, and the buckets drain from level 15 down.
     ///
-    /// 1. Sunlight falls straight down each column, undimmed, until an opaque
-    ///    block stops it.
-    /// 2. Cells that could still brighten a neighbour are queued into sixteen
-    ///    buckets, one per level.
-    /// 3. Buckets drain from level 15 down to 2, each cell pushing one level
-    ///    lower into its six neighbours.
+    /// Draining in level order is what makes this correct rather than usually
+    /// right: a plain queue would visit a dim cell first and never revisit it
+    /// once a brighter path arrived.
     ///
-    /// Draining in level order is what makes this correct rather than merely
-    /// usually right. A plain queue would visit a dim cell first, find nothing
-    /// better, and never revisit it once a brighter path arrived.
-    ///
-    /// The sections whose light moved are returned, and are also recorded so
-    /// that a client is told about them: the client keeps the light it was
-    /// given with a chunk, so a world whose light moved and was never
-    /// announced is a world the client sees wrongly.
+    /// The sections whose light moved are returned and recorded, so that a
+    /// client is told about them.
     pub fn compute_light(&mut self) -> Vec<SectionPos> {
         let mut grid = Grid::new(self.chunk_positions());
         grid.fill_opacity(self);
@@ -65,9 +56,6 @@ impl World {
     }
 
     /// Block light at a world position, or 0 outside the loaded world.
-    ///
-    /// Always 0 for now: no block emits light yet, so the layer exists but has
-    /// no sources.
     pub fn block_light(&self, pos: super::pos::BlockPos) -> u8 {
         self.chunk(pos.chunk_pos())
             .map_or(0, |chunk| chunk.block_light(pos))
@@ -75,14 +63,9 @@ impl World {
 
     /// The sideways spread of the light around a chunk that has just arrived.
     ///
-    /// The columns are right the moment a chunk arrives, and the sideways
+    /// The columns are right the moment a chunk arrives and the sideways
     /// spread is not: light that comes in from a lit column next door needs
-    /// somewhere to come in to. This is the game working it out when a chunk
-    /// is loaded, which is the same thing done with a bigger region.
-    ///
-    /// The region is the chunk plus the reach on each side, so light can
-    /// arrive from a neighbour that is already lit, and the chunk's own cells
-    /// are the ones written back.
+    /// somewhere to come in to.
     pub fn spread_chunk(&mut self, pos: ChunkPos) {
         // The middle of the chunk, and a reach that covers the chunk itself
         // and a lit neighbour's worth of ground around it.
@@ -103,8 +86,7 @@ impl World {
     /// The cells whose light can have changed are the ones within reach of the
     /// border, so the region is centred on the border and not on either chunk.
     /// A region around a whole chunk reaches sixteen blocks past its own edge
-    /// and so covers the chunk next door twice over, and the light was worked
-    /// out nine times over for one chunk that arrived.
+    /// and so covers the chunk next door twice over.
     pub fn spread_border(&mut self, from: ChunkPos, to: ChunkPos) {
         // The middle of the border: half way between the two chunks' centres.
         let middle_x = from.x * SECTION_DIM + SECTION_DIM / 2 + (to.x - from.x) * SECTION_DIM / 2;
@@ -137,18 +119,11 @@ impl World {
     ///
     /// The game does not keep the light in the chunk file: it works it out
     /// again when the chunk is loaded, because the light of a chunk depends on
-    /// the chunks around it. This is the same idea, done for the chunk alone:
-    /// the sun falls straight down each column until something opaque stops
-    /// it, and everything below that is dark.
+    /// the chunks around it.
     ///
     /// It is the columns only. The light that comes in sideways from a lit
-    /// column next door is the other half, and the game gets that from its
-    /// light engine's queues; here it is worked out by
-    /// [`Self::relight_around`] when a block changes, which is where it shows.
-    ///
-    /// A chunk that is only a column of light deep is a hole in the ground
-    /// that is dark, which is what the game shows, and the alternative is a
-    /// world where the inside of a mountain is as bright as its top.
+    /// column next door is worked out by [`Self::relight_around`] when a block
+    /// changes, and by [`Self::spread_chunk`] when a chunk arrives.
     pub(crate) fn light_chunk_columns(&mut self, pos: ChunkPos) {
         // For each column, the height at which the sun stops: the first
         // opaque block from the top, or the bottom of the world if there is
@@ -410,14 +385,12 @@ impl Grid {
     /// Spreads the light the blocks themselves give off.
     ///
     /// Block light is not the sun: it starts at the blocks that glow and loses
-    /// one level for every block it crosses, in every direction, downwards
-    /// included. A glowstone is fifteen, so the cell next to it is fourteen and
-    /// the one after that is thirteen, and fifteen cells away there is nothing
-    /// left.
+    /// one level for every block it crosses, downwards included. A glowstone is
+    /// fifteen, so the cell next to it is fourteen and fifteen cells away there
+    /// is nothing left.
     ///
     /// The drain is by level, from the brightest down, for the same reason the
-    /// sun's spread is: a cell only ever pushes into a strictly lower level,
-    /// so the buckets never grow while they are being drained.
+    /// sun's spread is: a cell only ever pushes into a strictly lower level.
     fn spread_block_light(&mut self) {
         let mut buckets: Vec<Vec<usize>> = (0..=MAX_LIGHT as usize).map(|_| Vec::new()).collect();
 
@@ -509,21 +482,18 @@ impl Grid {
 /// How far sky light can travel, in blocks.
 ///
 /// Light loses one level per step and tops out at [`MAX_LIGHT`], so no change
-/// can reach further than this. Everything else follows from it: the region to
-/// relight, and how wide its border must be.
+/// can reach further than this. The region to relight and the width of its
+/// border both follow from it.
 pub const LIGHT_REACH: i32 = MAX_LIGHT as i32;
 
 /// A sub-volume of the world, used to relight the neighbourhood of one edit.
 ///
 /// The whole world as a single [`Grid`] costs a couple of hundred milliseconds,
-/// which is fine at startup and useless when a click should feel instant. This
-/// covers only what an edit can actually reach.
+/// which is fine at startup and useless when a click should feel instant.
 ///
-/// The margin has to be at least [`LIGHT_REACH`] wider than the edited cell, and
-/// that is not a guess: a cell further away than fifteen steps from the edit
-/// cannot be connected to it by any light path, so its value cannot have
-/// changed. The extra ring of cells therefore keeps the value it already had and
-/// only serves as a source for light spreading inwards.
+/// The margin is at least [`LIGHT_REACH`] wider than the edited cell, because a
+/// cell further away cannot be connected to it by any light path. That ring
+/// keeps the value it already had and serves as a source for light coming in.
 struct Region {
     /// World X and Z of column 0 and row 0.
     origin_x: i32,
@@ -548,10 +518,8 @@ impl Region {
 
     /// A region around one cell, reaching `reach` blocks in each direction.
     ///
-    /// The reach is how far light can travel, so a cell further away than that
-    /// cannot be connected to the centre by any light path and its value cannot
-    /// have changed. The extra ring of cells keeps the value it already had and
-    /// only serves as a source for light spreading inwards.
+    /// A cell further away than the reach cannot be connected to the centre by
+    /// any light path, so its value cannot have changed.
     fn around_with_reach(world: &World, center: BlockPos, reach: i32) -> Self {
         // One wider than the reach on each side, so the edited cell is never in
         // the margin.
@@ -640,11 +608,9 @@ impl Region {
             // The chunk's own first column and row, in region coordinates.
             //
             // A chunk that hangs over the edge of the region starts before it,
-            // so the cells it covers inside the region are not its first
-            // columns: they are the ones that start some way into the chunk.
-            // Measuring from the chunk's own edge rather than from the part of
-            // it that happens to be inside the region is what puts the light
-            // back in the column it belongs to.
+            // so the cells it covers inside are not its first columns.
+            // Measuring from the chunk's own edge is what puts the light back
+            // in the column it belongs to.
             let (chunk_x0, chunk_z0) = self.chunk_origin(chunk_x, chunk_z);
 
             for (slot, section) in chunk.sections().iter().enumerate() {
@@ -685,24 +651,15 @@ impl Region {
     /// The half-open range of region cells this chunk covers, as
     /// `(x0, x1, z0, z1)`, or `None` when it does not reach the region.
     ///
-    /// Clamping the ranges up front is what keeps a chunk sitting partly off the
-    /// left or bottom edge from indexing before the bounds check.
+    /// Clamping the ranges up front keeps a chunk sitting partly off the edge
+    /// from indexing before the bounds check.
     fn overlap(&self, chunk_x: i32, chunk_z: i32) -> Option<(usize, usize, usize, usize)> {
         let dim = SECTION_DIM;
 
-        // The part of the chunk that is inside the region, in world
-        // coordinates and then in the region's own.
-        //
-        // The intersection, and not the chunk's own extent: a chunk that hangs
-        // over the region's edge still covers the part of it that is inside.
-        //
-        // This is what the light stops at when it is wrong. A chunk that
-        // reached past the edge was refused whole, so the cells it covers
-        // inside the region were never read and kept the region's initial
-        // value -- opaque -- and the light stopped dead at the chunk boundary.
-        // A lamp lit a pool that ended in a straight line across the middle of
-        // a chunk, and another one three blocks away, and the map looked like a
-        // fault in the wiring.
+        // The part of the chunk that is inside the region, in world coordinates
+        // and then in the region's own. A chunk that hangs over the edge still
+        // covers the part of it that is inside: refusing it whole left the light
+        // stopping dead at the chunk boundary.
         let span = |chunk_start: i32, origin: i32, size: usize| -> Option<(usize, usize)> {
             let start = chunk_start.max(origin);
             let end = (chunk_start + dim).min(origin + size as i32);
@@ -719,11 +676,9 @@ impl Region {
 
     /// The region cell that holds a chunk's first column and first row.
     ///
-    /// The region's own origin is wherever the edit put it, which is usually
-    /// in the middle of a chunk, so a chunk that hangs over the edge of the
-    /// region starts before the region does. Its cells inside the region are
-    /// then the ones some way into the chunk, and the light of them has to go
-    /// back to those columns and not to the first ones.
+    /// The region's own origin is wherever the edit put it, usually in the
+    /// middle of a chunk, so a chunk that hangs over the edge of the region
+    /// starts before the region does.
     fn chunk_origin(&self, chunk_x: i32, chunk_z: i32) -> (i32, i32) {
         (
             chunk_x * SECTION_DIM - self.origin_x,
@@ -750,10 +705,10 @@ impl Region {
         out
     }
 
-    /// Recomputes sky light inside the region, leaving the margin untouched.
+    /// Recomputes the light inside the region, leaving the margin untouched.
     ///
-    /// The downward pass runs over the region's full height so the sun column is
-    /// exact rather than seeded from a guess.
+    /// The downward pass runs over the region's full height so the sun column
+    /// is exact rather than seeded from a guess.
     fn recompute(&mut self) {
         self.recompute_sky();
         self.recompute_block();

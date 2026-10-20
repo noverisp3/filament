@@ -59,19 +59,13 @@ pub struct World {
     chunks: HashMap<ChunkPos, Chunk>,
     /// What has been changed, and where, separately from the chunks themselves.
     ///
-    /// A chunk is thrown away the moment the last player walks away from it and
-    /// rebuilt from the noise when somebody comes back, so an edit that lives
-    /// only in the chunk is gone by then. The report from the field was a hole
-    /// that filled itself back in: both players watched a block go, and walking
-    /// back to it found it solid again.
+    /// A chunk is thrown away the moment the last player walks away from it, so
+    /// an edit that lives only in the chunk is gone by then: the report from the
+    /// field was a hole that filled itself back in.
     ///
     /// The edits are kept out here, keyed by chunk, and replayed onto a chunk as
     /// it arrives. The journal outlives the chunk, so the chunk can be as
     /// disposable as it likes.
-    ///
-    /// It grows with what players have done and not with what they have walked
-    /// past, which is the thing that matters: a server nobody edited has an
-    /// empty one no matter how far anyone travelled.
     edits: HashMap<ChunkPos, Vec<(BlockPos, BlockId)>>,
 
     /// Chunks that must be written back: either generated here (not on disk
@@ -89,10 +83,7 @@ pub struct World {
     /// Where the sun is, which is a different number from the same clock.
     ///
     /// This one wraps, at twenty-four thousand ticks, and it is what the client
-    /// is told so that the sky matches the world it is standing in. The two
-    /// answer different questions -- *how long has this world existed* and *what
-    /// time is it* -- and a server that keeps one number for both sends a sky
-    /// that has been running since the world was made.
+    /// is told so that the sky matches the world it is standing in.
     day_time: u64,
 
     /// Work the world owes itself, ordered by when.
@@ -124,11 +115,10 @@ pub struct World {
 
     /// The chunks that hold a block which gives off light.
     ///
-    /// Whether there is a lamp near a chunk used to mean reading every block
-    /// of the chunk and of the eight around it: nine hundred thousand blocks,
+    /// Whether there is a lamp near a chunk used to mean reading every block of
+    /// the chunk and of the eight around it: nine hundred thousand blocks,
     /// asked nine times over for every chunk that arrived. The answer is kept
-    /// instead, and a chunk is looked at once when it arrives and once more
-    /// when a block in it changes.
+    /// instead.
     lamp_chunks: HashSet<ChunkPos>,
 
     /// The items lying on the ground, waiting to be picked up.
@@ -303,9 +293,7 @@ impl World {
     ///
     /// A chunk loaded from disk and left alone is not written again: rewriting
     /// every loaded region on every save is what turned an idle session into
-    /// tens of megabytes of disk traffic. Only chunks that were generated here
-    /// or edited get saved; the edits journal keeps them consistent even when
-    /// the chunk itself has been thrown away and rebuilt.
+    /// tens of megabytes of disk traffic.
     pub fn flush(&mut self) -> std::io::Result<usize> {
         let game_time = self.game_time;
         let Some(store) = self.store.as_mut() else {
@@ -314,13 +302,11 @@ impl World {
         let dirty: Vec<ChunkPos> = self.dirty.iter().copied().collect();
         let mut ready: Vec<(ChunkPos, Chunk)> = Vec::with_capacity(dirty.len());
         for pos in dirty {
-            // The chunk as it stands. If it is still here, that is the answer.
-            // If it is not -- a player walked away and it was thrown out --
-            // then it has to come back from the folder, because that is where
-            // the ground the game saved is. Building it from the noise
-            // instead would write the generator's ground over the ground
-            // that was there, which is the one mistake this whole layer
-            // exists to avoid.
+            // The chunk as it stands. If it is not -- a player walked away and
+            // it was thrown out -- then it has to come back from the folder,
+            // because that is where the ground the game saved is. Building it
+            // from the noise instead would write the generator's ground over
+            // the ground that was there.
             let chunk = if let Some(chunk) = self.chunks.get(&pos) {
                 chunk.clone()
             } else if let Some(mut chunk) = store.load(pos, &mut self.registry) {
@@ -536,11 +522,10 @@ impl World {
 
     /// Tells the six blocks around a change that something near them moved.
     ///
-    /// The game's `updateNeighborsAt`, and the reason it exists: a block cannot
-    /// know what happened next to it, so the change goes round. It is scheduled
-    /// rather than run because the point of a neighbour update is that it may
-    /// change something else, and answering that inline turns one edit into a
-    /// chain of them all inside the event that caused it.
+    /// The game's `updateNeighborsAt`: a block cannot know what happened next to
+    /// it, so the change goes round. It is scheduled rather than run because a
+    /// neighbour update may change something else, and answering that inline
+    /// turns one edit into a chain of them all.
     pub fn update_neighbors(&mut self, pos: BlockPos) {
         for face in [
             Direction::Down,
@@ -556,14 +541,12 @@ impl World {
 
     /// Moves the world on by one tick.
     ///
-    /// This is what a tick is *for*. Everything the game does on a delay -- a
-    /// block that wants to check its neighbours again, water looking for
-    /// somewhere to go, an item waiting to be picked up -- comes back through
-    /// here, and nothing is answered anywhere else.
+    /// Everything the game does on a delay -- a block that wants to check its
+    /// neighbours again, water looking for somewhere to go, an item waiting to
+    /// be picked up -- comes back through here.
     ///
     /// The order is the game's (`ServerLevel.tick`): work that is due is taken
-    /// under a budget, and what does not fit waits for the next tick rather than
-    /// being dropped or paid for all at once here.
+    /// under a budget, and what does not fit waits for the next tick.
     pub fn tick(&mut self) -> BlockEdit {
     // The clock runs on without being wrapped, which is what the game does:
     // the client takes the day itself out of the count when it works out where
@@ -638,30 +621,16 @@ impl World {
 
     /// One block's turn to notice something.
     ///
-    /// The game's is:
-    ///
-    /// ```java
-    /// private void tickBlock(final BlockPos pos, final Block type) {
-    ///    BlockState state = this.getBlockState(pos);
-    ///    if (state.is(type)) { state.tick(this, pos, this.random); }
-    /// }
-    /// ```
-    ///
-    /// -- re-read the block and only act if it is still the thing that was
-    /// asked. A player can break a block between it being scheduled and its turn
-    /// coming round, and a rule that acts on the stale name writes into a block
-    /// that is now something else.
+    /// The game re-reads the block and only acts if it is still the thing that
+    /// was asked. A player can break a block between it being scheduled and its
+    /// turn coming round, and a rule that acts on the stale name writes into a
+    /// block that is now something else.
     fn block_update(&mut self, pos: BlockPos, _edit: &mut BlockEdit) {
-        // Nothing is answered here.
-        //
-        // There used to be a rule that turned grass into dirt when the block
-        // under it was not dirt, and it was wrong twice over: the game has no
-        // such rule -- in the game a grass block needs nothing under it at
-        // all -- and it answered at once, so every block a player put down
-        // next to a hillside was rewritten before the client had drawn it.
-        //
-        // The rules the game does have about grass are both random ticks, and
-        // they are in `random_update`.
+        // Nothing is answered here. There used to be a rule that turned grass
+        // into dirt when the block under it was not dirt: the game has no such
+        // rule, and it answered at once, so every block a player put down next
+        // to a hillside was rewritten before the client had drawn it. The rules
+        // the game does have about grass are both random ticks.
         let _ = pos;
     }
 
@@ -670,16 +639,9 @@ impl World {
     /// The two things it does about grass: a grass block that cannot stay
     /// alive becomes dirt, and dirt near a grass block becomes grass.
     ///
-    /// The game rolls both of these on a random tick and it needs light: a
-    /// dirt block in the dark stays dirt. They are rare, and they are meant to
-    /// be -- a hillside heals itself over minutes, and not the moment a player
-    /// puts a block down.
-    ///
-    /// There is no rule here that answers at once. There used to be one, and
-    /// it turned grass into dirt when the block under it was not dirt: the
-    /// game has no such rule -- in the game a grass block needs nothing under
-    /// it at all -- and it answered at once, so every block a player put down
-    /// next to a hillside was rewritten before the client had drawn it.
+    /// The game rolls both on a random tick and it needs light: a dirt block in
+    /// the dark stays dirt. They are meant to be rare, so that a hillside heals
+    /// itself over minutes and not the moment a player puts a block down.
     fn random_update(&mut self, pos: BlockPos, edit: &mut BlockEdit) {
         let Some(block) = self.block(pos) else { return };
 
@@ -814,9 +776,9 @@ impl World {
             return true;
         }
         // Disk first. The generator is deterministic, so it is always able to
-        // answer -- which is exactly why it has to be the second choice and not
-        // the first: asked first, it answers every chunk in the world and the
-        // files on disk are never opened at all.
+        // answer, which is exactly why it has to be the second choice: asked
+        // first, it answers every chunk in the world and the files on disk are
+        // never opened at all.
         if let Some(chunk) = self
             .store
             .as_mut()
@@ -826,13 +788,9 @@ impl World {
             return true;
         }
         // A chunk that is on the disk and cannot be read is not a chunk that
-        // is not there.
-        //
-        // Generating one in its place would put a piece of the generator's
-        // world where the game's world was, and -- because a generated chunk
-        // is a chunk that has been changed -- save it over the file. The one
-        // thing this server must never do is write over a world it did not
-        // read.
+        // is not there. Generating one in its place would save the generator's
+        // world over the game's, and the one thing this server must never do
+        // is write over a world it did not read.
         if self
             .store
             .as_ref()
@@ -855,15 +813,10 @@ impl World {
     /// The point of the method is that generating and storing are separate
     /// jobs. Generating is a pure function of the position and the palette, so
     /// it can happen on any thread and several at once; storing is a hash map
-    /// insert that has to happen on the thread that owns the map. Splitting them
-    /// is what lets a connection ask for a chunk without waiting for the
-    /// world's thread to have finished building it.
+    /// insert that has to happen on the thread that owns the map.
     ///
     /// It is also the one place a chunk enters the world, so it is the one place
-    /// that has to remember what was done to the last one. `ensure_chunk` used
-    /// to insert straight into the map, which meant the generator's chunk came
-    /// back without the edits and a hole filled itself in whenever the slow
-    /// path was the one that rebuilt it.
+    /// that has to remember what was done to the last one.
     pub fn store_chunk(&mut self, pos: ChunkPos, chunk: Chunk) {
         let mut chunk = chunk;
         // Replay whatever was done here before. Without this the chunk comes
@@ -884,46 +837,32 @@ impl World {
         // the file: the game does not keep it either, because the light of a
         // chunk depends on the chunks around it.
         self.light_chunk_columns(pos);
-        // And the light that comes in from the sides, which the columns
-        // cannot know: the neighbouring chunk's lamp lights this one, and this
-        // chunk's lamp lights that one. The region around the chunk is worked
-        // out again, both layers of it.
+        // And the light that comes in from the sides, which the columns cannot
+        // know: the neighbouring chunk's lamp lights this one, and this chunk's
+        // lamp lights that one.
         //
         // Only when there is a lamp to spread. Working the region out again
-        // costs a moment, and a world with no lamp in it gains nothing from
-        // it.
+        // costs a moment, and a world with no lamp in it gains nothing.
         if self.lamp_near(pos) {
             self.spread_chunk(pos);
         }
         // And the chunks around it, because the light that crosses the border
-        // has to be worked out on both sides of it.
-        //
-        // The light is worked out when a chunk arrives, and at that moment the
-        // chunk next door may not have arrived yet -- so its lamps were not
-        // counted, and this chunk's light stops dead at the border. The chunk
-        // that arrives *later* works the border out again, and the cells on this
-        // side of it are lit from the far side at last.
+        // has to be worked out on both sides of it: the chunk next door may not
+        // have arrived yet, and the chunk that arrives later works the border
+        // out again.
         //
         // The region is centred on the border rather than on the neighbour,
         // because the cells whose light can have changed are the ones within
-        // reach of it -- a lamp's light travels fifteen blocks -- and the cells
-        // further off cannot have changed. A region around the whole
-        // neighbour was twice the work for the same answer, and it was the
-        // reason a player joining a world with a lamp in it spent most of a
-        // minute on the light alone.
+        // reach of it. A region around the whole neighbour was twice the work
+        // for the same answer.
         for dx in -1..=1 {
             for dz in -1..=1 {
                 if dx == 0 && dz == 0 {
                     continue;
                 }
-                // Only the four that share an edge.
-                //
-                // The nearest cell of a chunk that touches this one at a
-                // corner is sixteen blocks away in both directions, which is
-                // further than a lamp's light travels: nothing the blocks give
-                // off crosses there. What does cross is the sun's light, and
-                // the pass over the whole world that follows a player joining
-                // works that out.
+                // Only the four that share an edge: the nearest cell of a chunk
+                // that touches this one at a corner is sixteen blocks away,
+                // which is further than a lamp's light travels.
                 if dx != 0 && dz != 0 {
                     continue;
                 }

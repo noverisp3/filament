@@ -723,6 +723,189 @@ fn the_light_update_names_the_section_the_light_is_in() {
     );
 }
 
+/// The light of a section, in the shape the world hands it over: the chunk,
+/// the section's place in it, and the two layers.
+type WireLight = (i32, i32, i32, Vec<u8>, Vec<u8>);
+
+#[test]
+fn the_light_a_client_is_told_is_continuous_across_a_chunk_border() {
+    // Two blocks from the edge of the chunk at x = 0, so the light has to
+    // cross into the chunk at x = 1.
+    the_light_a_client_is_told_is_continuous_across_a_chunk_border_at(14);
+}
+
+#[test]
+fn the_light_a_client_is_told_is_continuous_across_a_chunk_border_the_region_starts_inside() {
+    // One block into the chunk at x = 16, so the region the light is worked
+    // out in starts one block into the chunk before it. A chunk that hangs
+    // over the edge of the region covers only part of itself inside it, and
+    // the light of that part has to land in the right columns: get it wrong
+    // and the light is cut in two at the border of the two chunks, and the
+    // client draws a strip of darkness one block wide where the light should
+    // be continuous.
+    the_light_a_client_is_told_is_continuous_across_a_chunk_border_at(17);
+}
+
+/// The light a client is told, read the way the client reads it.
+///
+/// The whole of the light: the mask names the sections, the arrays follow the
+/// mask, and the client puts each array where the mask said. A lamp near the
+/// edge of a chunk lights into the next one, and the client draws that light
+/// from the data the two chunks were sent. If the two chunks disagree by a
+/// block at the seam, the client draws a seam.
+fn the_light_a_client_is_told_is_continuous_across_a_chunk_border_at(lamp_x: i32) {
+    use crate::world::pos::BlockPos;
+    use crate::protocol::VarInt;
+
+    let mut world = crate::world::world::World::generate(2);
+    let glowstone = world
+        .registry()
+        .id("glowstone")
+        .expect("the world knows a glowstone");
+
+    let pos = BlockPos::new(lamp_x, 100, 8);
+    world.set_block(pos, glowstone);
+
+    let changes = world.take_light_changes();
+    assert!(!changes.is_empty(), "a lamp moves light");
+
+    // The sections whose light moved, in the shape the world hands them over:
+    // the chunk, the section's place in it, and the two layers.
+    let wire: Vec<WireLight> = changes
+        .iter()
+        .map(|section| {
+            (
+                section.chunk_pos().x,
+                section.chunk_pos().z,
+                section.y - crate::world::chunk::MIN_SECTION_Y,
+                world.section_sky_bytes(*section).expect("the sky is there"),
+                world.section_block_bytes(*section).expect("the block light is there"),
+            )
+        })
+        .collect();
+
+    // The packets, as the server sends them: one per chunk.
+    let (by_chunk, blocks) = group_light(wire);
+    let mut sent = Vec::new();
+    for ((chunk_x, chunk_z), sections) in by_chunk {
+        let block_sections = blocks
+            .get(&(chunk_x, chunk_z))
+            .cloned()
+            .unwrap_or_default();
+        let mut body = Vec::new();
+        crate::protocol::chunk::write_light_update(
+            &mut body,
+            chunk_x,
+            chunk_z,
+            &sections,
+            &block_sections,
+        );
+        sent.push(((chunk_x, chunk_z), body));
+    }
+
+    // And now the client's side of it: for each packet, the mask names the
+    // sections and the arrays follow it, so the light of a section is the array
+    // the mask put there.
+    //
+    // The four masks are the sky, the block, the empty sky and the empty
+    // block, and the two lists that follow are the sky and the block.
+    let mut light_at: Vec<(i32, i32, i32, u8)> = Vec::new();
+    for ((chunk_x, chunk_z), body) in &sent {
+        let mut i = 0;
+        let varint = |i: &mut usize| -> i32 {
+            let (value, used) = VarInt::read(&mut &body[*i..]).expect("a VarInt");
+            *i += used;
+            value.0
+        };
+        assert_eq!(varint(&mut i), 49, "the light update packet id");
+        assert_eq!(varint(&mut i), *chunk_x, "the chunk x");
+        assert_eq!(varint(&mut i), *chunk_z, "the chunk z");
+
+        let mut masks = Vec::new();
+        for _ in 0..4 {
+            let (len, used) = VarInt::read(&mut &body[i..]).expect("a length");
+            i += used;
+            masks.push(body[i..i + len.0 as usize].to_vec());
+            i += len.0 as usize;
+        }
+
+        let mut lists = Vec::new();
+        for _ in 0..2 {
+            let (count, used) = VarInt::read(&mut &body[i..]).expect("a count");
+            i += used;
+            let mut arrays = Vec::new();
+            for _ in 0..count.0 {
+                let (len, used) = VarInt::read(&mut &body[i..]).expect("a length");
+                i += used;
+                arrays.push(body[i..i + len.0 as usize].to_vec());
+                i += len.0 as usize;
+            }
+            assert_eq!(count.0 as usize, arrays.len(), "one array per section");
+            lists.push(arrays);
+        }
+
+        // The block light: the second mask names the sections with light in
+        // them, and the second list is the light.
+        for (bit, data) in named(&masks[1]).into_iter().zip(lists[1].clone()) {
+            // The client's light engine numbers its sections from one below
+            // the world, so bit b names the section at y = -5 + b.
+            let section_y = -5 + bit as i32;
+            for local_y in 0..16usize {
+                for local_z in 0..16usize {
+                    for local_x in 0..16usize {
+                        // The light of a section is nibbles, two to a byte, and
+                        // the cell's place in the section is x + z * 16 + y * 256.
+                        let index = local_x + local_z * 16 + local_y * 256;
+                        let byte = data[index / 2];
+                        let value = if index % 2 == 0 { byte & 0x0F } else { byte >> 4 };
+                        light_at.push((
+                            chunk_x * 16 + local_x as i32,
+                            section_y * 16 + local_y as i32,
+                            chunk_z * 16 + local_z as i32,
+                            value,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // The light the client was told has to be the light the world has.
+    for (x, y, z, value) in &light_at {
+        assert_eq!(
+            world.block_light(BlockPos::new(*x, *y, *z)),
+            *value,
+            "the client is told the light the world has at {x} {y} {z}"
+        );
+    }
+
+    // And across the border: x = 15 is the last column of one chunk, x = 16
+    // the first of the next. The light falls by one for every step away from
+    // the lamp, on both sides of the border.
+    for x in (lamp_x - 15)..(lamp_x + 15) {
+        let expected = 15 - (x - lamp_x).abs();
+        assert_eq!(
+            world.block_light(BlockPos::new(x, 100, 8)),
+            expected as u8,
+            "the light at x={x} is one below the light at x={}",
+            x - 1
+        );
+    }
+}
+
+/// The bits a mask names, from the lowest.
+fn named(mask: &[u8]) -> Vec<usize> {
+    let mut out = Vec::new();
+    for (index, byte) in mask.iter().enumerate() {
+        for bit in 0..8 {
+            if byte >> bit & 1 == 1 {
+                out.push(index * 8 + bit);
+            }
+        }
+    }
+    out
+}
+
 #[test]
 fn a_stack_is_described_in_words_for_the_log() {
     assert_eq!(describe(None), "nothing");

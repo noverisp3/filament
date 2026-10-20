@@ -27,17 +27,11 @@ pub struct Chunk {
     ///
     /// Writing it out costs about eleven milliseconds and reading the world
     /// costs two tenths, so a player waiting for their opening batch of two
-    /// hundred and eighty-nine chunks was waiting on this and nothing else. It
-    /// was done on the world's own thread because a chunk can be edited after
-    /// it is generated and the body has to show the edit, which meant the copy
-    /// could not simply be made once and left alone.
+    /// hundred and eighty-nine chunks was waiting on this and nothing else.
     ///
-    /// It can: the body is invalidated whenever a block in the chunk changes,
-    /// which is set_block and nothing else. So the pool builds it while the
-    /// chunk is fresh and nothing on the world's thread has to wait for it, and
-    /// a chunk that has been edited since is written out again when it is next
-    /// asked for -- once, for the one chunk that was dug in, rather than for
-    /// every chunk that was not.
+    /// The body is invalidated whenever a block in the chunk changes, which is
+    /// `set_block` and nothing else, so a chunk that has been edited since is
+    /// written out again when it is next asked for.
     serialised: Option<Vec<u8>>,
 }
 

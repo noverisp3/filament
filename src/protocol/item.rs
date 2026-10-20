@@ -12,18 +12,16 @@
 //! So an ordinary stack -- sixty-four of something, nothing special about it --
 //! is a VarInt, a VarInt and two zeroes. Nothing here can represent an enchanted
 //! or a renamed item, and that is a deliberate line rather than an oversight:
-//! nothing in this server produces one yet, and a codec that reads what it
-//! cannot be given a half-written version of is worse than one that does not
-//! claim to.
+//! nothing in this server produces one yet.
 //!
 //! Ids come from the same report the block states do, `extracted/registries.json`,
 //! where `minecraft:item` gives dirt 55 and grass block 54. They are not block
 //! state ids and not the same numbers -- dirt is block state 10.
 //!
 //! Nor are they the entries' places in that report: it is keyed by identifier,
-//! so it arrives alphabetically and its 613th line is light grey stained glass,
-//! which is also item 613. The number an item goes by is the entry's own
+//! so it arrives alphabetically. The number an item goes by is the entry's own
 //! `protocol_id`.
+
 
 
 use std::collections::HashMap;
@@ -433,11 +431,9 @@ pub fn write_container_set_slot(
 ///
 /// Nine fields, and the three that are not obvious are the ones that matter.
 /// The click point is three floats *relative to the corner of the block*, not
-/// absolute -- the client sends the offset and the server puts the corner back,
-/// so the value is only useful as an answer to "was the click inside the block
-/// they named". And the sequence is the prediction number again, the same one
-/// block_changed_ack settles, so this packet needs acknowledging even when the
-/// placement is refused.
+/// absolute, so the value is only useful as an answer to "was the click inside
+/// the block they named". And the sequence is the prediction number again, the
+/// same one `block_changed_ack` settles.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct UseItemOn {
     /// Which hand. Zero is the main one.

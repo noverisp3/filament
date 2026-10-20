@@ -27,10 +27,9 @@ use std::sync::atomic::{AtomicI32, Ordering};
 /// }
 /// ```
 ///
-/// So a login packet carrying id 0 is accepted by the decoder and then blows up
+/// A login packet carrying id 0 is accepted by the decoder and then blows up
 /// when the client adds the player to the level, which is a confusing way to
-/// find out. It costs one static counter to not have that problem, and the ids
-/// are needed per connection anyway once there are entities to hand them to.
+/// find out.
 static NEXT_ENTITY_ID: AtomicI32 = AtomicI32::new(1);
 
 /// The next entity id.

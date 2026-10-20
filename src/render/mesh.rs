@@ -231,12 +231,8 @@ impl Sampler<'_> {
     /// each corner, four cells matter: the one directly in front, the two
     /// touching it along the face's edges, and the one diagonally opposite. That
     /// last one is what produces the classic soft darkening in a corner, and it
-    /// is also why shading needs the corner neighbours and not just the six face
+    /// is why shading needs the corner neighbours and not just the six face
     /// neighbours.
-    ///
-    /// Order matches `emit_quad`'s corners: `(u,v)`, `(u+1,v)`, `(u+1,v+1)`,
-    /// `(u,v+1)`. The outward cell sits at the cell's own `(u, v)`, so the
-    /// min-u,min-v corner reaches towards -u and -v from it.
     fn corners(
         &self,
         cell: &[i32; 3],
@@ -580,10 +576,7 @@ fn emit_quad(
     // shading across them leaves a crease that the eye picks out immediately on
     // a flat surface. Which diagonal is worse depends on where the shading
     // changes, so pick the one that puts the crease between the darker pair of
-    // corners, where a darker line is least noticeable.
-    //
-    // Both orders below walk the same corner cycle, so the winding is
-    // preserved either way.
+    // corners.
     let diagonal_a = key_corners[0].ao as u16 + key_corners[2].ao as u16;
     let diagonal_b = key_corners[1].ao as u16 + key_corners[3].ao as u16;
     if diagonal_a > diagonal_b {

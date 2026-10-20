@@ -15,13 +15,11 @@ use server::log;
 
 /// Where to listen unless told otherwise.
 ///
-/// Every interface, not loopback. This was the other way round and was changed
-/// because binding to loopback is the kind of decision that is invisible until
-/// somebody asks why the friend on the same wifi cannot connect: the server is
-/// running, the port is open in the sense that a socket exists, and nothing
-/// says no because nothing is being asked. The startup log prints the address
-/// either way, so the cost of being visible by default is that the address
-/// gets read by whoever starts the server.
+/// Every interface, not loopback: binding to loopback is the kind of decision
+/// that is invisible until somebody asks why the friend on the same wifi cannot
+/// connect. The startup log prints the address either way, so the cost of
+/// being visible by default is that the address gets read by whoever starts the
+/// server.
 ///
 /// Pass `--addr 127.0.0.1:25565` for the old behaviour, and that is the only
 /// thing the flag is for now.
@@ -90,17 +88,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Says who can reach this, when anyone other than this machine can.
 ///
-/// Loopback by default, and that is deliberate: a server which is not finished
-/// should not be reachable from the network by accident. Binding to
-/// `0.0.0.0` is the switch, and the switch has a cost worth stating out loud
-/// rather than leaving to be found out about: there is no authentication, so
-/// anyone who reaches the port can join as any name they like, and the offline
-/// UUIDs are derived from the name rather than from an account.
+/// Binding to `0.0.0.0` is the switch, and the switch has a cost worth
+/// stating out loud rather than leaving to be found out about: there is no
+/// authentication, so anyone who reaches the port can join as any name they
+/// like, and the offline UUIDs are derived from the name rather than from an
+/// account.
 ///
 /// The address printed is the one to hand out. Finding it is not something to
 /// ask the user to do, because the answer is in the machine and not in any
-/// config file: ask the routing table where a packet to the outside world would
-/// go, and take the local end of that route.
+/// config file.
 fn announce_reachability(addr: &SocketAddr) {
     let wildcard = match addr.ip() {
         IpAddr::V4(ip) => ip.is_unspecified(),

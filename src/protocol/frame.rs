@@ -206,15 +206,14 @@ impl FrameEncoder {
     }
 
     /// Encodes one packet body into `out`.
-///
-/// Once a threshold is set, **every** frame carries an inner length: the
-/// uncompressed size when the payload is deflated, and zero when it is not.
-/// Writing that zero is not optional. `CompressionEncoder.encode` upstream
-/// writes it in both branches, because the client decides whether to inflate by
-/// reading it, and a frame that omits it makes the client read the first byte
-/// of the payload as a length. That surfaces as `DataFormatException:
-/// incorrect header check`, which says nothing about the real cause.
-pub fn encode(&self, body: &[u8], out: &mut Vec<u8>) -> Result<(), FrameError> {
+    ///
+    /// Once a threshold is set, **every** frame carries an inner length: the
+    /// uncompressed size when the payload is deflated, and zero when it is not.
+    /// Writing that zero is not optional: `CompressionEncoder.encode` upstream
+    /// writes it in both branches, because the client decides whether to inflate
+    /// by reading it, and a frame that omits it makes the client read the
+    /// first byte of the payload as a length.
+    pub fn encode(&self, body: &[u8], out: &mut Vec<u8>) -> Result<(), FrameError> {
         let Some(threshold) = self.threshold else {
             VarInt(body.len() as i32).write(out);
             out.extend_from_slice(body);

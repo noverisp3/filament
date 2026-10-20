@@ -3,33 +3,21 @@
 //! # Why one thread
 //!
 //! The world used to sit behind a mutex that every connection locked to read a
-//! chunk. That is correct and it is also a queue: the two hundred and eighty-nine
-//! chunks of an initial join are generated and serialised while the lock is
-//! held, which is about a second during which no other player can generate
-//! anything. Two players joining means the second waits for the first.
+//! chunk, which is a queue: the two hundred and eighty-nine chunks of an
+//! initial join are generated while the lock is held, and a second player waits
+//! for the first.
 //!
 //! Moving the world onto a thread of its own fixes that in the direction that
-//! matters. A connection no longer touches the world at all: it asks for a chunk
-//! and waits for the bytes. The work is still serialised, because one world with
-//! one writer is a much easier thing to be correct about than one world with
-//! several, but it is serialised on a thread that is doing nothing else, and the
-//! connections waiting on it are not holding anything up.
-//!
-//! This is the shape the game's own server uses, and for the same reason.
-//!
-//! # What the loop does per tick
-//!
-//! Nothing yet, and it would be dishonest to imply otherwise. It ticks, and the
-//! things it will do each tick are not written: the world clock, which is not
-//! even sent yet, and mining progress. The point of landing this first is that
-//! every one of those needs a tick, and a tick needs somewhere to live that is
-//! not a connection thread that is blocked on a socket.
+//! matters. A connection no longer touches the world at all: it asks for a
+//! chunk and waits for the bytes. The work is still serialised, because one
+//! world with one writer is a much easier thing to be correct about, but it is
+//! serialised on a thread that is doing nothing else.
 //!
 //! # Where this stops being enough
 //!
-//! One world on one thread caps chunk generation at one core. That is the right
-//! first answer and it will not be the last: splitting the world across threads
-//! wants the world partitioned, and that is a much larger change than a channel.
+//! One world on one thread caps chunk generation at one core. Splitting the
+//! world across threads wants the world partitioned, and that is a much larger
+//! change than a channel.
 
 use crate::world::chunk::Chunk;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
@@ -260,20 +248,15 @@ impl WorldHandle {
     /// `None` comes back now; asking again later returns it.
     ///
     /// The point of not waiting is the player this is called for. Generating a
-    /// chunk is the expensive half of answering, and doing it on the world's own
-    /// thread meant a player walking into new terrain stopped answering their
-    /// socket while it happened — so they sent no movement, and everyone
-    /// watching saw them stand still for as long as the ground took to build.
-    /// The client's own hitch is the client's; that one was ours.
+    /// chunk on the world's own thread meant a player walking into new terrain
+    /// stopped answering their socket while it happened, so everyone watching
+    /// saw them stand still for as long as the ground took to build.
     pub fn want_chunk(&self, pos: ChunkPos) -> Option<Vec<u8>> {
         // The cheap question first: is it here? A hash lookup against the
         // world's own record, with no thread woken and no message sent.
         //
         // This is the difference between asking the world's thread a few hundred
-        // times per pass — once per chunk in the ring a player is walking into,
-        // every pass, for as long as the pool is working — and asking it only
-        // about chunks that have actually turned up. That was roughly a third of
-        // the world's thread, spent answering no.
+        // times per pass and asking it only about chunks that have turned up.
         if !self.pool.is_known(pos) {
             if self.pool.claim(pos) {
                 // Nothing else has this one. If the pool has gone, undo the claim
@@ -444,18 +427,11 @@ impl WorldHandle {
 
 /// How many terrain workers to run on a machine with `cores` of it.
 ///
-/// Kept apart from the thread spawning so it can be checked rather than
-/// guessed. It was four, hard, and the fault only shows on a machine that does
-/// not have four cores: half the CPU sits idle, and the opening batch of chunks
-/// takes twice as long as it should. On eight cores that was five to eight
-/// seconds of a player waiting to arrive.
-///
-/// The bounds matter more than the subtraction. At least two, so a small machine
-/// still builds chunks in parallel with its world thread, but never more than
-/// the machine has cores, since a thread that has nothing to run on costs a
-/// context switch and buys nothing. At most eight, so a large one does not
-/// starve the connection threads, which answer keep alives and movement and are
-/// the ones that notice when the pool falls behind.
+/// The bounds matter more than the subtraction. At least two, so a small
+/// machine still builds chunks in parallel with its world thread, but never more
+/// than the machine has cores. At most eight, so a large one does not starve
+/// the connection threads, which answer keep alives and movement and are the
+/// ones that notice when the pool falls behind.
 fn worker_count(cores: usize) -> usize {
     cores.saturating_sub(2).clamp(2, 8).min(cores)
 }
@@ -507,18 +483,10 @@ pub fn spawn() -> WorldHandle {
     // block palette, so any number of these can run at once with nothing to
     // share and nothing to lock.
     //
-    // How many used to be four, written down because the machine it was written
-    // on had four real cores. That is a guess with a shelf life, and it expired:
-    // on eight cores it used half the machine, which showed up as a player
-    // waiting five to eight seconds for their opening batch of two hundred and
-    // eighty-nine chunks, and a second player waiting longer still behind them
-    // in the queue.
-    //
-    // Asked for instead, and never all of them: the world thread above needs
-    // one, the connection threads want to keep answering keep alives and
-    // movement, and the mesh and lighting are done by whoever picked the chunk
-    // up. A pool that takes every core leaves nothing for the threads whose job
-    // is to notice the pool is behind.
+    // Never all of them: the world thread above needs one, the connection
+    // threads want to keep answering keep alives and movement, and a pool that
+    // takes every core leaves nothing for the threads whose job is to notice
+    // the pool is behind.
     let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
     let workers = worker_count(cores);
     for worker in 0..workers {
@@ -1064,11 +1032,10 @@ pub fn block_for_name(
     // The world's own block with that name, if it has one.
     //
     // A world read from a file has its own dirt and its own grass, registered
-    // under the game's names, and they are not the blocks the generator made:
-    // the generator's dirt is called "dirt" and the world's is called
-    // "minecraft:dirt". Putting the generator's block into a world that came
-    // from a file is putting a different block there, and a block the game
-    // will not recognise when the world is saved and read again.
+    // under the game's names, and they are not the blocks the generator made.
+    // Putting the generator's block into a world that came from a file is
+    // putting a different block there, and a block the game will not recognise
+    // when the world is saved and read again.
     if let Some(id) = registry.id(name) {
         return Some(id);
     }

@@ -4,31 +4,16 @@
 //! server to say which registries and feature flags apply, and will not accept
 //! a world without being told.
 //!
-//! Registries are not sent. A Minecraft 26.3 client carries its own, built from
-//! the same jar the server came from, and falls back to them when the server
-//! sends nothing:
-//!
-//! ```java
-//! // RegistryDataCollector, decompiled
-//! if (this.contentsCollector != null) { ... }
-//! else { registries = originalRegistries; }
-//! ```
-//!
-//! `contentsCollector` is only created when a registry_data packet arrives, so a
-//! server that sends none never creates it and the client uses its own. Sending
-//! registries is only needed to override them, which a datapack does.
+//! Registries are not sent. A 26.3 client carries its own and falls back to
+//! them when the server sends nothing, and sending registries is only needed to
+//! override them, which a datapack does.
 //!
 //! Tags have to be sent regardless, and this is the part that is not optional.
-//! The same collector keeps a second structure:
-//!
-//! ```java
-//! if (this.tagCollector != null) { this.tagCollector.loadOnlyTags(...); }
-//! ```
-//!
-//! `tagCollector` is null unless an update_tags packet arrives, so nothing is
-//! loaded and the client's own tag list is never built. The first tag it then
-//! looks for while assembling its components is `minecraft:damage_type/minecraft:is_fire`,
-//! and the state it does not exist fails on the spot:
+//! The collector that reads them is only created when an update_tags packet
+//! arrives, so a server that sends none never builds the client's tag list.
+//! The first tag it then looks for while assembling its components is
+//! `minecraft:damage_type/minecraft:is_fire`, and the state it does not exist
+//! fails on the spot:
 //!
 //! ```text
 //! java.lang.IllegalStateException:

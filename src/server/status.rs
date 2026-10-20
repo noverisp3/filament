@@ -1400,6 +1400,12 @@ fn play(
                                         &log,
                                         entity_id,
                                     )?;
+                                    // Nothing that hurts a dead player hurts
+                                    // them again, and the client is waiting to
+                                    // be told that it is time to come back.
+                                    if health <= 0.0 {
+                                        dead = true;
+                                    }
                                 }
                             }
                             fall_distance = 0.0;
@@ -3100,6 +3106,16 @@ fn hurt(
     let mut body = Vec::new();
     crate::protocol::play::write_hurt_animation(&mut body, entity_id, 0.0);
     enc.encode(&body, out).map_err(io_err)?;
+
+    if *health <= 0.0 {
+        // The news that the player died, which is what puts the death screen
+        // up. The client does not decide on its own that a health of zero
+        // means death; it is told, and a health of zero on its own leaves the
+        // player standing there with an empty bar.
+        let mut body = Vec::new();
+        crate::protocol::play::write_player_combat_kill(&mut body, entity_id, "You died!");
+        enc.encode(&body, out).map_err(io_err)?;
+    }
 
     log.note(format!("hurt for {damage}, {health} health left"));
     Ok(())

@@ -102,8 +102,12 @@ pub fn surface_y(world_x: f64, world_z: f64) -> i32 {
 /// was the second bug rather than the first: see the delta range in
 /// [`crate::server::broadcast`].
 pub fn spawn_point() -> (f64, f64, f64) {
-    const X: f64 = 0.5;
-    const Z: f64 = 0.5;
+    // Whole numbers, because that is where the terrain is generated: the
+    // chunks fill column by column at integer coordinates, so the surface at
+    // half a block is the surface of a different column, and a spawn taken
+    // from it is a player standing in the air next to the ground.
+    const X: f64 = 0.0;
+    const Z: f64 = 0.0;
     (X, surface_y(X, Z) as f64 + 1.0, Z)
 }
 

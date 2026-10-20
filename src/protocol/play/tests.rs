@@ -17,6 +17,25 @@ fn take_varint(b: &mut &[u8]) -> i32 {
 }
 
 #[test]
+fn the_news_of_a_death_is_a_player_and_a_message() {
+    // The client does not decide on its own that a health of zero means death:
+    // it is told, and this is the telling. The message is a component, and a
+    // component in a packet is one NBT tag -- a plain text one is a string tag.
+    let mut body = Vec::new();
+    write_player_combat_kill(&mut body, 7, "You died!");
+
+    let mut r = &body[..];
+    let (VarInt(packet), _) = VarInt::read(&mut r).expect("a packet id");
+    assert_eq!(packet, id::PLAYER_COMBAT_KILL);
+    let (VarInt(player), _) = VarInt::read(&mut r).expect("a player id");
+    assert_eq!(player, 7);
+    assert_eq!(r[0], 0x08, "a string tag");
+    let len = u16::from_be_bytes([r[1], r[2]]) as usize;
+    assert_eq!(&r[3..3 + len], b"You died!");
+    assert_eq!(r.len(), 3 + len, "and nothing after the message");
+}
+
+#[test]
 fn the_pong_carries_the_ping_back_unchanged() {
     // The client pings every tick and works the round trip out of the
     // difference between the two. The payload is a fixed long on both sides,

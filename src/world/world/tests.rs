@@ -413,6 +413,23 @@ fn many_changed_chunks_in_one_region_are_all_saved() {
 }
 
 #[test]
+fn a_made_world_spawns_on_its_ground_and_not_in_the_air() {
+    // A spawn in the air is a player who falls the whole way down and dies on
+    // arrival. A world read from a file has the spawn the game chose; a world
+    // made here has the ground it generated, and that is where the player
+    // stands.
+    let world = World::generate(1);
+    let (x, y, z) = world.spawn_point();
+    let air = world.registry().id("air").expect("registered");
+    let at = BlockPos::new(x, y - 1, z);
+    assert_ne!(
+        world.block(at),
+        Some(air),
+        "there is ground under the spawn at {at:?}"
+    );
+}
+
+#[test]
 fn the_day_counter_comes_from_the_clock_file() {
     // The game moved the day counter out of the level file and into a clock
     // file of its own, so a world written by the game has no DayTime in it at

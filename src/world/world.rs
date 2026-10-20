@@ -128,6 +128,13 @@ pub struct World {
     /// the game chose, and arriving somewhere else is arriving in the wrong
     /// place.
     spawn: (i32, i32, i32),
+
+    /// Whether the spawn came from the world file.
+    ///
+    /// A world that was made here rather than read has no file to ask, and
+    /// the ground it generated is the only answer there is: a spawn in the air
+    /// is a player who falls the whole way down and dies on arrival.
+    spawn_from_file: bool,
 }
 
 impl BlockEdit {
@@ -172,6 +179,7 @@ impl Clone for World {
             // worlds writing the same region files.
             store: None,
             spawn: self.spawn,
+            spawn_from_file: self.spawn_from_file,
         }
     }
 }
@@ -208,6 +216,7 @@ impl World {
         light_stale: false,
         store: store.map(std::sync::Arc::new),
         spawn: (0, 64, 0),
+        spawn_from_file: false,
     };
 
     // The clock the world was saved with. A restart that wound `Time` back
@@ -240,6 +249,7 @@ impl World {
             && pos.len() >= 3
         {
             world.spawn = (pos[0], pos[1], pos[2]);
+            world.spawn_from_file = true;
         }
     }
     world
@@ -353,7 +363,13 @@ impl World {
 
     /// Where a player arrives, in blocks.
     pub fn spawn_point(&self) -> (i32, i32, i32) {
-        self.spawn
+        if self.spawn_from_file {
+            return self.spawn;
+        }
+        // A world made here rather than read: the ground it generated is the
+        // answer, and the surface of it is where a player stands.
+        let (x, y, z) = crate::world::terrain::spawn_point();
+        (x as i32, y as i32, z as i32)
     }
 
     /// Ticks since the world began.
@@ -640,6 +656,7 @@ impl World {
             light_changes: Vec::new(),
             light_stale: false,
             spawn: (0, 64, 0),
+            spawn_from_file: false,
         };
 
         // Through `store_chunk`, so that every chunk has its light worked out

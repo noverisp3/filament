@@ -101,6 +101,10 @@ pub mod id {
     pub const RESPAWN: i32 = 84;
     // The red flash when a player is hurt: which entity, and which way.
     pub const HURT_ANIMATION: i32 = 43;
+    // The news that a player died. This is what puts the death screen up: the
+    // client does not decide on its own that a health of zero means death, it
+    // is told, and this is the telling.
+    pub const PLAYER_COMBAT_KILL: i32 = 69;
     // The client asking to come back to life, and asking for its statistics.
     pub const SERVERBOUND_CLIENT_COMMAND: i32 = 12;
     // And that this one is settled, not a guess.
@@ -690,6 +694,19 @@ pub fn write_hurt_animation(out: &mut Vec<u8>, entity_id: i32, yaw: f32) {
     // Which way the hit came from, in degrees. Zero is straight ahead, which
     // is what a fall from above looks like.
     out.extend_from_slice(&yaw.to_be_bytes());
+}
+
+/// Writes the news that a player died.
+///
+/// The client does not work out on its own that a health of zero means
+/// death: it is told, and this is the telling. The message is the line the
+/// chat shows, and the entity id is the player it happened to.
+pub fn write_player_combat_kill(out: &mut Vec<u8>, player_id: i32, message: &str) {
+    VarInt(id::PLAYER_COMBAT_KILL).write(out);
+    VarInt(player_id).write(out);
+    // A component, which in a packet is one NBT tag: a plain text one is a
+    // string tag.
+    crate::world::nbt::write_string_tag(out, message);
 }
 
 /// Writes the packet that puts a dead player back in the world.

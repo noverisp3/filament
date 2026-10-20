@@ -1399,6 +1399,7 @@ fn play(
                                         &enc,
                                         &log,
                                         entity_id,
+                                        (player.x as i32, player.y as i32, player.z as i32),
                                     )?;
                                     // Nothing that hurts a dead player hurts
                                     // them again, and the client is waiting to
@@ -2254,6 +2255,26 @@ fn place_block(
                                     (bx, by, bz),
                                     was,
                                     false,
+                                );
+                                effects.push(effect);
+
+                                // And the sound of the block breaking, which
+                                // the game plays and the client only hears.
+                                // Which sound depends on what was broken, and
+                                // the state id is what says what it was.
+                                let mut effect = Vec::new();
+                                p::write_sound(
+                                    &mut effect,
+                                    &p::Sound {
+                                        id: break_sound_of(was),
+                                        source: p::sound::SOURCE_BLOCK,
+                                        x: bx,
+                                        y: by,
+                                        z: bz,
+                                        volume: 1.0,
+                                        pitch: 1.0,
+                                        seed: 0,
+                                    },
                                 );
                                 effects.push(effect);
 
@@ -3143,6 +3164,7 @@ fn hurt(
     enc: &FrameEncoder,
     log: &ConnLog,
     entity_id: i32,
+    at: (i32, i32, i32),
 ) -> std::io::Result<()> {
     *health = (*health as f64 - damage).max(0.0) as f32;
 
@@ -3164,10 +3186,63 @@ fn hurt(
         let mut body = Vec::new();
         crate::protocol::play::write_player_combat_kill(&mut body, entity_id, "You died!");
         enc.encode(&body, out).map_err(io_err)?;
+
+        // And the sound of it. A client does not make a noise of its own
+        // accord: the game plays the sound of a player dying, and the sound is
+        // a number the client has in its registry.
+        let mut body = Vec::new();
+        crate::protocol::play::write_sound(
+            &mut body,
+            &crate::protocol::play::Sound {
+                id: crate::protocol::play::sound::PLAYER_DEATH,
+                source: crate::protocol::play::sound::SOURCE_PLAYER,
+                x: at.0,
+                y: at.1,
+                z: at.2,
+                volume: 1.0,
+                pitch: 1.0,
+                seed: 0,
+            },
+        );
+        enc.encode(&body, out).map_err(io_err)?;
+    } else {
+        // The sound of being hurt, which the game plays and the client only
+        // hears.
+        let mut body = Vec::new();
+        crate::protocol::play::write_sound(
+            &mut body,
+            &crate::protocol::play::Sound {
+                id: crate::protocol::play::sound::PLAYER_HURT,
+                source: crate::protocol::play::sound::SOURCE_PLAYER,
+                x: at.0,
+                y: at.1,
+                z: at.2,
+                volume: 1.0,
+                pitch: 1.0,
+                seed: 0,
+            },
+        );
+        enc.encode(&body, out).map_err(io_err)?;
     }
 
     log.note(format!("hurt for {damage}, {health} health left"));
     Ok(())
+}
+
+/// The sound a block makes when it breaks.
+///
+/// Which sound it is depends on what was broken, and the state id says what
+/// that was. The ids are the registry ids the client knows the sounds by, from
+/// the data generator's report.
+fn break_sound_of(state: i32) -> i32 {
+    use crate::protocol::play::sound;
+    match crate::server::ticking::state_id_name(state) {
+        "minecraft:grass_block" | "minecraft:tall_grass" | "minecraft:fern" => sound::GRASS_BREAK,
+        "minecraft:stone" | "minecraft:cobblestone" | "minecraft:deepslate" => sound::STONE_BREAK,
+        "minecraft:gravel" => sound::GRAVEL_BREAK,
+        "minecraft:oak_log" | "minecraft:spruce_log" | "minecraft:birch_log" => sound::WOOD_BREAK,
+        _ => sound::GRASS_BREAK,
+    }
 }
 
 /// Answers a command, the way the game does.

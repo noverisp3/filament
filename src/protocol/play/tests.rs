@@ -55,6 +55,41 @@ fn the_pong_carries_the_ping_back_unchanged() {
 }
 
 #[test]
+fn a_sound_is_a_registry_id_a_source_a_place_and_two_numbers() {
+    // The order the game writes: the sound, the source, the place it comes
+    // from, how loud, how high pitched, and a seed.
+    let mut body = Vec::new();
+    write_sound(
+        &mut body,
+        &Sound {
+            id: sound::PLAYER_HURT,
+            source: sound::SOURCE_PLAYER,
+            x: 1,
+            y: 2,
+            z: 3,
+            volume: 0.5,
+            pitch: 1.0,
+            seed: 0,
+        },
+    );
+
+    let mut r = &body[..];
+    let (VarInt(packet), _) = VarInt::read(&mut r).expect("a packet id");
+    assert_eq!(packet, id::SOUND);
+    let (VarInt(which), _) = VarInt::read(&mut r).expect("the sound");
+    assert_eq!(which, sound::PLAYER_HURT);
+    let (VarInt(source), _) = VarInt::read(&mut r).expect("the source");
+    assert_eq!(source, sound::SOURCE_PLAYER);
+    assert_eq!(i32::from_be_bytes(r[..4].try_into().unwrap()), 1, "x");
+    assert_eq!(i32::from_be_bytes(r[4..8].try_into().unwrap()), 2, "y");
+    assert_eq!(i32::from_be_bytes(r[8..12].try_into().unwrap()), 3, "z");
+    assert_eq!(f32::from_be_bytes(r[12..16].try_into().unwrap()), 0.5, "the volume");
+    assert_eq!(f32::from_be_bytes(r[16..20].try_into().unwrap()), 1.0, "the pitch");
+    assert_eq!(i64::from_be_bytes(r[20..28].try_into().unwrap()), 0, "the seed");
+    assert_eq!(r.len(), 28, "and nothing after it");
+}
+
+#[test]
 fn a_line_of_chat_is_a_tag_and_a_byte() {
     // The content of a chat line is a component, and a component in a packet
     // is one NBT tag with no name in front of it. A plain text one is a

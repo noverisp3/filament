@@ -105,6 +105,8 @@ pub mod id {
     // client does not decide on its own that a health of zero means death, it
     // is told, and this is the telling.
     pub const PLAYER_COMBAT_KILL: i32 = 69;
+    // A sound, for a client to play.
+    pub const SOUND: i32 = 119;
     // The client asking to come back to life, and asking for its statistics.
     pub const SERVERBOUND_CLIENT_COMMAND: i32 = 12;
     // And that this one is settled, not a guess.
@@ -686,6 +688,67 @@ pub fn write_set_experience(out: &mut Vec<u8>, progress: f32, level: i32, total:
     out.extend_from_slice(&progress.to_be_bytes());
     VarInt(level).write(out);
     VarInt(total).write(out);
+}
+
+/// A sound to play, and where it comes from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Sound {
+    /// The registry id of the sound.
+    pub id: i32,
+    /// Which slider it plays on: `sound::SOURCE_PLAYER` and the rest.
+    pub source: i32,
+    /// Where it comes from, in blocks.
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    /// How loud, and how high pitched.
+    pub volume: f32,
+    pub pitch: f32,
+    /// A seed the client uses to vary the sound, so two of the same do not
+    /// sound identical.
+    pub seed: i64,
+}
+
+/// Writes a sound, so a client can hear it.
+///
+/// The sound is a registry id, the source is which slider it plays on, and
+/// then the place it comes from, how loud, how high pitched, and a seed the
+/// client uses to vary the sound so two of the same do not sound identical.
+pub fn write_sound(out: &mut Vec<u8>, sound: &Sound) {
+    VarInt(id::SOUND).write(out);
+    VarInt(sound.id).write(out);
+    VarInt(sound.source).write(out);
+    out.extend_from_slice(&sound.x.to_be_bytes());
+    out.extend_from_slice(&sound.y.to_be_bytes());
+    out.extend_from_slice(&sound.z.to_be_bytes());
+    out.extend_from_slice(&sound.volume.to_be_bytes());
+    out.extend_from_slice(&sound.pitch.to_be_bytes());
+    out.extend_from_slice(&sound.seed.to_be_bytes());
+}
+
+/// The sound of a player being hurt, and of one dying.
+///
+/// The ids are the registry ids the client knows them by, taken from the data
+/// generator's report (`extracted/registries.json`, the `minecraft:sound_event`
+/// registry), because a sound is a number on the wire and the number has to be
+/// the one the client has.
+pub mod sound {
+    /// A player being hurt.
+    pub const PLAYER_HURT: i32 = 1316;
+    /// A player dying.
+    pub const PLAYER_DEATH: i32 = 1315;
+    /// A block of grass being broken.
+    pub const GRASS_BREAK: i32 = 759;
+    /// A block of stone being broken.
+    pub const STONE_BREAK: i32 = 1600;
+    /// A block of gravel being broken.
+    pub const GRAVEL_BREAK: i32 = 764;
+    /// A block of wood being broken.
+    pub const WOOD_BREAK: i32 = 1857;
+
+    /// Which slider a sound plays on. The order is the enum's own.
+    pub const SOURCE_PLAYER: i32 = 6;
+    pub const SOURCE_BLOCK: i32 = 3;
 }
 
 pub fn write_hurt_animation(out: &mut Vec<u8>, entity_id: i32, yaw: f32) {

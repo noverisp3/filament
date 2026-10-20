@@ -4,7 +4,7 @@
 //! the protocol: a chunk is 16 by 384 by 16, which is 24 sections of 16 cubed.
 //!
 //! Everything here follows the decompiled 26.3 server rather than older
-//! versions of the protocol, which differ in ways that are easy to get wrong:
+//! versions of the protocol:
 //!
 //! * `ClientboundLevelChunkPacketData` is a map of heightmaps, a length-prefixed
 //!   byte buffer holding every section back to back, and a list of block
@@ -12,12 +12,6 @@
 //!   the reader walks it knowing there are twenty-four.
 //! * Each section is two shorts, then the block states as a paletted container,
 //!   then the biomes as another one.
-//! * `initialize_border` is not a precedent for anything here: it is a different
-//!   packet with its own layout.
-//!
-//! What is sent is an empty world: air everywhere, full skylight, no block light.
-//! That is not a stub, it is what a chunk of nothing looks like, and it is the
-//! state the world storage starts in.
 
 use crate::protocol::VarInt;
 use crate::world::chunk::{MIN_LIGHT_SECTION_Y, MIN_SECTION_Y};
@@ -32,12 +26,8 @@ use crate::world::chunk::{MIN_LIGHT_SECTION_Y, MIN_SECTION_Y};
 /// ```
 ///
 /// The world's own bottom section (y = -64) is therefore bit 1 and bit 0 is
-/// the padding section below the world, which holds nothing. The capture of a
-/// stock server says the same: the chunk whose ground is in its lowest
-/// section names that section bit 1, and leaves bit 0 to the padding.
-///
-/// A section one too low is a lamp lighting the floor below it, so the
-/// numbering is not a detail of the packet but the whole of it.
+/// the padding section below the world, which holds nothing. A section one too
+/// low is a lamp lighting the floor below it.
 fn light_bit(section_y: i32) -> usize {
     (section_y - MIN_LIGHT_SECTION_Y) as usize
 }
@@ -319,11 +309,12 @@ fn write_block_states(out: &mut Vec<u8>, states: &[i32]) {
     // The width the game's own `Strategy.getConfigurationForBitCount` picks
     // for this many entries. One through sixteen share the four-bit linear
     // palette; seventeen to two hundred and fifty-six grow a hashmap palette
-    // one bit at a time; past that the palette is dropped entirely and the
-    // entries are global state ids. Writing one width while packing another
-    // is the LinearPalette crash a second player's chunk produced: a real
-    // world has more than sixteen kinds of block in one section, and the
-    // four-bit index wrapped into the neighbouring entry.
+    // one bit at a time; past that the palette is dropped entirely.
+    //
+    // Writing one width while packing another is the LinearPalette crash a
+    // second player's chunk produced: a real world has more than sixteen kinds
+    // of block in one section, and the four-bit index wrapped into the
+    // neighbouring entry.
     let bits = if palette.len() <= 16 {
         BLOCK_BITS
     } else if palette.len() <= 1 << GLOBAL_BITS_THRESHOLD {
@@ -446,13 +437,9 @@ fn write_light(out: &mut Vec<u8>, sky: &[Option<Vec<u8>>], block: &[Option<Vec<u
 /// that many bytes, and the bytes are the shortest that reach the highest bit
 /// set.
 ///
-/// Not a VarInt count of sixty-four bit words, which is the obvious reading of "a
-/// bit set" and the one written first. That made the client fail to decode the
-/// chunk, because it read one long's worth of mask as a single byte and then
-/// took the rest of the mask for the light layers.
-///
-/// Twenty-four sections set means the highest bit is twenty-three, which is in
-/// the third byte: three bytes of FF.
+/// Not a VarInt count of sixty-four bit words, which is the obvious reading of
+/// "a bit set" and the one written first: that made the client read one long's
+/// worth of mask as a single byte and take the rest for the light layers.
 fn write_bit_set(out: &mut Vec<u8>, mask: &[u8]) {
     VarInt(mask.len() as i32).write(out);
     out.extend_from_slice(mask);
@@ -483,8 +470,7 @@ pub fn write_light_update(
     // The list holds one array for each section in the first mask, in the same
     // order: the client walks the mask and takes the next array for each bit
     // it finds. A section with no light in it is named in the second mask
-    // instead and gets no array at all, which is what the capture shows: two
-    // sections lit, one empty, two arrays.
+    // instead and gets no array at all.
     let mut present: Vec<u8> = Vec::new();
     let mut empty: Vec<u8> = Vec::new();
     let mut updates: Vec<Vec<u8>> = Vec::new();

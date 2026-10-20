@@ -1,36 +1,15 @@
 //! What a player does with what they are carrying.
 //!
-//! A broken block going into a hotbar is only half the story. The moment the
-//! player touches it -- picks it up, drags it, presses a number to swap it, drops
-//! it on the floor -- the client has done something the server knows nothing
-//! about, and a server that keeps its own tally anyway is holding a number that
-//! has stopped being true. It then reports slots that have not changed and
-//! misses ones that have, and the two copies drift apart for as long as the
-//! player is online.
+//! The client does not describe the click, it reports the *result* of it: every
+//! slot that changed goes back with its new contents, along with whatever is
+//! left on the cursor. This server never has to understand a drag to know what
+//! a drag did.
 //!
-//! So the server has to learn. The wire in 26.3 makes that cheap, which is
-//! lucky: the client does not describe the click, it reports the *result* of it.
-//! Every slot that changed goes back with its new contents, along with whatever
-//! is left on the cursor. That means this server never has to understand a drag
-//! to know what a drag did.
-//!
-//! It does not mean the client gets the last word, though. Vanilla reads those
-//! reported slots as a prediction and compares:
-//!
-//! ```java
-//! this.player.containerMenu.suppressRemoteUpdates();
-//! this.player.containerMenu.clicked(slotIndex, packet.buttonNum(), packet.containerInput(), this.player);
-//! for (Entry<HashedStack> e : Int2ObjectMaps.fastIterable(packet.changedSlots())) {
-//!     this.player.containerMenu.setRemoteSlotUnsafe(e.getIntKey(), e.getValue());
-//! }
-//! this.player.containerMenu.setRemoteCarried(packet.carriedItem());
-//! this.player.containerMenu.resumeRemoteUpdates();
-//! ```
-//!
-//! and then, per slot, sends its own value wherever the two disagree
-//! (`AbstractContainerMenu.synchronizeSlotToRemote`). So the server computes the
-//! click, the client is told only when its guess was wrong, and the server stays
-//! the authority. That is what [`click`] and [`Click::changed`] are for.
+//! It does not mean the client gets the last word. Vanilla reads those reported
+//! slots as a prediction and compares, and then sends its own value wherever
+//! the two disagree (`AbstractContainerMenu.synchronizeSlotToRemote`). The
+//! server computes the click, the client is told only when its guess was wrong,
+//! and the server stays the authority. That is what [`click`] is for.
 
 use super::item::{ItemStack, Inventory, MAX_STACK};
 use super::item::slots;
@@ -119,10 +98,9 @@ fn read_varint(body: &mut &[u8]) -> Result<i32, DecodeError> {
 
 impl ContainerClickPacket {
     pub fn read(frame: &[u8]) -> Result<Self, DecodeError> {
-        // Step over the id first, and check it. The frame handed to a decoder
-        // still carries it, because that is what the wire carries; a decoder
-        // that starts on the id reads 18 as the container id, which is a small
-        // perfectly ordinary number, so nothing fails until two fields later.
+        // Step over the id first, and check it. A decoder that starts on the id
+        // reads 18 as the container id, which is a small perfectly ordinary
+        // number, so nothing fails until two fields later.
         let mut body =
             crate::protocol::play::serverbound_body(frame, crate::protocol::play::id::SERVERBOUND_CONTAINER_CLICK)?;
 
@@ -130,12 +108,10 @@ impl ContainerClickPacket {
         let state_id = read_varint(&mut body)?;
         let slot = read_short(&mut body)?;
         let button = read_byte(&mut body)?;
-        // A VarInt, not a byte. `ContainerInput.STREAM_CODEC` is
-        // `ByteBufCodecs.idMapper`, which reads and writes a VarInt. Every id
-        // the game has is under 128 so it happens to occupy one byte either way,
-        // which makes the difference invisible until the first id that does not
-        // -- and it is worth reading the way it is written rather than the way
-        // that happens to work today.
+        // A VarInt, not a byte: `ContainerInput.STREAM_CODEC` is
+        // `ByteBufCodecs.idMapper`. Every id the game has is under 128, so it
+        // happens to occupy one byte either way, which makes the difference
+        // invisible until the first id that does not.
         let input = ContainerInput::from_id(read_varint(&mut body)?);
 
         let count = read_count(&mut body, MAX_CHANGED)?;
@@ -190,14 +166,12 @@ fn read_count(body: &mut &[u8], max: i32) -> Result<i32, DecodeError> {
 /// One reported stack.
 ///
 /// `HashedStack.STREAM_CODEC` is `ByteBufCodecs.optional(...)`, which is a plain
-/// boolean byte and then the value -- so nothing at all is one byte.
+/// boolean byte and then the value, so nothing at all is one byte.
 ///
 /// The components are read rather than skipped, because skipping past a length
-/// that was never checked is how a packet lands one field out and the *next*
-/// packet is the one that goes wrong, somewhere unrelated and much later. A
-/// stack carrying components is refused instead: this server has nothing that
-/// produces one, so meeting one means the two sides disagree about what an item
-/// is, and quietly dropping half of it would be worse than saying so.
+/// that was never checked is how a packet lands one field out. A stack
+/// carrying components is refused: this server has nothing that produces one,
+/// so meeting one means the two sides disagree about what an item is.
 fn read_hashed_stack(body: &mut &[u8]) -> Result<Option<ItemStack>, DecodeError> {
     if !read_bool(body)? {
         return Ok(None);
@@ -245,13 +219,10 @@ fn read_byte(body: &mut &[u8]) -> Result<u8, DecodeError> {
 
 /// A `Short` as the game writes one.
 ///
-/// Big endian. `FriendlyByteBuf.writeShort` calls netty's `writeShort`, which
-/// is big endian, and the `ShortLE` variants are the separate little-endian ones
-/// -- so a slot read little-endian is a different number, usually out of range,
-/// and the click that follows it is read from the wrong place. This file was the
-/// only one in the crate reading them the other way round, which is exactly how
-/// a lone wrong endianness survives: nothing local looks odd, the packet simply
-/// stops making sense three fields later.
+/// Big endian: `FriendlyByteBuf.writeShort` calls netty's `writeShort`, and the
+/// `ShortLE` variants are the separate little-endian ones. A slot read
+/// little-endian is a different number, usually out of range, and the click
+/// that follows it is read from the wrong place.
 fn read_short(body: &mut &[u8]) -> Result<i16, DecodeError> {
     if body.len() < 2 {
         return Err(DecodeError::UnexpectedEof {
@@ -292,28 +263,21 @@ pub struct Click {
 ///
 /// **The server does not use this any more, and it is not to be used again.**
 ///
-/// The game simulates the click and then corrects the client wherever the two
-/// disagree: it is authoritative over every slot, which is a strong guarantee
-/// bought with code that has to model crafting grids, armour slots, fuel rules
-/// and stack limits -- none of which exist here. It was also wrong three times
-/// before it ever ran against a real client.
+/// The game simulates the click and corrects the client wherever the two
+/// disagree, which is a strong guarantee bought with code that has to model
+/// crafting grids, armour slots, fuel rules and stack limits. None of those
+/// exist here, and it was wrong three times before it ever ran against a real
+/// client.
 ///
-/// What the server does instead is take the client's word for the layout -- the
-/// slots that changed, with what is in them now -- and check the totals against
-/// what the player was issued. That is [`crate::protocol::item::Allowance`], and
-/// the check is one number per item instead of a simulation of a window.
-///
-/// So this is here as the record of what was replaced, and it is the wrong shape
-/// for this server: a server that models every slot has to know what a click
-/// means, and this one does not. It is not the authority over the player's
-/// pockets here, and nothing in the server calls it.
+/// What the server does instead is take the client's word for the layout and
+/// check the totals against what the player was issued, which is
+/// [`crate::protocol::item::Allowance`]: one number per item instead of a
+/// simulation of a window.
 ///
 /// Only the twenty-seven carried slots and the nine on the hotbar are live. The
-/// crafting result, the four crafting slots, the armour and the off hand are
-/// wired up on the client and have nothing behind them here, so a click on one is
-/// refused rather than answered from an imaginary inventory -- and refusing it
-/// makes the server send its own answer, which empties the slot on the player's
-/// screen instead of leaving something there the server has never heard of.
+/// crafting result, the armour and the off hand are wired up on the client and
+/// have nothing behind them here, so a click on one is refused rather than
+/// answered from an imaginary inventory.
 pub fn click(
     inventory: &mut Inventory,
     carried: &mut Option<ItemStack>,
@@ -436,10 +400,9 @@ fn quick_move(inventory: &mut Inventory, slot: i16) -> Option<Click> {
 /// Moves a stack into a range of slots, the way `moveItemStackTo` does.
 ///
 /// Two passes, and the order matters. Every slot already holding the same item
-/// is topped up first, and only what is left over goes into empty ones. Doing it
-/// in a single pass over the slots would fill an empty slot one along while a
-/// later slot sat half full with the same thing, which puts dirt in one corner
-/// and an empty hotbar rather than where a player would have put it.
+/// is topped up first, and only what is left over goes into empty ones: a
+/// single pass would fill an empty slot one along while a later slot sat half
+/// full with the same thing.
 fn move_item_stack_to(
     inventory: &mut Inventory,
     stack: &mut ItemStack,

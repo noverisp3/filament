@@ -109,7 +109,7 @@ def main():
     answered = False
     chunks = {}
     deadline = time.time() + 120
-    while time.time() < deadline and len(chunks) < 40:
+    while time.time() < deadline and len(chunks) < 80:
         body = c.recv()
         if body is None:
             time.sleep(0.05)
@@ -145,6 +145,7 @@ def main():
             c.send(28, body[off:])
 
     print(f"{len(chunks)} chunks")
+    print("  " + " ".join(f"{x},{z}" for (x, z) in sorted(chunks)))
 
     # Find a pair that share an edge, and compare the columns along it.
     for (ax, az), _ in sorted(chunks.items()):

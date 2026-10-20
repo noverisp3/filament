@@ -27,25 +27,46 @@ fn a_command_the_server_does_not_know_is_answered_not_ignored() {
     let wire = Arc::new(Broadcast::new());
     assert_eq!(
         run_command("/wibble", &wire, "noverisp3"),
-        "Unknown command or insufficient permissions"
+        Command::Reply("Unknown command or insufficient permissions".to_string())
     );
     // Without the slash, too: the game's own rule is that the slash is
     // optional.
     assert_eq!(
         run_command("wibble", &wire, "noverisp3"),
-        "Unknown command or insufficient permissions"
+        Command::Reply("Unknown command or insufficient permissions".to_string())
     );
 }
 
 #[test]
 fn the_list_command_says_who_is_here() {
     let wire = Arc::new(Broadcast::new());
-    let answer = run_command("/list", &wire, "noverisp3");
+    let Command::Reply(answer) = run_command("/list", &wire, "noverisp3") else {
+        panic!("the list command answers with words");
+    };
     assert!(
         answer.starts_with("There are "),
         "the game says how many are here: {answer}"
     );
     assert!(answer.contains("of a max of 20 players online"), "{answer}");
+}
+
+#[test]
+fn a_command_that_does_something_is_not_just_words() {
+    let wire = Arc::new(Broadcast::new());
+    assert_eq!(run_command("/kill", &wire, "noverisp3"), Command::Kill);
+    assert_eq!(
+        run_command("/time set day", &wire, "noverisp3"),
+        Command::SetTime(1000)
+    );
+    assert_eq!(
+        run_command("/time set night", &wire, "noverisp3"),
+        Command::SetTime(13000)
+    );
+    // A time that is not a number is not a time.
+    assert!(matches!(
+        run_command("/time set wibble", &wire, "noverisp3"),
+        Command::Reply(_)
+    ));
 }
 
 #[test]

@@ -122,6 +122,8 @@ pub enum Command {
     Registry { reply: Sender<crate::world::block::BlockRegistry> },
     /// Where a player arrives, in blocks, as the world file says.
     SpawnPoint { reply: Sender<(i32, i32, i32)> },
+    /// Moves the sun, for the command that does that.
+    SetDayTime { ticks: u64 },
     /// The light of the sections that moved, so a client can be told.
     LightChanges { reply: Sender<LightChanges> },
     /// Works the light of the whole loaded world out again.
@@ -319,6 +321,11 @@ impl WorldHandle {
     /// Works the light of the whole loaded world out again.
     pub fn recompute_light(&self) {
         let _ = self.to_world.send(Command::RecomputeLight);
+    }
+
+    /// Moves the sun, for the command that does that.
+    pub fn set_day_time(&self, ticks: u64) {
+        let _ = self.to_world.send(Command::SetDayTime { ticks });
     }
 
     /// What the world has changed by itself since this was last asked.
@@ -729,6 +736,10 @@ Command::Chunk { pos, reply } => {
             // Settled on the ground: a spawn with nothing under it is a
             // player who falls the whole way down and dies on arrival.
             let _ = reply.send(world.settle_spawn());
+        }
+
+        Command::SetDayTime { ticks } => {
+            world.set_day_time(ticks);
         }
 
         Command::LightChanges { reply } => {

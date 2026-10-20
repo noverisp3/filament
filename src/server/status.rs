@@ -1714,12 +1714,56 @@ fn play(
                 if len >= 0 && len as usize <= r.len() {
                     match std::str::from_utf8(&r[..len as usize]) {
                         Ok(text) => {
-                            let answer = run_command(text, &session.wire, &player_name);
-                            let mut chat = Vec::new();
-                            p::write_system_chat(&mut chat, &answer);
-                            // To the player who asked and to nobody else: a
-                            // command's answer is nobody else's business.
-                            session.wire.send_one(player_id, chat);
+                            match run_command(text, &session.wire, &player_name) {
+                                Command::Reply(answer) => {
+                                    let mut chat = Vec::new();
+                                    p::write_system_chat(&mut chat, &answer);
+                                    // To the player who asked and to nobody
+                                    // else: a command's answer is nobody
+                                    // else's business.
+                                    session.wire.send_one(player_id, chat);
+                                }
+                                Command::Kill => {
+                                    // The same road as a fall that goes all
+                                    // the way: the health goes to nothing and
+                                    // the client is told, which is what puts
+                                    // the death screen up.
+                                    health = 0.0;
+                                    dead = true;
+                                    let mut body = Vec::new();
+                                    p::write_set_health(
+                                        &mut body,
+                                        health,
+                                        MAX_FOOD,
+                                        MAX_SATURATION,
+                                    );
+                                    enc.encode(&body, &mut out).map_err(io_err)?;
+                                    let mut body = Vec::new();
+                                    p::write_player_combat_kill(
+                                        &mut body,
+                                        entity_id,
+                                        "You died!",
+                                    );
+                                    enc.encode(&body, &mut out).map_err(io_err)?;
+                                    log.note("the player killed themselves");
+                                }
+                                Command::SetTime(ticks) => {
+                                    session.world.set_day_time(ticks);
+                                    // And the client is told, so the sun moves
+                                    // there and now rather than at the next
+                                    // beat of the clock.
+                                    if let Some((game_time, _)) = session.world.clock() {
+                                        let mut body = Vec::new();
+                                        p::write_set_time(
+                                            &mut body,
+                                            game_time as i64,
+                                            ticks as i64,
+                                        );
+                                        enc.encode(&body, &mut out).map_err(io_err)?;
+                                    }
+                                    log.note(format!("the time of day is now {ticks}"));
+                                }
+                            }
                         }
                         Err(_) => log.note("ignored a command that was not text"),
                     }
@@ -3225,7 +3269,22 @@ fn hurt(
 ///
 /// The text is the game's own, from `en_us.json`: `commands.help.failed` is
 /// "Unknown command or insufficient permissions".
-fn run_command(text: &str, wire: &Arc<Broadcast>, player_name: &str) -> String {
+/// What a command asked for.
+///
+/// A command is not only words: `/kill` is a request to die, and `/time set
+/// day` is a request to move the sun. So the answer is a thing to do and not
+/// only a line to say.
+#[derive(Debug, PartialEq, Eq)]
+enum Command {
+    /// Say this to the player who asked.
+    Reply(String),
+    /// End the player.
+    Kill,
+    /// Set the time of day, in ticks.
+    SetTime(u64),
+}
+
+fn run_command(text: &str, wire: &Arc<Broadcast>, player_name: &str) -> Command {
     // The game's own rule: a leading slash is optional.
     let command = text.strip_prefix('/').unwrap_or(text);
     let (name, rest) = match command.split_once(' ') {
@@ -3234,7 +3293,7 @@ fn run_command(text: &str, wire: &Arc<Broadcast>, player_name: &str) -> String {
     };
 
     match name {
-        "" => String::new(),
+        "" => Command::Reply(String::new()),
         "list" => {
             let names = wire.names();
             let count = names.len();
@@ -3243,20 +3302,52 @@ fn run_command(text: &str, wire: &Arc<Broadcast>, player_name: &str) -> String {
             } else {
                 names.join(", ")
             };
-            format!("There are {count} of a max of 20 players online: {who}")
+            Command::Reply(format!(
+                "There are {count} of a max of 20 players online: {who}"
+            ))
         }
         "help" => {
             let _ = rest;
-            "Commands: /help, /list".to_string()
+            Command::Reply("Commands: /help, /list, /kill, /time".to_string())
         }
         "me" => {
             if rest.is_empty() {
-                "Unknown command or insufficient permissions".to_string()
+                Command::Reply("Unknown command or insufficient permissions".to_string())
             } else {
-                format!("<{player_name}> {rest}")
+                Command::Reply(format!("<{player_name}> {rest}"))
             }
         }
-        _ => "Unknown command or insufficient permissions".to_string(),
+        "kill" => {
+            let _ = rest;
+            Command::Kill
+        }
+        "time" => {
+            let (what, value) = match rest.split_once(' ') {
+                Some((what, value)) => (what, value.trim()),
+                None => (rest, ""),
+            };
+            match what {
+                "query" => Command::Reply("The time is unknown to this server".to_string()),
+                "set" => match value {
+                    "day" => Command::SetTime(1000),
+                    "night" => Command::SetTime(13000),
+                    "noon" => Command::SetTime(6000),
+                    "midnight" => Command::SetTime(18000),
+                    other => match other.parse::<i64>() {
+                        // The game's own rule: a time is a number of ticks, and
+                        // anything else is not a time.
+                        Ok(ticks) => Command::SetTime(ticks.rem_euclid(24000) as u64),
+                        Err(_) => Command::Reply(
+                            "Incorrect argument for command: expected a time".to_string(),
+                        ),
+                    },
+                },
+                _ => Command::Reply(
+                    "Usage: /time set <day|night|noon|midnight|ticks> or /time query".to_string(),
+                ),
+            }
+        }
+        _ => Command::Reply("Unknown command or insufficient permissions".to_string()),
     }
 }
 

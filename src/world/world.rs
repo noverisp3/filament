@@ -429,6 +429,16 @@ impl World {
         self.day_time
     }
 
+    /// Sets the time of day.
+    ///
+    /// The sun's place is the time of day and not the age: the age is how long
+    /// the world has existed and it does not stop, while the time of day is
+    /// where in the cycle the world is, and a command that sets it moves the
+    /// sun and nothing else.
+    pub fn set_day_time(&mut self, ticks: u64) {
+        self.day_time = ticks;
+    }
+
     /// Promises to come back to this position in `delay` ticks.
     pub fn schedule_tick(&mut self, pos: BlockPos, delay: u64) {
         self.ticks.schedule(self.game_time, delay, pos);

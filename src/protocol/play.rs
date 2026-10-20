@@ -1349,9 +1349,15 @@ pub const ENTITY_DATA_END: u8 = 255;
 
 /// Which piece of an item entity's metadata holds the item.
 ///
-/// Zero: it is the first thing an item entity defines, and the order is the
-/// order the fields are declared on the entity.
-pub const ENTITY_DATA_ITEM: u8 = 0;
+/// Eight, and not zero. The ids of the metadata are not counted per entity
+/// but along the line of ancestors: a class's ids start after the last id its
+/// parent has, and `Entity` has eight of its own -- the flags byte is zero,
+/// the pose is six -- so the first thing an item entity defines is the
+/// eighth.
+///
+/// The client says so if this is wrong, and says it loudly: it is told a
+/// stack where it expects a byte, and it stops.
+pub const ENTITY_DATA_ITEM: u8 = 8;
 
 /// Which serializer reads an item stack, out of the table the game registers
 /// them in.

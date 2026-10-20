@@ -1447,7 +1447,11 @@ fn an_item_entity_is_told_what_it_is_holding() {
 
     // The metadata piece is a byte, and the serializer is a VarInt.
     let accessor = r[0];
-    assert_eq!(accessor, ENTITY_DATA_ITEM, "the item is the first thing");
+    assert_eq!(
+        accessor, 8,
+        "the item is the first thing an item entity defines, and the ids run \
+         on from the eight the entity itself has"
+    );
     r = &r[1..];
     let (VarInt(serializer), _) = VarInt::read(&mut r).expect("a serializer");
     assert_eq!(

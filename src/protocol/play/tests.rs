@@ -77,7 +77,9 @@ fn a_sound_is_a_registry_id_a_source_a_place_and_two_numbers() {
     let (VarInt(packet), _) = VarInt::read(&mut r).expect("a packet id");
     assert_eq!(packet, id::SOUND);
     let (VarInt(which), _) = VarInt::read(&mut r).expect("the sound");
-    assert_eq!(which, sound::PLAYER_HURT);
+    // The wire carries the registry id plus one, because a holder that names
+    // a registry entry is written as its id plus one.
+    assert_eq!(which, sound::PLAYER_HURT + 1);
     let (VarInt(source), _) = VarInt::read(&mut r).expect("the source");
     assert_eq!(source, sound::SOURCE_PLAYER);
     // The place is in eighths of a block.

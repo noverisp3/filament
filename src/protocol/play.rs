@@ -716,7 +716,15 @@ pub struct Sound {
 /// client uses to vary the sound so two of the same do not sound identical.
 pub fn write_sound(out: &mut Vec<u8>, sound: &Sound) {
     VarInt(id::SOUND).write(out);
-    VarInt(sound.id).write(out);
+    // The sound is a **holder**, and a holder that names a registry entry is
+    // written as its id **plus one**: the zero is reserved for a holder that
+    // carries the value itself, in which case the name follows as a string.
+    //
+    // So the id on the wire is one higher than the id in the registry, and a
+    // server that writes the registry id itself makes the client play the
+    // sound *before* the one it meant: 1314 is played as the breathing, 1316
+    // as the death, and the sound of being hurt is never heard at all.
+    VarInt(sound.id + 1).write(out);
     VarInt(sound.source).write(out);
     // The place is in eighths of a block: the game's own constructor takes
     // a block position and stores it multiplied by eight, and the client
@@ -733,19 +741,18 @@ pub fn write_sound(out: &mut Vec<u8>, sound: &Sound) {
 
 /// The sound of a player being hurt, and of one dying.
 ///
-/// The ids are the ones the **client** uses, and they are not the ones the
-/// data generator's report gives: the client numbers the sounds two lower
-/// than the report does. Both were measured by sending a number and
-/// listening to what came out -- 759 came out as a golden dandelion, which
-/// the report calls 757, and 1316 came out as a burp, which it calls 1314.
+/// The ids are the registry ids the client knows them by, from the data
+/// generator's report (`extracted/registries.json`, the `minecraft:sound_event`
+/// registry). The wire carries one more than these, because a holder that
+/// names a registry entry is written as its id plus one.
 ///
 /// A block being broken is not here: the level event that says a block was
 /// destroyed is enough, and the client plays that block's own sound from it.
 pub mod sound {
     /// A player being hurt.
-    pub const PLAYER_HURT: i32 = 1314;
+    pub const PLAYER_HURT: i32 = 1316;
     /// A player dying.
-    pub const PLAYER_DEATH: i32 = 1313;
+    pub const PLAYER_DEATH: i32 = 1315;
 
     /// Which slider a sound plays on. The order is the enum's own.
     pub const SOURCE_PLAYER: i32 = 6;

@@ -71,6 +71,9 @@ CB_REMOVE_ENTITIES = 44
 CB_DAMAGE_EVENT = 25
 CB_SET_HEALTH = 106
 
+# The light that moved.
+CB_LIGHT_UPDATE = 49
+
 INTERESTING = {
     CB_BLOCK_UPDATE: "block_update",
     CB_BLOCK_CHANGED_ACK: "block_changed_ack",
@@ -83,6 +86,7 @@ INTERESTING = {
     CB_REMOVE_ENTITIES: "remove_entities",
     CB_DAMAGE_EVENT: "damage_event",
     CB_SET_HEALTH: "set_health",
+    CB_LIGHT_UPDATE: "light_update",
 }
 
 
@@ -242,6 +246,29 @@ def decode(pid, body, offset):
             health = struct.unpack_from(">f", body, offset)[0]
             food, _ = read_varint(body, offset + 4)
             return f"health {health} food {food}"
+        if pid == CB_LIGHT_UPDATE:
+            x, at = read_varint(body, offset)
+            z, at = read_varint(body, at)
+            masks = []
+            for _ in range(4):
+                length, at = read_varint(body, at)
+                masks.append(body[at:at + length].hex())
+                at += length
+            sky_layers, at = read_varint(body, at)
+            for _ in range(sky_layers):
+                length, at = read_varint(body, at)
+                at += length
+            block_layers, at = read_varint(body, at)
+            sizes = []
+            for _ in range(block_layers):
+                length, at = read_varint(body, at)
+                sizes.append(length)
+                at += length
+            return (
+                f"chunk {x},{z} sky mask {masks[0]} block mask {masks[1]} "
+                f"empty sky {masks[2]} empty block {masks[3]} "
+                f"{sky_layers} sky layers, {block_layers} block layers {sizes}"
+            )
     except Exception as e:  # noqa: BLE001
         return f"undecodable: {type(e).__name__}: {e}"
     return None
@@ -353,6 +380,7 @@ def main():
             print(f"<- SOUND id {sound}")
 
         index.append({"dir": "s2c", "phase": state, "id": pid, "size": len(body)})
+        counts[pid] = counts.get(pid, 0) + 1
         if pid not in INTERESTING:
             counts[pid] = counts.get(pid, 0) + 1
             if broke:

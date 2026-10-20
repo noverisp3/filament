@@ -177,6 +177,7 @@ impl StatusServer {
 const POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// The light of a chunk's sections, by the section's place in the chunk.
+/// The light of some sections of a chunk, as the wire carries it.
 type ChunkLight = Vec<(i32, Vec<u8>)>;
 
 /// How far through the world a player may walk before being put back.
@@ -225,6 +226,40 @@ const LAVA_EVERY: u32 = 10;
 /// who leans on a cactus is hurt once and then left alone.
 const CACTUS_DAMAGE: f64 = 1.0;
 const CACTUS_EVERY: u32 = 10;
+
+/// The light of a whole world, grouped by chunk: the sun's and the lamps'.
+type LightByChunk = (BTreeMap<(i32, i32), ChunkLight>, BTreeMap<(i32, i32), ChunkLight>);
+
+/// The light that moved, grouped by chunk and by section.
+///
+/// A section can be in the list more than once: a block that changed moves
+/// the light around it, and the world-wide pass moves it again, and the same
+/// section is in both.
+///
+/// The mask that goes with the light names each section **once**, and the
+/// client takes one array for each bit it finds. So a section named twice is
+/// an array the client did not expect, and everything after it is read from
+/// the wrong place -- which is a client holding light that is half of one
+/// section and half of another, and a world that looks lit in patches.
+fn group_light(light: ticking::LightChanges) -> LightByChunk {
+    let mut sky: BTreeMap<(i32, i32), BTreeMap<i32, Vec<u8>>> = BTreeMap::new();
+    let mut block: BTreeMap<(i32, i32), BTreeMap<i32, Vec<u8>>> = BTreeMap::new();
+    for (chunk_x, chunk_z, index, sky_bytes, block_bytes) in light {
+        sky.entry((chunk_x, chunk_z))
+            .or_default()
+            .insert(index, sky_bytes);
+        block
+            .entry((chunk_x, chunk_z))
+            .or_default()
+            .insert(index, block_bytes);
+    }
+    let flatten = |map: BTreeMap<(i32, i32), BTreeMap<i32, Vec<u8>>>| {
+        map.into_iter()
+            .map(|((chunk_x, chunk_z), sections)| ((chunk_x, chunk_z), sections.into_iter().collect()))
+            .collect()
+    };
+    (flatten(sky), flatten(block))
+}
 
 /// Answers one connection's handshake and status exchange.
 ///
@@ -1027,22 +1062,9 @@ fn play(
     session.world.recompute_light();
     let light = session.world.light_changes();
     if !light.is_empty() {
-        let mut by_chunk: BTreeMap<(i32, i32), ChunkLight> = BTreeMap::new();
-        let mut blocks: BTreeMap<(i32, i32), ChunkLight> = BTreeMap::new();
-        for (chunk_x, chunk_z, index, sky, block) in light {
-            by_chunk
-                .entry((chunk_x, chunk_z))
-                .or_default()
-                .push((index, sky));
-            blocks
-                .entry((chunk_x, chunk_z))
-                .or_default()
-                .push((index, block));
-        }
-        for ((chunk_x, chunk_z), mut sections) in by_chunk {
-            sections.sort_by_key(|(index, _)| *index);
-            let mut block_sections = blocks.remove(&(chunk_x, chunk_z)).unwrap_or_default();
-            block_sections.sort_by_key(|(index, _)| *index);
+        let (by_chunk, blocks) = group_light(light);
+        for ((chunk_x, chunk_z), sections) in by_chunk {
+            let block_sections = blocks.get(&(chunk_x, chunk_z)).cloned().unwrap_or_default();
             let mut body = Vec::new();
             crate::protocol::chunk::write_light_update(
                 &mut body,
@@ -2755,26 +2777,16 @@ fn place_block(
         // the chunk, so a hole dug in a lit room is still lit on its screen
         // until it is told otherwise, and it is told here.
         let light = session.world.light_changes();
+        if super::log::verbose() {
+            log.note(format!("{} sections of light moved", light.len()));
+        }
         if !light.is_empty() {
             // One packet per chunk, because that is how the game sends it: the
             // light belongs to a chunk and the sections of that chunk travel
             // together.
-            let mut by_chunk: BTreeMap<(i32, i32), ChunkLight> = BTreeMap::new();
-            let mut blocks: BTreeMap<(i32, i32), ChunkLight> = BTreeMap::new();
-            for (chunk_x, chunk_z, index, sky, block) in light {
-                by_chunk
-                    .entry((chunk_x, chunk_z))
-                    .or_default()
-                    .push((index, sky));
-                blocks
-                    .entry((chunk_x, chunk_z))
-                    .or_default()
-                    .push((index, block));
-            }
-            for ((chunk_x, chunk_z), mut sections) in by_chunk {
-                sections.sort_by_key(|(index, _)| *index);
-                let mut block_sections = blocks.remove(&(chunk_x, chunk_z)).unwrap_or_default();
-                block_sections.sort_by_key(|(index, _)| *index);
+            let (by_chunk, blocks) = group_light(light);
+            for ((chunk_x, chunk_z), sections) in by_chunk {
+                let block_sections = blocks.get(&(chunk_x, chunk_z)).cloned().unwrap_or_default();
                 let mut body = Vec::new();
                 crate::protocol::chunk::write_light_update(
                     &mut body,
@@ -2852,6 +2864,9 @@ fn place_block(
             let mut framed = Vec::new();
             enc.encode(&body, &mut framed).map_err(io_err)?;
             pushed.extend_from_slice(&framed);
+        }
+        if super::log::verbose() && !pushed.is_empty() {
+            log.note(format!("{} bytes from the other players", pushed.len()));
         }
         if !pushed.is_empty() {
             stream.write_all(&pushed)?;

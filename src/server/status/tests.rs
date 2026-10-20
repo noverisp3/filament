@@ -609,6 +609,38 @@ fn the_total_is_conserved_through_give_arrange_drop_and_place() {
 }
 
 #[test]
+fn a_section_of_light_that_moved_twice_is_named_once() {
+    // A block that changed moves the light around it, and the world-wide pass
+    // moves it again, and the same section is in both. The mask that goes with
+    // the light names each section once and the client takes one array for
+    // each bit, so a section named twice is an array the client did not
+    // expect -- and everything after it is read from the wrong place.
+    let sky = vec![1u8; 2048];
+    let block = vec![2u8; 2048];
+    let light = vec![
+        (0, 0, 3, sky.clone(), block.clone()),
+        (0, 0, 3, sky.clone(), block.clone()),
+        (0, 0, 4, sky.clone(), block.clone()),
+    ];
+
+    let (by_chunk, blocks) = group_light(light);
+
+    let sections = by_chunk.get(&(0, 0)).expect("the chunk is there");
+    assert_eq!(
+        sections.len(),
+        2,
+        "two sections, and the one that moved twice is named once"
+    );
+    assert_eq!(sections[0].0, 3, "the first is section three");
+    assert_eq!(sections[1].0, 4, "and the second is section four");
+    assert_eq!(
+        blocks.get(&(0, 0)).map(|s| s.len()),
+        Some(2),
+        "and the lamps' light names the same two"
+    );
+}
+
+#[test]
 fn a_stack_is_described_in_words_for_the_log() {
     assert_eq!(describe(None), "nothing");
     assert_eq!(describe(Some(ItemStack::new(55, 20))), "minecraft:dirt x20");

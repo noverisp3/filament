@@ -338,6 +338,55 @@ fn the_light_of_the_blocks_travels_with_the_light_of_the_sun() {
 }
 
 #[test]
+fn a_light_update_names_each_section_once_and_carries_one_array_for_it() {
+    // The mask names the sections that have light and the arrays follow it,
+    // one for each bit. A section named twice in the list is an array the
+    // client did not expect, and everything after it is read from the wrong
+    // place -- which is a client holding half of one section's light and half
+    // of another's, and a world that looks lit in patches.
+    //
+    // The caller is the one that keeps the list free of repeats: see
+    // `group_light`, which is where a section that is reported twice -- by a
+    // block that changed and by the world-wide pass -- is named once.
+    let lit = vec![0xFFu8; 2048];
+    let dark = vec![0u8; 2048];
+
+    let sections = vec![(3, lit.clone()), (4, dark.clone())];
+    let mut w = Vec::new();
+    write_light_update(&mut w, 1, 2, &sections, &[]);
+
+    let mut r = &w[..];
+    let _ = VarInt::read(&mut r).expect("a packet id");
+    let _ = VarInt::read(&mut r).expect("a chunk x");
+    let _ = VarInt::read(&mut r).expect("a chunk z");
+
+    // The head of the packet, byte for byte: the id, the chunk, the four
+    // masks and the count of the arrays.
+    //
+    //   31          the packet
+    //   01 02       the chunk
+    //   01 08       the sky mask: one byte, section three
+    //   00          the block mask: nothing
+    //   01 10       the empty sky mask: one byte, section four
+    //   00          the empty block mask: nothing
+    //   01          one array
+    //   80 10       two thousand and forty-eight bytes
+    assert_eq!(
+        &w[..12],
+        &[
+            0x31, 0x01, 0x02, // the packet and the chunk
+            0x01, 0x08, // the sky mask names section three
+            0x00, // the block mask names nothing
+            0x01, 0x10, // the empty sky mask names section four
+            0x00, // and the empty block mask names nothing
+            0x01, // one array
+            0x80, 0x10, // two thousand and forty-eight bytes
+        ],
+        "the mask and the arrays have to line up"
+    );
+}
+
+#[test]
 fn a_bit_set_of_sections_is_the_shortest_form() {
     // BitSet.toByteArray is the shortest form that reaches the highest bit,
     // so twenty-four sections is three bytes and not eight.

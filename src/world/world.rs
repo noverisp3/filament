@@ -631,47 +631,52 @@ impl World {
     /// asked. A player can break a block between it being scheduled and its turn
     /// coming round, and a rule that acts on the stale name writes into a block
     /// that is now something else.
-    fn block_update(&mut self, pos: BlockPos, edit: &mut BlockEdit) {
+    fn block_update(&mut self, pos: BlockPos, _edit: &mut BlockEdit) {
+        // Nothing is answered here.
+        //
+        // There used to be a rule that turned grass into dirt when the block
+        // under it was not dirt, and it was wrong twice over: the game has no
+        // such rule -- in the game a grass block needs nothing under it at
+        // all -- and it answered at once, so every block a player put down
+        // next to a hillside was rewritten before the client had drawn it.
+        //
+        // The rules the game does have about grass are both random ticks, and
+        // they are in `random_update`.
+        let _ = pos;
+    }
+
+    /// The rules the game leaves to chance, and the only ones the world has.
+    ///
+    /// The two things it does about grass: a grass block that cannot stay
+    /// alive becomes dirt, and dirt near a grass block becomes grass.
+    ///
+    /// The game rolls both of these on a random tick and it needs light: a
+    /// dirt block in the dark stays dirt. They are rare, and they are meant to
+    /// be -- a hillside heals itself over minutes, and not the moment a player
+    /// puts a block down.
+    ///
+    /// There is no rule here that answers at once. There used to be one, and
+    /// it turned grass into dirt when the block under it was not dirt: the
+    /// game has no such rule -- in the game a grass block needs nothing under
+    /// it at all -- and it answered at once, so every block a player put down
+    /// next to a hillside was rewritten before the client had drawn it.
+    fn random_update(&mut self, pos: BlockPos, edit: &mut BlockEdit) {
         let Some(block) = self.block(pos) else { return };
 
-        // Grass with nothing under it turns to dirt.
-        //
-        // The block below is what a grass block stands on, and when that is
-        // gone the grass has nothing to be grass about. The game answers this
-        // at once: a hole dug under a hillside shows the dirt that was under
-        // the grass, not a floating sheet of green.
-        //
-        // This is the rule that used to be written the other way round, and
-        // written the other way round it turned every block a player put down
-        // next to a hillside into grass.
+        // Grass that cannot stay alive.
         if self.is_grass(block) {
-            let below = self.block(pos.offset(Direction::Down));
-            // Nothing below at all is the bottom of the world, and the world
-            // holds the grass up there.
-            let stands_on_dirt = below.map(|b| self.is_dirt(b)).unwrap_or(true);
-            if !stands_on_dirt {
+            let above = self.block(pos.offset(Direction::Up));
+            let shut_in = above.map(|b| self.registry.is_opaque(b)).unwrap_or(false);
+            if shut_in {
                 let dirt = self.dirt_block();
                 if let Some(made) = self.set_block(pos, dirt) {
                     self.tick_changes.push((pos, dirt));
                     edit.merge(made);
                 }
             }
+            return;
         }
-    }
 
-    /// The rule the game leaves to chance: dirt near a grass block becomes
-    /// grass.
-    ///
-    /// The game rolls this on a random tick and it needs light: a dirt block
-    /// in the dark stays dirt. It is rare, and it is meant to be -- a hillside
-    /// heals itself over minutes, and not the moment a player puts a block
-    /// down.
-    ///
-    /// The grass is the one that is near, not necessarily the one underneath:
-    /// the game looks a block across and three up or down, which is how grass
-    /// climbs a wall of dirt.
-    fn random_update(&mut self, pos: BlockPos, edit: &mut BlockEdit) {
-        let Some(block) = self.block(pos) else { return };
         if !self.is_dirt(block) {
             return;
         }

@@ -91,29 +91,31 @@ fn a_tick_answers_deferred_work_and_not_inline_work() {
     let terrain = *world.terrain_blocks();
     let pos = BlockPos::new(8, 120, 8);
 
-    // A grass block with nothing under it: the world owes it an answer, and
-    // the answer is not given here.
-    world.set_block(pos.offset(Direction::Down), terrain.air);
+    // A grass block shut in under a stone one: the world owes it an answer,
+    // and the answer is not given here.
     world.set_block(pos, terrain.grass);
+    world.set_block(pos.offset(Direction::Up), terrain.stone);
     assert_eq!(
         world.block(pos),
         Some(terrain.grass),
         "not yet: the answer is owed"
     );
 
-    world.tick();
+    for _ in 0..3 {
+        world.tick();
+    }
     assert_eq!(
         world.block(pos),
-        Some(terrain.dirt),
-        "and the tick is what gives it"
+        Some(terrain.grass),
+        "and the tick is not the one that answers it: the game rolls for this"
     );
 }
 
 #[test]
-fn grass_with_nothing_under_it_turns_to_dirt() {
-    // The block below is what a grass block stands on, and when that is gone
-    // the grass has nothing to be grass about. The game answers this at once,
-    // and so does this: a hole dug under a hillside shows dirt.
+fn grass_needs_nothing_under_it() {
+    // The rule that was here turned grass into dirt when the block under it
+    // was not dirt, and it ate every block a player put down next to a
+    // hillside. The game has no such rule: a grass block stands on nothing.
     let mut world = test_world();
     let terrain = *world.terrain_blocks();
     let pos = BlockPos::new(8, 120, 8);
@@ -121,12 +123,14 @@ fn grass_with_nothing_under_it_turns_to_dirt() {
     world.set_block(pos.offset(Direction::Down), terrain.air);
     world.set_block(pos, terrain.grass);
 
-    world.tick();
+    for _ in 0..3 {
+        world.tick();
+    }
 
     assert_eq!(
         world.block(pos),
-        Some(terrain.dirt),
-        "a grass block with no dirt under it is dirt"
+        Some(terrain.grass),
+        "a grass block with nothing under it is still grass"
     );
 }
 
@@ -222,23 +226,28 @@ fn a_tick_says_what_it_changed_so_somebody_can_be_told() {
     // world they are standing in, with nothing to point at.
     let mut world = test_world();
     let terrain = *world.terrain_blocks();
-    let pos = BlockPos::new(8, 120, 8);
+    let grass = BlockPos::new(8, 120, 8);
+    let beside = grass.offset(Direction::East);
 
-    world.set_block(pos.offset(Direction::Down), terrain.air);
-    world.set_block(pos, terrain.grass);
+    world.set_block(grass.offset(Direction::Down), terrain.dirt);
+    world.set_block(grass, terrain.grass);
+    world.set_block(beside, terrain.dirt);
 
     assert!(
         world.pending_tick_changes() == 0,
         "nothing has ticked yet, so nothing has changed on its own"
     );
 
-    for _ in 0..3 {
-        world.tick();
-    }
+    // The roll is what changes something, and it says so.
+    let mut edit = crate::world::world::BlockEdit {
+        chunks: Vec::new(),
+        sections: Vec::new(),
+    };
+    world.random_update(beside, &mut edit);
 
     let changes = world.take_tick_changes();
     assert!(
-        changes.iter().any(|(at, _)| *at == pos),
+        changes.iter().any(|(at, _)| *at == beside),
         "the block that turned is named, and it is the one that turned"
     );
 

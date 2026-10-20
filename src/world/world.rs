@@ -119,6 +119,15 @@ pub struct World {
     /// rather than once per player.
     pub(crate) light_stale: bool,
 
+    /// The chunks that hold a block which gives off light.
+    ///
+    /// Whether there is a lamp near a chunk used to mean reading every block
+    /// of the chunk and of the eight around it: nine hundred thousand blocks,
+    /// asked nine times over for every chunk that arrived. The answer is kept
+    /// instead, and a chunk is looked at once when it arrives and once more
+    /// when a block in it changes.
+    lamp_chunks: HashSet<ChunkPos>,
+
     /// The items lying on the ground, waiting to be picked up.
     ///
     /// A broken block becomes one of these instead of going straight into a
@@ -191,6 +200,7 @@ impl Clone for World {
             tick_changes: Vec::new(),
             light_changes: Vec::new(),
             light_stale: false,
+            lamp_chunks: self.lamp_chunks.clone(),
             items: Vec::new(),
             item_changes: Vec::new(),
             // A clone has no folder of its own; sharing one would mean two
@@ -226,18 +236,19 @@ impl World {
         chunks: HashMap::new(),
         edits: HashMap::new(),
         dirty: HashSet::new(),
-        game_time: 0,
-        day_time: 0,
-        ticks: crate::world::ticks::BlockTicks::new(),
-        tick_changes: Vec::new(),
-        light_changes: Vec::new(),
-        light_stale: false,
-        items: Vec::new(),
-        item_changes: Vec::new(),
-        store: store.map(std::sync::Arc::new),
-        spawn: (0, 64, 0),
-        spawn_from_file: false,
-    };
+    game_time: 0,
+    day_time: 0,
+    ticks: crate::world::ticks::BlockTicks::new(),
+    tick_changes: Vec::new(),
+    light_changes: Vec::new(),
+    light_stale: false,
+    lamp_chunks: HashSet::new(),
+    items: Vec::new(),
+    item_changes: Vec::new(),
+    store: store.map(std::sync::Arc::new),
+    spawn: (0, 64, 0),
+    spawn_from_file: false,
+};
 
     // The clock the world was saved with. A restart that wound `Time` back
     // would replay a day through every crop and furnace in it, so what is in
@@ -860,6 +871,10 @@ impl World {
         }
         self.chunks.insert(pos, chunk);
 
+        // Whether this chunk holds a lamp, so that the question of whether
+        // there is one nearby is a lookup and not a walk over its blocks.
+        self.note_lamp(pos);
+
         // The light of a chunk is worked out when it arrives, not read from
         // the file: the game does not keep it either, because the light of a
         // chunk depends on the chunks around it.
@@ -875,20 +890,36 @@ impl World {
         if self.lamp_near(pos) {
             self.spread_chunk(pos);
         }
-        // And the chunks around it, because a lamp in one of them lights this
-        // one and this one's lamps light them.
+        // And the chunks around it, because the light that crosses the border
+        // has to be worked out on both sides of it.
         //
         // The light is worked out when a chunk arrives, and at that moment the
         // chunk next door may not have arrived yet -- so its lamps were not
-        // counted, and this chunk's light stops dead at the border. The game
-        // does not have this problem: it keeps the light of the sections
-        // around a change and works it out again for each of them.
+        // counted, and this chunk's light stops dead at the border. The chunk
+        // that arrives *later* works the border out again, and the cells on this
+        // side of it are lit from the far side at last.
         //
-        // So the neighbours are worked out again too, and the light crosses
-        // into them the way it should.
+        // The region is centred on the border rather than on the neighbour,
+        // because the cells whose light can have changed are the ones within
+        // reach of it -- a lamp's light travels fifteen blocks -- and the cells
+        // further off cannot have changed. A region around the whole
+        // neighbour was twice the work for the same answer, and it was the
+        // reason a player joining a world with a lamp in it spent most of a
+        // minute on the light alone.
         for dx in -1..=1 {
             for dz in -1..=1 {
                 if dx == 0 && dz == 0 {
+                    continue;
+                }
+                // Only the four that share an edge.
+                //
+                // The nearest cell of a chunk that touches this one at a
+                // corner is sixteen blocks away in both directions, which is
+                // further than a lamp's light travels: nothing the blocks give
+                // off crosses there. What does cross is the sun's light, and
+                // the pass over the whole world that follows a player joining
+                // works that out.
+                if dx != 0 && dz != 0 {
                     continue;
                 }
                 let neighbour = ChunkPos::new(pos.x + dx, pos.z + dz);
@@ -896,7 +927,7 @@ impl World {
                     continue;
                 }
                 if self.lamp_near(neighbour) {
-                    self.spread_chunk(neighbour);
+                    self.spread_border(pos, neighbour);
                 }
             }
         }
@@ -921,22 +952,43 @@ impl World {
     /// next door reaches this one. If there is no lamp anywhere near, there is
     /// nothing to spread and no reason to work the region out again.
     fn lamp_near(&self, pos: ChunkPos) -> bool {
-        let registry = self.registry();
         for dx in -1..=1 {
             for dz in -1..=1 {
-                let Some(chunk) = self.chunk(ChunkPos::new(pos.x + dx, pos.z + dz)) else {
-                    continue;
-                };
-                for section in chunk.sections() {
-                    for block in crate::world::section::iter_blocks(section) {
-                        if registry.light_emission(block) > 0 {
-                            return true;
-                        }
-                    }
+                if self.lamp_chunks.contains(&ChunkPos::new(pos.x + dx, pos.z + dz)) {
+                    return true;
                 }
             }
         }
         false
+    }
+
+    /// Whether a chunk holds a block that gives off light.
+    ///
+    /// One pass over the chunk's blocks, which is a hundred thousand of them,
+    /// and the answer is kept so that it is not paid again for every chunk that
+    /// arrives and every chunk that is asked about.
+    fn chunk_has_lamp(&self, pos: ChunkPos) -> bool {
+        let registry = self.registry();
+        let Some(chunk) = self.chunk(pos) else {
+            return false;
+        };
+        for section in chunk.sections() {
+            for block in crate::world::section::iter_blocks(section) {
+                if registry.light_emission(block) > 0 {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Remembers whether a chunk holds a lamp, now that it has changed.
+    fn note_lamp(&mut self, pos: ChunkPos) {
+        if self.chunk_has_lamp(pos) {
+            self.lamp_chunks.insert(pos);
+        } else {
+            self.lamp_chunks.remove(&pos);
+        }
     }
 
     /// The items lying on the ground.
@@ -1022,6 +1074,7 @@ impl World {
     /// anything the player built in it does not: that lived only in the stored
     /// copy, and this is the code that decides how long a build is kept.
     pub fn forget_chunk(&mut self, pos: ChunkPos) -> bool {
+        self.lamp_chunks.remove(&pos);
         self.chunks.remove(&pos).is_some()
     }
 
@@ -1045,6 +1098,7 @@ impl World {
             tick_changes: Vec::new(),
             light_changes: Vec::new(),
             light_stale: false,
+            lamp_chunks: HashSet::new(),
             items: Vec::new(),
             item_changes: Vec::new(),
             spawn: (0, 64, 0),
@@ -1211,6 +1265,15 @@ impl World {
         // ignoring that would report an edit that never happened.
         if !self.chunk_mut(chunk_pos)?.set_block(pos, block) {
             return None;
+        }
+
+        // Whether this chunk holds a lamp may have changed with it.
+        if self.registry().light_emission(block) > 0 {
+            self.lamp_chunks.insert(chunk_pos);
+        } else {
+            // The lamp may have been taken away, and the chunk may hold
+            // another one, so the question is asked of the chunk again.
+            self.note_lamp(chunk_pos);
         }
 
         let section = pos.section_pos();

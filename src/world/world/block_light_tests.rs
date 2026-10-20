@@ -258,6 +258,51 @@ fn a_lamp_lights_the_chunk_the_region_of_the_light_starts_inside_in_z() {
 }
 
 #[test]
+fn a_chunk_arriving_next_to_a_lamp_works_the_light_out_quickly() {
+    // The fault this catches: a chunk that arrived worked out the light nine
+    // times over -- once for itself and once for each of the eight around it
+    // -- and each of those was a region of a million cells with the world's
+    // lookup table consulted for every one of them.
+    //
+    // A player joining a world with lamps in it spent most of a minute in that,
+    // and the client gave up before the world was there.
+    use std::time::Instant;
+
+    let mut world = World::generate(1);
+    let glowstone = world
+        .registry()
+        .id("glowstone")
+        .expect("the world knows a glowstone");
+
+    // And chunks arriving next to a lamp. The chunks at x = 2 and up are not in
+    // the world yet: the ones that were generated stop at x = 1.
+    //
+    // The chunks around each one are there first, as they are in a world a
+    // player is standing in: the light that crosses a border is worked out on
+    // both sides of it, and the chunks on the other side have to be there for
+    // that to be any work.
+    let mut quickest = std::time::Duration::MAX;
+    for x in 2..7 {
+        for (dx, dz) in [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 1)] {
+            world.ensure_chunk(ChunkPos::new(x + dx, dz));
+        }
+        // A lamp in the chunk before it, so there is light to work out.
+        world.set_block(BlockPos::new((x - 1) * 16 + 8, 100, 8), glowstone);
+        let start = Instant::now();
+        world.ensure_chunk(ChunkPos::new(x, 0));
+        quickest = quickest.min(start.elapsed());
+    }
+    let took = quickest;
+
+    println!("ARRIVAL a chunk next to a lamp took {took:?}");
+    assert!(
+        took < std::time::Duration::from_millis(120),
+        "a chunk arriving next to a lamp took {took:?}, which is more than a \
+         player waiting to join can be expected to sit through"
+    );
+}
+
+#[test]
 fn a_lamp_that_is_taken_away_takes_its_light_with_it() {
     let mut world = World::generate(1);
     let surface = surface_y(8, 8);

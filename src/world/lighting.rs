@@ -97,6 +97,27 @@ impl World {
         region.write_back(self);
     }
 
+    /// Works the light out again on both sides of the border between two chunks.
+    ///
+    /// The cells whose light can have changed are the ones within reach of the
+    /// border, so the region is centred on the border and not on either chunk.
+    /// A region around a whole chunk reaches sixteen blocks past its own edge
+    /// and so covers the chunk next door twice over, and the light was worked
+    /// out nine times over for one chunk that arrived.
+    pub fn spread_border(&mut self, from: ChunkPos, to: ChunkPos) {
+        // The middle of the border: half way between the two chunks' centres.
+        let middle_x = from.x * SECTION_DIM + SECTION_DIM / 2 + (to.x - from.x) * SECTION_DIM / 2;
+        let middle_z = from.z * SECTION_DIM + SECTION_DIM / 2 + (to.z - from.z) * SECTION_DIM / 2;
+        let border = super::pos::BlockPos::new(middle_x, 0, middle_z);
+
+        // Sixteen blocks either side of the border: a lamp's light travels
+        // fifteen, and a chunk is sixteen wide, so that covers both chunks the
+        // border is between.
+        let mut region = Region::around_with_reach(self, border, LIGHT_REACH + 1);
+        region.recompute();
+        region.write_back(self);
+    }
+
     /// Recomputes sky light around one edit and reports which sections moved.
     ///
     /// Called after every block change, because the mesher reads light per
@@ -845,6 +866,16 @@ impl Region {
             // column the region happens to start at.
             let (chunk_x0, chunk_z0) = self.chunk_origin(chunk_x, chunk_z);
 
+            // The chunk once, not once per cell.
+            //
+            // A region is a million cells, and looking the chunk up in the
+            // world's map for every one of them is a million hash lookups for
+            // a thing that is the same a million times over. It was the whole
+            // of the cost of writing the light back.
+            let Some(chunk) = world.chunk_mut(chunk_pos) else {
+                continue;
+            };
+
             for slot in 0..SECTIONS_PER_CHUNK {
                 let section_pos = SectionPos::new(chunk_x, MIN_SECTION + slot as i32, chunk_z);
                 let base_y = (section_pos.y * SECTION_DIM - MIN_BLOCK_Y) as usize;
@@ -868,9 +899,6 @@ impl Region {
                                 local_y,
                                 (gz as i32 - chunk_z0) as u8,
                             ]);
-                            let Some(chunk) = world.chunk_mut(chunk_pos) else {
-                                break;
-                            };
                             if chunk.sky_light_in(section_pos, local) != value {
                                 chunk.sky_light_mut(section_pos, local, value);
                                 section_dirty = true;

@@ -93,6 +93,7 @@ impl World {
         );
         let half_chunk = SECTION_DIM / 2;
         let mut region = Region::around_with_reach(self, center, half_chunk + LIGHT_REACH);
+        self.light_work += region.cells();
         region.recompute();
         region.write_back(self);
     }
@@ -114,6 +115,7 @@ impl World {
         // fifteen, and a chunk is sixteen wide, so that covers both chunks the
         // border is between.
         let mut region = Region::around_with_reach(self, border, LIGHT_REACH + 1);
+        self.light_work += region.cells();
         region.recompute();
         region.write_back(self);
     }
@@ -125,6 +127,7 @@ impl World {
     /// up as a black pit with no sun in it.
     pub fn relight_around(&mut self, center: super::pos::BlockPos) -> Vec<SectionPos> {
         let mut region = Region::around(self, center);
+        self.light_work += region.cells();
         region.recompute();
         region.write_back(self)
     }
@@ -582,6 +585,14 @@ impl Region {
     #[inline]
     fn index(&self, x: usize, y: usize, z: usize) -> usize {
         (y * self.depth + z) * self.width + x
+    }
+
+    /// How many cells the region holds.
+    ///
+    /// The light is worked out for every one of them, so this is the work the
+    /// region is: a million cells is a chunk arriving next to a lamp.
+    fn cells(&self) -> usize {
+        self.width * self.depth * self.height
     }
 
     #[inline]

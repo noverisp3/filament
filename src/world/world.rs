@@ -119,6 +119,9 @@ pub struct World {
     /// rather than once per player.
     pub(crate) light_stale: bool,
 
+    /// The cells the light has been worked out for, since the world began.
+    pub(crate) light_work: usize,
+
     /// The chunks that hold a block which gives off light.
     ///
     /// Whether there is a lamp near a chunk used to mean reading every block
@@ -200,6 +203,7 @@ impl Clone for World {
             tick_changes: Vec::new(),
             light_changes: Vec::new(),
             light_stale: false,
+            light_work: 0,
             lamp_chunks: self.lamp_chunks.clone(),
             items: Vec::new(),
             item_changes: Vec::new(),
@@ -243,6 +247,7 @@ impl World {
     light_changes: Vec::new(),
     light_stale: false,
     lamp_chunks: HashSet::new(),
+    light_work: 0,
     items: Vec::new(),
     item_changes: Vec::new(),
     store: store.map(std::sync::Arc::new),
@@ -1067,6 +1072,11 @@ impl World {
         self.edits.values().map(|e| e.len()).sum()
     }
 
+    /// How many cells the light has been worked out for, since the world began.
+    pub fn light_work(&self) -> usize {
+        self.light_work
+    }
+
     /// Drops a chunk and its edits.
     ///
     /// Called when the player walks out of range of it. The terrain comes back
@@ -1098,6 +1108,7 @@ impl World {
             tick_changes: Vec::new(),
             light_changes: Vec::new(),
             light_stale: false,
+            light_work: 0,
             lamp_chunks: HashSet::new(),
             items: Vec::new(),
             item_changes: Vec::new(),

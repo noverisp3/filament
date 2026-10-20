@@ -27,6 +27,13 @@ PROTOCOL_VERSION = 777
 # The client's light engine numbers its sections from one below the world.
 MIN_LIGHT_SECTION = -5
 
+# How much world the probe asks for, in chunks.
+#
+# Eight is what a real client asks for, and it is seventeen chunks across: two
+# hundred and eighty-nine of them. The server's own default is smaller, and a
+# probe that used it would be measuring a join nobody has.
+VIEW_DISTANCE = 8
+
 
 def named(mask):
     return [b * 8 + bit for b, byte in enumerate(mask) for bit in range(8) if byte >> bit & 1]
@@ -109,7 +116,7 @@ def main():
     answered = False
     chunks = {}
     deadline = time.time() + 120
-    while time.time() < deadline and len(chunks) < 80:
+    while time.time() < deadline and len(chunks) < 400:
         body = c.recv()
         if body is None:
             time.sleep(0.05)
@@ -132,6 +139,24 @@ def main():
                     + brand
                     + varint(len("vanilla"))
                     + b"vanilla",
+                )
+                # The client's own settings, which is where it says how much
+                # world it wants. Without them the server answers with its own
+                # idea of a view distance, which is not the one a real player
+                # asks for.
+                language = b"en_us"
+                c.send(
+                    0,
+                    varint(len(language))
+                    + language
+                    + bytes([VIEW_DISTANCE])  # the view distance
+                    + varint(0)  # the chat visibility
+                    + b"\x00"  # the chat colours
+                    + b"\x00"  # the model customisation
+                    + varint(1)  # the main hand
+                    + b"\x00"  # the text filtering
+                    + b"\x00"  # whether it may be listed
+                    + varint(0),  # the particle status
                 )
                 c.send(7, varint(0))
             elif pid == 3:

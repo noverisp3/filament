@@ -1723,6 +1723,35 @@ fn play(
                                     // else's business.
                                     session.wire.send_one(player_id, chat);
                                 }
+                                Command::Say(text) => {
+                                    // To everybody, the way the game says
+                                    // it: a line in the chat, in the chat
+                                    // colour a message is.
+                                    let mut chat = Vec::new();
+                                    p::write_system_chat(&mut chat, &text);
+                                    session.wire.send_all(chat);
+                                    log.note(format!("said {text}"));
+                                }
+                                Command::Teleport(x, y, z) => {
+                                    // The player is put there, and told, so
+                                    // the client does not decide where they
+                                    // are for itself.
+                                    player.x = x;
+                                    player.y = y;
+                                    player.z = z;
+                                    teleport_seq += 1;
+                                    let mut body = Vec::new();
+                                    p::write_player_position(&mut body, teleport_seq, &player);
+                                    enc.encode(&body, &mut out).map_err(io_err)?;
+                                    session.wire.update_pose(
+                                        player_id,
+                                        (player.x, player.y, player.z),
+                                        player.yaw,
+                                        player.pitch,
+                                    );
+                                    session.wire.send_movement(player_id, true);
+                                    log.note(format!("moved to {x} {y} {z}"));
+                                }
                                 Command::Kill => {
                                     // The same road as a fall that goes all
                                     // the way: the health goes to nothing and
@@ -3271,17 +3300,22 @@ fn hurt(
 /// "Unknown command or insufficient permissions".
 /// What a command asked for.
 ///
-/// A command is not only words: `/kill` is a request to die, and `/time set
-/// day` is a request to move the sun. So the answer is a thing to do and not
-/// only a line to say.
-#[derive(Debug, PartialEq, Eq)]
+/// A command is not only words: `/kill` is a request to die, `/time set
+/// day` is a request to move the sun, and `/tp` is a request to be
+/// somewhere else. So the answer is a thing to do and not only a line to
+/// say.
+#[derive(Debug, PartialEq)]
 enum Command {
     /// Say this to the player who asked.
     Reply(String),
+    /// Say this to everybody.
+    Say(String),
     /// End the player.
     Kill,
     /// Set the time of day, in ticks.
     SetTime(u64),
+    /// Move the player to a place.
+    Teleport(f64, f64, f64),
 }
 
 fn run_command(text: &str, wire: &Arc<Broadcast>, player_name: &str) -> Command {
@@ -3308,7 +3342,7 @@ fn run_command(text: &str, wire: &Arc<Broadcast>, player_name: &str) -> Command 
         }
         "help" => {
             let _ = rest;
-            Command::Reply("Commands: /help, /list, /kill, /time".to_string())
+            Command::Reply("Commands: /help, /list, /kill, /say, /time, /tp".to_string())
         }
         "me" => {
             if rest.is_empty() {
@@ -3320,6 +3354,35 @@ fn run_command(text: &str, wire: &Arc<Broadcast>, player_name: &str) -> Command 
         "kill" => {
             let _ = rest;
             Command::Kill
+        }
+        "say" => {
+            if rest.is_empty() {
+                Command::Reply("Incorrect argument for command: expected a message".to_string())
+            } else {
+                Command::Say(rest.to_string())
+            }
+        }
+        "tp" => {
+            // Three numbers: where to go. The game takes them as a position,
+            // and a position that is not three numbers is not a position.
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            if parts.len() != 3 {
+                return Command::Reply(
+                    "Usage: /tp <x> <y> <z>".to_string(),
+                );
+            }
+            let mut numbers = [0.0f64; 3];
+            for (slot, part) in numbers.iter_mut().zip(parts.iter()) {
+                match part.parse::<f64>() {
+                    Ok(value) if value.is_finite() => *slot = value,
+                    _ => {
+                        return Command::Reply(
+                            "Usage: /tp <x> <y> <z>".to_string(),
+                        );
+                    }
+                }
+            }
+            Command::Teleport(numbers[0], numbers[1], numbers[2])
         }
         "time" => {
             let (what, value) = match rest.split_once(' ') {

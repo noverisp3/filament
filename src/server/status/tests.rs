@@ -70,6 +70,29 @@ fn a_command_that_does_something_is_not_just_words() {
 }
 
 #[test]
+fn a_say_is_for_everybody_and_a_tp_is_for_one() {
+    let wire = Arc::new(Broadcast::new());
+    assert_eq!(
+        run_command("/say hello", &wire, "noverisp3"),
+        Command::Say("hello".to_string())
+    );
+    // A position is three numbers. Two of them is not a position, and a
+    // number that is not a number is not a number.
+    assert!(matches!(
+        run_command("/tp 10 64", &wire, "noverisp3"),
+        Command::Reply(_)
+    ));
+    assert!(matches!(
+        run_command("/tp 10 wibble 5", &wire, "noverisp3"),
+        Command::Reply(_)
+    ));
+    assert_eq!(
+        run_command("/tp 10 64 -5.5", &wire, "noverisp3"),
+        Command::Teleport(10.0, 64.0, -5.5)
+    );
+}
+
+#[test]
 fn three_blocks_of_falling_are_free_and_the_rest_is_not() {
     // The game's own numbers: the safe distance is three, and the damage is
     // what is left of the fall after those three, floored.

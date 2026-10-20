@@ -361,14 +361,25 @@ fn read_compound(r: &mut Reader, depth: usize) -> Result<Compound, NbtError> {
 /// game refuses a root that is not a compound, which is worth refusing here too:
 /// silently accepting one produces a file that writes and never reads back.
 pub fn read(bytes: &[u8]) -> Result<Compound, NbtError> {
+    read_with_name(bytes).map(|(_, root)| root)
+}
+
+/// Reads a tag and says what the root was called.
+///
+/// The name matters for the files the game writes: a `level.dat` is a root
+/// compound with no name in one version of the game and a root compound
+/// called `Data` in another, and a file written in the wrong one is a file
+/// the game cannot open. Keeping the name it was read with is the only way to
+/// write back a file that the game will still recognise.
+pub fn read_with_name(bytes: &[u8]) -> Result<(String, Compound), NbtError> {
     let mut r = Reader { at: bytes };
     let root_id = r.u8()?;
     if root_id == tag::END {
         return Err(NbtError("the root tag must be a named compound".into()));
     }
-    let _name = r.string()?;
+    let name = r.string()?;
     match read_payload(&mut r, root_id, 0)? {
-        Tag::Compound(c) => Ok(c),
+        Tag::Compound(c) => Ok((name, c)),
         other => Err(NbtError(format!("root is {other:?}, not a compound"))),
     }
 }
@@ -472,6 +483,27 @@ mod tests {
     fn round_trip(c: Compound) -> Compound {
         let bytes = write(&c);
         read(&bytes).expect("reads back what it wrote")
+    }
+
+    #[test]
+    fn a_tag_keeps_the_name_its_root_had() {
+        // The file the game writes has a root with a name, and a file written
+        // with the wrong one is a file the game cannot open. So the name has to
+        // survive a round trip, and not only the contents.
+        let root = Compound::new().put("DataVersion", Tag::Int(5023));
+
+        let named = write_named(&root, "Data");
+        let (name, read) = read_with_name(&named).expect("it reads back");
+        assert_eq!(name, "Data", "the root keeps its name");
+        assert_eq!(
+            read.get("DataVersion"),
+            Some(&Tag::Int(5023)),
+            "and its contents"
+        );
+
+        let unnamed = write(&root);
+        let (name, _) = read_with_name(&unnamed).expect("it reads back");
+        assert_eq!(name, "", "and an unnamed root stays unnamed");
     }
 
     #[test]

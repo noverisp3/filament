@@ -246,7 +246,7 @@ impl World {
     // The spawn comes from the same file, and so does the day of the year
     // the world was left at: both are things the game wrote down and both
     // are lost if this server saves the file without them.
-    if let Some(level) = world.store.as_ref().and_then(|store| store.read_level()) {
+    if let Some((_name, level)) = world.store.as_ref().and_then(|store| store.read_level()) {
         let data = level.compound("Data").unwrap_or(&level);
         if let Some(super::nbt::Tag::Long(t)) = data.get("Time") {
             world.game_time = *t as u64;
@@ -354,14 +354,18 @@ impl World {
         let Some(store) = self.store.as_ref() else {
             return Ok(());
         };
-        let mut level = store.read_level().unwrap_or_else(|| {
-            super::storage::default_level(
-                store.name(),
-                self.game_time,
-                self.day_time,
-                self.spawn,
-            )
-        });
+        let (level_name, mut level) = match store.read_level() {
+            Some((name, level)) => (name, level),
+            None => (
+                "Data".to_string(),
+                super::storage::default_level(
+                    store.name(),
+                    self.game_time,
+                    self.day_time,
+                    self.spawn,
+                ),
+            ),
+        };
         // The file the game writes has its data under a name; a file this
         // build wrote has it at the top. Either way the clock goes in the
         // place the fields are.
@@ -380,7 +384,7 @@ impl World {
             }
             had
         };
-        store.write_level(&level)?;
+        store.write_level(&level_name, &level)?;
         if !had_day_time {
             // The day counter belongs in the clock file, and is put there so
             // the game finds it where it looks.

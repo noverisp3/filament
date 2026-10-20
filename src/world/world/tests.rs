@@ -317,7 +317,9 @@ fn the_level_file_is_edited_rather_than_replaced() {
     );
     {
         let store = crate::world::storage::WorldStore::open(&dir).unwrap();
-        store.write_level(&level).expect("the folder is writable");
+        store
+            .write_level("Data", &level)
+            .expect("the folder is writable");
     }
 
     // Open it, and save it again.
@@ -333,7 +335,12 @@ fn the_level_file_is_edited_rather_than_replaced() {
 
     // And what is on the disk is the same file with the clock moved on.
     let store = crate::world::storage::WorldStore::open(&dir).unwrap();
-    let after = store.read_level().expect("the file is there");
+    let (name, after) = store.read_level().expect("the file is there");
+    assert_eq!(
+        name, "Data",
+        "and the root keeps the name it was written with, because a file \
+         written with the wrong one is a file the game cannot open"
+    );
     assert_eq!(
         after.get("seed"),
         Some(&crate::world::nbt::Tag::Long(987654321)),
@@ -474,7 +481,9 @@ fn the_day_counter_comes_from_the_clock_file() {
     level.remove("DayTime");
     {
         let store = crate::world::storage::WorldStore::open(&dir).unwrap();
-        store.write_level(&level).expect("the folder is writable");
+        store
+            .write_level("Data", &level)
+            .expect("the folder is writable");
         store.write_clocks(626_627).expect("the folder is writable");
     }
 

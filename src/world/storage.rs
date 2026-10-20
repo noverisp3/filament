@@ -300,20 +300,28 @@ impl WorldStore {
     }
 
     /// Reads `level.dat` as stored, if there is one.
-    pub fn read_level(&self) -> Option<Compound> {
+    /// Reads `level.dat`, and says what its root was called.
+    ///
+    /// The name is kept because the file has to be written back the way it
+    /// was found: the game has used more than one shape for this file, and a
+    /// file written in the wrong one is a file the game will not open.
+    pub fn read_level(&self) -> Option<(String, Compound)> {
         let bytes = std::fs::read(self.level_path()).ok()?;
         let bytes = decompress(&bytes).ok()?;
-        super::nbt::read(&bytes).ok()
+        super::nbt::read_with_name(&bytes).ok()
     }
 
     /// Writes `level.dat`.
     ///
-    /// The game wraps it in gzip and names the root `Data`, and puts a lone
-    /// End tag after it. All three matter: a reader that expects an unnamed
-    /// root finds nothing, and an unwritten End tag means the next tag read
-    /// runs into whatever follows.
-    pub fn write_level(&self, level: &Compound) -> io::Result<()> {
-        let bytes = super::nbt::write_named(level, "Data");
+    /// The game wraps it in gzip and puts a lone End tag after it. All of that
+    /// matters: a reader that expects an unnamed root finds nothing, and an
+    /// unwritten End tag means the next tag read runs into whatever follows.
+    ///
+    /// The root keeps the name it was read with, because that is the one
+    /// thing about the file this server has no opinion about -- it is not the
+    /// game's file to reshape.
+    pub fn write_level(&self, name: &str, level: &Compound) -> io::Result<()> {
+        let bytes = super::nbt::write_named(level, name);
         let mut out = Vec::new();
         {
             use std::io::Write;

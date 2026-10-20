@@ -2413,7 +2413,11 @@ fn place_block(
         // no chunk follows: the client drops chunks outside the view distance
         // of it, so leaving it behind means chunks arriving that the client
         // then discards because they fall outside the window it is keeping.
-        let mut out = Vec::new();
+        //
+        // The buffer is the one the whole connection uses, not a new one: a
+        // second buffer would take the chunk batch and leave everything the
+        // packet handling wrote -- the health of a player, the block that was
+        // broken -- in a place nothing ever sends.
         if center_sent != player_chunk {
             let mut body = Vec::new();
             p::write_chunk_cache_center(&mut body, player_chunk.0, player_chunk.1);

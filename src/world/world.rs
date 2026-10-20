@@ -374,6 +374,38 @@ impl World {
         self.spawn
     }
 
+    /// The spawn, put on the ground if it is not on it already.
+    ///
+    /// A spawn with nothing under it is a player who falls the whole way down
+    /// and dies on arrival. The game does not write such a spawn, but this
+    /// server did once, when the spawn was a fixed height, and a world file
+    /// that says so is still out there with the world's name on it.
+    ///
+    /// So the ground is looked for: a spawn with a block within a step or two
+    /// under it is left alone, because that is a player standing on something,
+    /// and one with nothing under it is moved down to the topmost solid block of
+    /// its column.
+    pub fn settle_spawn(&mut self) -> (i32, i32, i32) {
+        let (x, y, z) = self.spawn;
+        self.ensure_chunk(ChunkPos::new(x.div_euclid(16), z.div_euclid(16)));
+
+        for step in 1..=3 {
+            if self.is_solid(super::pos::BlockPos::new(x, y - step, z)) {
+                return self.spawn;
+            }
+        }
+
+        // Nothing under it: the topmost solid block of the column is where a
+        // player stands.
+        for check in (super::chunk::MIN_BLOCK_Y..=y).rev() {
+            if self.is_solid(super::pos::BlockPos::new(x, check, z)) {
+                self.spawn = (x, check + 1, z);
+                break;
+            }
+        }
+        self.spawn
+    }
+
     /// Ticks since the world began.
     pub fn game_time(&self) -> u64 {
         self.game_time

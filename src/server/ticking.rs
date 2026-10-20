@@ -726,7 +726,9 @@ Command::Chunk { pos, reply } => {
         }
 
         Command::SpawnPoint { reply } => {
-            let _ = reply.send(world.spawn_point());
+            // Settled on the ground: a spawn with nothing under it is a
+            // player who falls the whole way down and dies on arrival.
+            let _ = reply.send(world.settle_spawn());
         }
 
         Command::LightChanges { reply } => {

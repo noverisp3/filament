@@ -430,6 +430,29 @@ fn a_made_world_spawns_on_its_ground_and_not_in_the_air() {
 }
 
 #[test]
+fn a_spawn_in_the_air_is_put_on_the_ground() {
+    // A world file can say a spawn that is in the air -- this server wrote
+    // such a file once, when the spawn was a fixed height -- and a player
+    // arriving there falls the whole way down and dies on arrival.
+    let mut world = World::generate(1);
+    let (_, ground, _) = world.spawn_point();
+    world.spawn = (0, ground + 40, 0);
+
+    let (x, y, z) = world.settle_spawn();
+    assert_eq!(y, ground, "the spawn is put back on the ground");
+    assert_eq!((x, z), (0, 0));
+}
+
+#[test]
+fn a_spawn_with_ground_under_it_is_left_alone() {
+    // A spawn on the ground is what the game writes, and it is left alone:
+    // a cave a player chose to arrive in is a spawn too.
+    let mut world = World::generate(1);
+    let before = world.spawn_point();
+    assert_eq!(world.settle_spawn(), before, "and nothing moves it");
+}
+
+#[test]
 fn the_day_counter_comes_from_the_clock_file() {
     // The game moved the day counter out of the level file and into a clock
     // file of its own, so a world written by the game has no DayTime in it at

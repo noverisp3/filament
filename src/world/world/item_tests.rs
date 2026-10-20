@@ -8,7 +8,7 @@
 use super::*;
 use crate::world::chunk::MIN_BLOCK_Y;
 use crate::world::item_entity::LIFETIME;
-use crate::world::terrain::height_at;
+use crate::world::terrain::surface_y;
 
 fn air(world: &World) -> BlockId {
     world.registry().id("air").expect("registered")
@@ -127,7 +127,7 @@ fn the_items_a_player_can_see_are_the_ones_near_them() {
 fn the_height_of_the_terrain_does_not_decide_where_an_item_lands() {
     // A flat world, so the test is about the item and not about the hills.
     let mut world = world_with_a_floor(64);
-    let surface = MIN_BLOCK_Y + height_at(0.0, 0.0) as i32;
+    let surface = surface_y(0, 0);
     assert!(
         surface < 64,
         "the generator put the surface below the floor this test built"

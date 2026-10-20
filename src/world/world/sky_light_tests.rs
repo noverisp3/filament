@@ -2,13 +2,8 @@ use super::*;
 use crate::render::mesh::build_section_mesh;
 use crate::world::chunk::{MIN_BLOCK_Y, SECTIONS_PER_CHUNK};
 use crate::world::light::MAX_LIGHT;
-use crate::world::terrain::height_at;
+use crate::world::terrain::surface_y;
 use std::time::Instant;
-
-/// Surface height of the generated terrain, without needing the world.
-fn surface_y(x: i32, z: i32) -> i32 {
-    MIN_BLOCK_Y + height_at(x as f64, z as f64) as i32
-}
 
 #[test]
 fn open_sky_above_the_terrain_is_fully_lit() {

@@ -27,3 +27,16 @@ pub use frame::{
 pub use primitive::{
     BoundedStr, DecodeError, Ident, VarInt, VarLong, DEFAULT_MAX_STRING,
 };
+
+/// Helpers the tests share.
+#[cfg(test)]
+pub(crate) mod test_helpers {
+    use crate::protocol::VarInt;
+
+    /// A VarInt as bytes, for building a body to read back.
+    pub fn varint(n: i32) -> Vec<u8> {
+        let mut out = Vec::new();
+        VarInt(n).write(&mut out);
+        out
+    }
+}

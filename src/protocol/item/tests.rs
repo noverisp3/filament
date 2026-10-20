@@ -1,11 +1,5 @@
 use super::*;
-use crate::protocol::VarInt;
-
-fn varint(n: i32) -> Vec<u8> {
-    let mut out = Vec::new();
-    VarInt(n).write(&mut out);
-    out
-}
+use crate::protocol::test_helpers::varint;
 
 #[test]
 fn an_empty_stack_is_one_zero() {

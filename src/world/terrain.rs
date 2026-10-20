@@ -92,8 +92,8 @@ pub fn height_at(world_x: f64, world_z: f64) -> u32 {
 /// Not a height above sea level and not a position: the *top solid* y. A
 /// player's feet go one above this, because this block occupies the space from
 /// this y up to the next one.
-pub fn surface_y(world_x: f64, world_z: f64) -> i32 {
-    MIN_BLOCK_Y + height_at(world_x, world_z) as i32
+pub fn surface_y(world_x: i32, world_z: i32) -> i32 {
+    MIN_BLOCK_Y + height_at(world_x as f64, world_z as f64) as i32
 }
 
 /// Where a player stands on arrival, in world coordinates.
@@ -113,9 +113,9 @@ pub fn spawn_point() -> (f64, f64, f64) {
     // chunks fill column by column at integer coordinates, so the surface at
     // half a block is the surface of a different column, and a spawn taken
     // from it is a player standing in the air next to the ground.
-    const X: f64 = 0.0;
-    const Z: f64 = 0.0;
-    (X, surface_y(X, Z) as f64 + 1.0, Z)
+    const X: i32 = 0;
+    const Z: i32 = 0;
+    (X as f64, surface_y(X, Z) as f64 + 1.0, Z as f64)
 }
 
 /// Grass on top, a few blocks of dirt, stone below that.

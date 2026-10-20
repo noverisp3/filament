@@ -1,20 +1,10 @@
 use super::*;
 use crate::protocol::item::ItemStack;
 
-/// Reads a VarInt back out of a body, for tests that care about what a
-/// packet actually says rather than that it was produced.
+/// Reads a VarInt out of a body, for tests that care what a packet says.
 fn take_varint(b: &mut &[u8]) -> i32 {
-    let mut value = 0i32;
-    let mut shift = 0;
-    loop {
-        let byte = b[0];
-        *b = &b[1..];
-        value |= ((byte & 0x7f) as i32) << shift;
-        if byte & 0x80 == 0 {
-            return value;
-        }
-        shift += 7;
-    }
+    let (value, _) = VarInt::read(b).expect("a VarInt");
+    value.0
 }
 
 #[test]
@@ -396,7 +386,7 @@ fn a_player_spawns_on_the_ground_and_not_forty_blocks_above_it() {
     // The old constant was 64.0 and this terrain's surface is -16..24, so
     // every player fell on arrival.
     let (x, y, z) = crate::world::terrain::spawn_point();
-    let surface = crate::world::terrain::surface_y(x, z);
+    let surface = crate::world::terrain::surface_y(x as i32, z as i32);
     assert_eq!(y, surface as f64 + 1.0, "feet are one above the top solid block");
     assert!(surface < 64, "and nowhere near where the old constant put them");
 }

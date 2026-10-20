@@ -5,14 +5,8 @@
 //! a cave is the only light there is.
 
 use super::*;
-use crate::world::chunk::MIN_BLOCK_Y;
 use crate::world::light::MAX_LIGHT;
-use crate::world::terrain::height_at;
-
-/// Surface height of the generated terrain, without needing the world.
-fn surface_y(x: i32, z: i32) -> i32 {
-    MIN_BLOCK_Y + height_at(x as f64, z as f64) as i32
-}
+use crate::world::terrain::surface_y;
 
 /// Puts a block that glows into the world, and gives back where it went.
 fn place_glowstone(world: &mut World, x: i32, y: i32, z: i32) -> BlockPos {

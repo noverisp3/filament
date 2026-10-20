@@ -81,6 +81,8 @@ Grouped by what they are about, not by when they were done.
 
 - [x] Chunk storage in paletted sections
 - [x] Sky light across sections and chunks
+- [x] Block light: a lamp's pool, worked out over the whole world and
+      relit around every edit, and crossing a chunk border without a seam
 - [x] Greedy meshing
 - [x] Raycasting, for the reach check
 - [x] Breaking a block
@@ -149,8 +151,11 @@ Grouped by what they are about, not by when they were done.
       startup; edits and generated chunks are written back on shutdown, and a
       restarted server continues from where it stopped. Only changed chunks are
       saved.
-- [ ] Lighting. `world/lighting.rs` exists and has tests; nothing calls it yet,
-      so the server sends blocks without relighting after an edit.
+- [ ] Lighting. The sun and the lamps are done: a chunk works its light out
+      when it arrives, an edit relights everything it reaches, and the client
+      is told the sections that moved. Not done: the other blocks that give
+      off light (torches, lanterns, fire), the ones that change the shape of
+      it (a door, a slab, a pane), and the sun moving across the sky.
 - [ ] Mobs, item drops, water, weather
 - [ ] An inventory the server can actually trust. Clicks are simulated from
       the client's reports, and a stale count can leave the server holding the
@@ -158,7 +163,7 @@ Grouped by what they are about, not by when they were done.
       the client authoritative for *arrangement*.
 - [ ] Authentication
 
-886 tests. A client connects, negotiates, and gets a world: either one the
+975 tests. A client connects, negotiates, and gets a world: either one the
 game saved, read out of its own folder, or one generated on the spot — grass
 on top, dirt under it, stone below, hills from two octaves of value noise. A
 second client joins the same world and sees the first one walk about, break and
@@ -179,3 +184,13 @@ five-block registry and the game's thirty-five thousand block states are
 unrelated, so blocks are mapped between them on the way out. And a world folder
 is **read, not replaced**: a server that wrote its own level file over the
 game's would reset a player's world without saying so.
+
+The light is the world's own, and it is the part that took longest to get
+right. The client's light engine numbers its sections from *one below* the
+world, so the world's bottom section is mask bit one and the padding section
+underneath it is bit zero; a server that counts from the world's bottom puts
+every section of light sixteen blocks below where it belongs. And a lamp's pool
+has to cross the border between two chunks without a seam, which means working
+the light out over a region that is not aligned to the chunks in it. Both were
+wrong at some point, and both showed up as a lamp that lit the wrong place, or
+as a strip of darkness across the middle of a chunk.

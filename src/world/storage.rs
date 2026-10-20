@@ -1,13 +1,10 @@
 ﻿//! The world folder: `level.dat` in, region files out.
 //!
 //! Two things here are not where anyone would put them, and both were found by
-//! looking at a world the game had actually saved rather than at the
-//! decompiled reference:
+//! looking at a world the game had actually saved:
 //!
 //! * Terrain is not in `world/region/`. It is in
-//!   `world/dimensions/minecraft/overworld/region/`. The reference's region
-//!   code never says where it lives, because in the game the caller decides,
-//!   and the caller has moved on since.
+//!   `world/dimensions/minecraft/overworld/region/`.
 //! * `level.dat` has no seed in it. Seed and generator moved into the
 //!   dimension's own file.
 //!
@@ -241,10 +238,7 @@ impl WorldStore {
     /// Puts several chunks back and writes each region out once.
     ///
     /// A region file holds a thousand chunks and is written whole, so saving
-    /// them one at a time writes the same megabytes over and over: twenty
-    /// changed chunks in one region is two hundred megabytes of writing for
-    /// the same file. Here every chunk goes into its region's memory first
-    /// and the regions are written once each, at the end.
+    /// them one at a time writes the same megabytes over and over.
     ///
     /// Returns how many chunks were written.
     pub fn save_many(

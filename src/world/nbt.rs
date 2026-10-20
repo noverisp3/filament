@@ -1,25 +1,21 @@
 ﻿//! Named Binary Tag: how the game writes everything to disk.
 //!
 //! Not invented for filament. A world saved by a real server, opened by a real
-//! server, is these bytes; `level.dat`, every chunk in `region/`, and every
+//! server, is these bytes: `level.dat`, every chunk in `region/`, and every
 //! player file in `playerdata/` are the same format.
 //!
 //! The rules that are easy to get wrong, and all of which produce a file that
 //! loads and then shows nonsense:
 //!
-//! * **Every number is big-endian.** Java's `DataOutput` is big-endian and so is
-//!   everything here. A little-endian `level.dat` opens, and then reports a seed
-//!   of zero and a version of zero.
+//! * **Every number is big-endian.** A little-endian `level.dat` opens, and
+//!   then reports a seed of zero and a version of zero.
 //! * **Strings are length-prefixed in bytes, not characters.** Two bytes of
-//!   length, then UTF-8. A name with an accent in it is more bytes than it has
-//!   characters, and a length counted in characters truncates it.
-//! * **A compound is a name and a tag, repeated, ending in a bare zero.** The
-//!   zero carries no name; it is the only place a tag has no name.
-//! * **The root is a bare zero followed by the root tag.** So a file starts
-//!   `0A 00 00` -- compound, empty name -- and not with the tag id alone.
-//! * **Lists carry their element type once**, even when empty. An empty list of
-//!   nothing is `09 00 00` and an empty list of compounds is `09 0A 00 00`, and
-//!   the byte is not optional.
+//!   length, then UTF-8: a name with an accent is more bytes than characters.
+//! * **A compound is a name and a tag, repeated, ending in a bare zero.**
+//! * **The root is a bare zero followed by the root tag**, so a file starts
+//!   `0A 00 00` and not with the tag id alone.
+//! * **Lists carry their element type once**, even when empty: an empty list of
+//!   nothing is `09 00 00` and an empty list of compounds is `09 0A 00 00`.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -367,10 +363,8 @@ pub fn read(bytes: &[u8]) -> Result<Compound, NbtError> {
 /// Reads a tag and says what the root was called.
 ///
 /// The name matters for the files the game writes: a `level.dat` is a root
-/// compound with no name in one version of the game and a root compound
-/// called `Data` in another, and a file written in the wrong one is a file
-/// the game cannot open. Keeping the name it was read with is the only way to
-/// write back a file that the game will still recognise.
+/// compound with no name in one version of the game and one called `Data` in
+/// another, and a file written in the wrong one is a file the game cannot open.
 pub fn read_with_name(bytes: &[u8]) -> Result<(String, Compound), NbtError> {
     let mut r = Reader { at: bytes };
     let root_id = r.u8()?;
@@ -435,18 +429,11 @@ fn put_payload(out: &mut Vec<u8>, t: &Tag) {
     }
 }
 
-/// Writes a tag as a whole file.
-///
-/// `NbtIo.writeUnnamedTag` is three lines and the order matters: the tag id,
-/// then an empty name, then the payload. There is no leading zero -- an empty
-/// root compound is four bytes, `0A 00 00 00`, and the last of them is the
-/// payload's own terminator.
 /// Writes a root tag under a name.
 ///
 /// `level.dat` is a compound named `Data`; a chunk inside a region file is an
-/// unnamed one. The name is the only difference, and a reader looking for an
-/// unnamed root finds nothing at all in a level file -- it does not complain,
-/// it just has no keys.
+/// unnamed one. A reader looking for an unnamed root finds nothing at all in a
+/// level file: it does not complain, it just has no keys.
 pub fn write_named(root: &Compound, name: &str) -> Vec<u8> {
     let mut out = Vec::new();
     out.push(tag::COMPOUND);
@@ -460,6 +447,10 @@ pub fn write_named(root: &Compound, name: &str) -> Vec<u8> {
     out
 }
 
+/// Writes a tag as a whole file.
+///
+/// `NbtIo.writeUnnamedTag` is three lines and the order matters: the tag id,
+/// then an empty name, then the payload. There is no leading zero.
 pub fn write(root: &Compound) -> Vec<u8> {
     write_named(root, "")
 }

@@ -1,20 +1,16 @@
 ﻿//! A chunk as the NBT the region file stores, and back.
 //!
-//! The shape is not invented. `SerializableChunkData.write()` decides the keys
+//! The shape is not invented: `SerializableChunkData.write()` decides the keys
 //! and `SimpleBitStorage` decides how the bits sit inside the longs, and both
-//! are easy to get subtly wrong in a way that still loads -- the file is
-//! readable, it just describes a different world. So the notes below are only
-//! where something is surprising.
+//! are easy to get subtly wrong in a way that still loads.
 //!
-//! What is written: position, status, one entry per section with its blocks,
-//! biomes and Y, plus the empty scaffolding the reader expects to be present
-//! (`block_entities`, `block_ticks`, `fluid_ticks`, `PostProcessing`,
-//! `structures`). Light is not written -- `isLightOn` is false, so the reader
-//! knows to relight rather than trust what is in the file.
+//! Written: position, status, one entry per section with its blocks, biomes
+//! and Y, plus the empty scaffolding the reader expects (`block_entities`,
+//! `block_ticks`, `fluid_ticks`, `PostProcessing`, `structures`). Light is not
+//! written, so the reader relights rather than trust the file.
 //!
-//! What is not written: entities, structures' contents, `UpgradeData`,
-//! `blending_data`. Filament has none of them, and leaving them out is what the
-//! game does for a field it has nothing for.
+//! Not written: entities, structures' contents, `UpgradeData`,
+//! `blending_data`. Filament has none of them.
 
 use super::block::{BlockId, BlockRegistry};
 use super::chunk::{Chunk, MIN_BLOCK_Y, MIN_SECTION_Y, SECTIONS_PER_CHUNK};
@@ -79,9 +75,8 @@ fn registry_name(vanilla: &str) -> Option<&str> {
 /// This is not a cast. Filament's [`super::bitpack::BitArray`] puts entry `i` at
 /// bit `i * bits` of a flat stream, so an entry can straddle two words. The
 /// game packs `64 / bits` entries into each long and never lets one cross the
-/// boundary (`SimpleBitStorage.valuesPerLong`). Both are correct in their own
-/// world; writing one as the other produces a file that decodes to noise
-/// without any error anywhere.
+/// boundary (`SimpleBitStorage.valuesPerLong`). Writing one as the other
+/// produces a file that decodes to noise without any error anywhere.
 fn to_vanilla_words(bits: u8, src: &[u64], len: usize) -> Vec<i64> {
     if bits == 0 {
         return Vec::new();
@@ -147,11 +142,9 @@ pub fn from_vanilla_words(bits: u8, src: &[i64], len: usize) -> Vec<u64> {
 
 /// The index array for one section, at the width the chunk format uses.
 ///
-/// Not the same as the width the array happens to be using. A section with
-/// four distinct blocks is stored in memory in two bits, and the format has no
-/// two-bit strategy: it starts at four. Writing the in-memory layout straight
-/// out produces a file that reads back as a different chunk, and this build's
-/// own reader is the first thing to notice.
+/// Not the same as the width the array happens to be using: a section with four
+/// distinct blocks is stored in memory in two bits, and the format has no
+/// two-bit strategy, it starts at four.
 fn encode_section(blocks: &super::palette::Paletted<BlockId>) -> (u8, Vec<i64>) {
     let len = blocks.len();
     let (internal, words) = blocks.bits_and_words();
@@ -181,8 +174,8 @@ fn encode_section(blocks: &super::palette::Paletted<BlockId>) -> (u8, Vec<i64>) 
 /// One block as the palette entry the game stores.
 ///
 /// Written as a bare string, which is what a real chunk holds for every block
-/// that has no properties -- checked against a world the game saved, where
-/// three different shapes turn up in the same file:
+/// that has no properties. Reading also accepts the two other shapes a chunk
+/// may hold, because the file may have come from a build that writes them:
 ///
 /// ```text
 /// "minecraft:stone"                     the common one
@@ -190,9 +183,6 @@ fn encode_section(blocks: &super::palette::Paletted<BlockId>) -> (u8, Vec<i64>) 
 /// {"id": "minecraft:tall_seagrass",     a block that has properties
 ///  "properties": {...}}
 /// ```
-/// Filament's blocks have no properties, so all of them are default states and
-/// all of them are strings. Reading still accepts the other two, because the
-/// file may have come from a build that writes them.
 ///
 /// Note that the third shape is keyed `id`, not `Name`. `BlockState.java` in
 /// the reference decompilation still says `Name`, and following it would have

@@ -1,10 +1,8 @@
 ﻿//! Region files: `world/region/r.X.Z.mca`, thirty-two by thirty-two chunks each.
 //!
-//! The layout is a consequence of one decision and nothing else: a region file
-//! has to be **written while it is being read**, so the index of where each
-//! chunk lives cannot be stored inside the chunks. It goes in a fixed-size
-//! header at the front, and everything else in the file is dead space that used
-//! to hold chunks that have since moved or grown.
+//! The layout follows from one decision: a region file has to be **written
+//! while it is being read**, so the index of where each chunk lives cannot be
+//! stored inside the chunks. It goes in a fixed-size header at the front.
 //!
 //! ```text
 //! byte 0        4096 bytes   offsets   -- 1024 i32, see below
@@ -13,17 +11,12 @@
 //! ```
 //!
 //! A chunk at `(x, z)` inside a region lives at index `(x & 31) + (z & 31) * 32`,
-//! which is why region coordinates are divided by 32 and chunk coordinates are
-//! only ever taken modulo 32.
+//! which is why region coordinates are divided by 32.
 //!
 //! **The offset word packs two numbers.** `RegionFile.getSectorNumber` and
 //! `getNumSectors` read it as `offset >> 8` for where and `offset & 0xFF` for
-//! how many sectors -- 256 would collide with the sign bit, which is why a
-//! chunk of 256 sectors or more goes to its own file instead of here.
-//!
-//! A zero offset means the chunk is not there. That is the only absence marker,
-//! and it is why sector 2 is the first sector any chunk can occupy: sector 0
-//! and sector 1 are the header.
+//! how many sectors. A zero offset means the chunk is not there, which is why
+//! sector 2 is the first sector any chunk can occupy.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -204,12 +197,8 @@ fn sectors_for(size: usize) -> usize {
 
 /// A region file, held whole in memory.
 ///
-/// Every chunk is at most a few hundred kilobytes and a region is at most a few
-/// hundred of them, so a region is small enough that reading one is cheaper than
-/// seeking around in it. Writing therefore becomes "lay the records out again and
-/// write the whole file", which is far simpler than allocating and freeing
-/// sectors as chunks grow, and a server that saves on quit and on chunk unload
-/// does not care.
+/// A region is small enough that reading one is cheaper than seeking around in
+/// it, so writing is "lay the records out again and write the whole file".
 #[derive(Debug, Clone, Default)]
 pub struct RegionFile {
     chunks: BTreeMap<usize, Compound>,

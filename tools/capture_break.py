@@ -39,6 +39,8 @@ SB_CLIENT_TICK_END = 13
 SB_KEEP_ALIVE = 28
 SB_PING_REQUEST = 38
 SB_PLAYER_ACTION = 41
+SB_PLAYER_POSITION = 30
+CB_SOUND = 119
 SB_CHANGE_GAME_MODE = 5
 
 # ServerboundPlayerActionPacket$Action, in declaration order.
@@ -273,6 +275,10 @@ def main():
                            "size": len(body), "hex": body.hex()})
             print(f"<- {INTERESTING[pid]}: {described}  ({len(body)} bytes)")
 
+        if pid == CB_SOUND:
+            sound, o = read_varint(body, offset)
+            print(f"<- SOUND id {sound}")
+
         index.append({"dir": "s2c", "phase": state, "id": pid, "size": len(body)})
         if pid not in INTERESTING:
             counts[pid] = counts.get(pid, 0) + 1
@@ -313,6 +319,24 @@ def main():
 
         if broke and time.time() - started > 6:
             print("six seconds after the break")
+            # Now fall, so that the server tells us the sound of being hurt.
+            # The sound ids a client knows are not the ones the report gives,
+            # and the only honest way to learn one is to watch a server send
+            # it.
+            up = struct.pack(">ddd", 0.5, 200.0, 0.5) + struct.pack(">ff", 0.0, 0.0)
+            c.send(SB_PLAYER_POSITION, up + b"\x00" + b"\x00")
+            print("went up")
+            for _ in range(10):
+                time.sleep(0.1)
+                c.send(SB_CLIENT_TICK_END)
+            down = struct.pack(">ddd", 0.5, 60.0, 0.5) + struct.pack(">ff", 0.0, 0.0)
+            c.send(SB_PLAYER_POSITION, down + b"\x00" + b"\x00")
+            print("fell")
+            fell_at = time.time()
+            continue
+
+        if broke and time.time() - started > 26:
+            print("twenty seconds after the fall")
             break
 
     with open(os.path.join(OUT, f"{port}_index.jsonl"), "w", encoding="utf-8") as f:

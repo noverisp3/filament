@@ -1,15 +1,14 @@
-"""Places a block and watches the light the server sends back.
+"""Places a lamp and reads the light update the server sends back.
 
     python tools/light_place.py [host] [port]
 
-The point is the light update that follows a placement: the mask it carries
-names the sections the light belongs to, and the client's light engine
-numbers its sections from one below the world, so the world's own bottom
-section is bit 1.
+The point is to see the light the client is given after a lamp is placed, and
+where it stops. The server's own numbers are the yardstick; this is what the
+client is handed.
 
-The block placed is a glowstone, because a glowstone is the block whose
-light is worth watching: the server works out a pool of light around it and
-sends the sections that pool is in.
+The lamp goes near the edge of a chunk, so the light has to cross into the
+next one, and a one-block gap at the border shows up here rather than in the
+world.
 """
 
 import os
@@ -24,25 +23,59 @@ from capture_break import Client  # noqa: E402
 PROTOCOL_VERSION = 777
 
 SB_USE_ITEM_ON = 66
-SB_SET_HELD_ITEM = 47
 SB_PLAYER_POSITION = 31
 SB_CLIENT_TICK_END = 13
 SB_ACCEPT_TELEPORT = 0
+SB_CHAT = 2
 
 CB_LIGHT_UPDATE = 49
 CB_BLOCK_UPDATE = 8
+CB_PLAYER_POSITION = 73
+CB_KEEP_ALIVE = 45
+CB_PING = 62
 
-# The glowstone's state id in the game's own table.
-GLOWSTONE_STATE = 1
+# The client's light engine numbers its sections from one below the world.
+MIN_LIGHT_SECTION = -5
 
-
-def pack_block_pos(x, y, z):
-    """The packed position a block_update carries."""
-    return ((x & 0x3FFFFFF) << 38) | ((z & 0x3FFFFFF) << 12) | (y & 0xFFF)
+# Where the lamp goes: two blocks from the edge of the chunk at x = 0, so the
+# light has to cross into the chunk at x = 1.
+LAMP_X = 14
+LAMP_Y = 70
+LAMP_Z = 8
 
 
 def named(mask):
     return [b * 8 + bit for b, byte in enumerate(mask) for bit in range(8) if byte >> bit & 1]
+
+
+def cell(data, x, y, z):
+    """The light at a cell, in the game's own packing."""
+    index = x + z * 16 + y * 256
+    byte = data[index >> 1]
+    return (byte >> 4) if index & 1 else (byte & 0x0F)
+
+
+def pack_block_pos(x, y, z):
+    return ((x & 0x3FFFFFF) << 38) | ((z & 0x3FFFFFF) << 12) | (y & 0xFFF)
+
+
+def read_light_update(body, off):
+    x, off = read_varint(body, off)
+    z, off = read_varint(body, off)
+    masks = []
+    for _ in range(4):
+        length, off = read_varint(body, off)
+        masks.append(body[off:off + length])
+        off += length
+    layers = []
+    for _ in range(2):
+        count, off = read_varint(body, off)
+        arrays = []
+        for _ in range(count):
+            length, off = read_varint(body, off)
+            arrays.append(body[off:off + length])
+            off += length
+    return (x, z), masks, layers
 
 
 def main():
@@ -64,9 +97,9 @@ def main():
 
     state = "login"
     answered = False
-    placed = False
     deadline = time.time() + 120
-    teleport = None
+    placed = False
+    updates = []
 
     while time.time() < deadline:
         body = c.recv()
@@ -100,69 +133,62 @@ def main():
                 state = "play"
             continue
 
-        # In play.
-        if pid == 73:  # the player position: the server puts the player somewhere
+        if pid == CB_PLAYER_POSITION:
             teleport, _ = read_varint(body, off)
             position = body[off + 1:off + 25]
             c.send(SB_ACCEPT_TELEPORT, varint(teleport) + position + body[off + 25:off + 33])
             c.send(SB_CLIENT_TICK_END)
-            # Tell the server where the player is, so it will answer.
-            c.send(
-                SB_PLAYER_POSITION,
-                struct.pack(">ddd", 8.5, 70.0, 8.5)
-                + struct.pack(">ff", 0.0, 0.0)
-                + b"\x00"
-                + b"\x00",
-            )
-            c.send(SB_CLIENT_TICK_END)
             continue
 
-        if pid == 45:  # keep alive
+        if pid == CB_KEEP_ALIVE:
             c.send(28, body[off:])
             continue
-
-        if pid == 62:  # ping
+        if pid == CB_PING:
             c.send(38, body[off:])
             continue
 
-        if pid == CB_BLOCK_UPDATE and not placed:
-            # The server is telling the client a block changed. That is our cue
-            # to place one: it means the world is there.
-            placed = True
+        if pid == CB_LIGHT_UPDATE:
+            key, masks, layers = read_light_update(body, off)
+            updates.append((key, masks, layers))
             continue
 
-        if pid == CB_LIGHT_UPDATE:
-            x, off = read_varint(body, off)
-            z, off = read_varint(body, off)
-            masks = []
-            for _ in range(4):
-                length, off = read_varint(body, off)
-                masks.append(body[off:off + length])
-                off += length
-            arrays = []
-            for _ in range(2):
-                count, off = read_varint(body, off)
-                layer = []
-                for _ in range(count):
-                    length, off = read_varint(body, off)
-                    layer.append(body[off:off + length])
-                    off += length
-                arrays.append(layer)
-            print(f"light update for chunk {x},{z}")
-            print(f"  sky present: {masks[0].hex()} bits {named(masks[0])}")
-            print(f"  block present: {masks[1].hex()} bits {named(masks[1])}")
-            print(f"  sky empty: {masks[2].hex()} bits {named(masks[2])}")
-            print(f"  block empty: {masks[3].hex()} bits {named(masks[3])}")
-            for index, data in enumerate(arrays[1]):
+        if pid == CB_BLOCK_UPDATE and not placed:
+            placed = True
+            # Place the lamp: the hand, the position, the face, the click
+            # point, two flags and the client's prediction number.
+            packed = pack_block_pos(LAMP_X, LAMP_Y, LAMP_Z)
+            body_use = (
+                varint(0)
+                + struct.pack(">q", packed)
+                + varint(1)  # the face: up
+                + struct.pack(">fff", 0.5, 1.0, 0.5)
+                + b"\x00"  # not inside the block
+                + b"\x00"  # not the world border
+                + varint(1)  # the client's prediction number
+            )
+            c.send(SB_USE_ITEM_ON, body_use)
+            print(f"placed a lamp at {LAMP_X} {LAMP_Y} {LAMP_Z}")
+            continue
+
+    print(f"{len(updates)} light updates")
+    for key, masks, layers in updates:
+        print(f"chunk {key}")
+        for label, mask, arrays in zip(
+            ("sky present", "block present", "sky empty", "block empty"),
+            masks,
+            (layers[0], layers[1], None, None),
+        ):
+            bits = named(mask)
+            print(f"  {label}: {mask.hex()} bits {bits}")
+            if arrays is None:
+                continue
+            for bit, data in zip(bits, arrays):
                 lit = sum(
                     1
                     for k in range(len(data) * 2)
                     if ((data[k // 2] >> (4 if k % 2 else 0)) & 0xF) > 0
                 )
-                print(f"  block array {index}: {len(data)} bytes, {lit} lit cells")
-            return
-
-    print("no light update")
+                print(f"    bit {bit} (section y={bit + MIN_LIGHT_SECTION}): {lit} lit cells")
 
 
 if __name__ == "__main__":

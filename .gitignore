@@ -22,3 +22,9 @@ captured/packets.jsonl
 # verdict that is only true of that run. Nothing reads them twice.
 captured/break/
 captured/ghost/
+
+# A scratch script: it looks through the decompiled client for the sound
+# registrations, which is a question the plan file is still asking. It reads
+# the game's source and prints what it finds, and it belongs to the person
+# asking rather than to the repository.
+_findsounds.py

@@ -1,39 +1,26 @@
 //! Telling the other players what one of them did.
 //!
-//! Two people on this server share a world: one digs, and when the other arrives
-//! the hole is there. But sharing the world is not the same as sharing what
-//! happens in it. The digger is told about its own dig, because its connection
-//! made it, and nobody else is told anything at all, so the second player keeps
-//! looking at ground that is no longer there until they reconnect and the chunk
-//! is sent again.
-//!
 //! # Why a channel rather than a shared socket
 //!
 //! Each connection owns its stream and writes to it from its own thread. The
 //! alternative is handing the writer out to be locked from elsewhere, which
-//! means a second thread can block a connection on a write, and that a socket
-//! error can arrive on a thread that did not open it.
+//! means a second thread can block a connection on a write.
 //!
-//! So pushes go into a queue per connection, and that connection drains it in the
-//! same loop that already drains its socket. Nothing is written to a socket by a
-//! thread that does not own it.
+//! So pushes go into a queue per connection, and that connection drains it in
+//! the same loop that already drains its socket. Nothing is written to a socket
+//! by a thread that does not own it.
 //!
 //! # What it costs
 //!
-//! A client that stops reading has its queue grow without bound, since these are
-//! unbounded channels. That is a real limit and it is not defended against yet.
-//! The fix is a bounded queue that drops the oldest push for a client that is
-//! behind, on the grounds that a client which cannot keep up is better served by
-//! a few missing updates than by the server running out of memory.
+//! A client that stops reading has its queue grow without bound, since these
+//! are unbounded channels. The fix is a bounded queue that drops the oldest
+//! push for a client that is behind.
 //!
 //! # Why not just everyone, for now
 //!
 //! Every push goes to every player, including ones who have never loaded the
-//! chunk it is about. That is wasted work but it is not wrong: a client ignores a
-//! block update for a chunk it does not hold. Narrowing it to the players who
-//! loaded the chunk wants each connection to publish its chunk set, which is
-//! three hundred entries and moves whenever the player walks. Worth doing and
-//! not worth doing before it is needed.
+//! chunk it is about. That is wasted work but it is not wrong: a client
+//! ignores a block update for a chunk it does not hold.
 
 use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -96,11 +83,7 @@ struct Sink {
     /// distance rather than a place, so the server cannot keep one copy of
     /// "where they are": it has to keep one copy per pair, because a client
     /// joining halfway through somebody's walk has been told a different
-    /// starting point than one that was there from the start. Keeping the
-    /// player's real position here and sending that instead would sidestep the
-    /// problem, and the game does not do it because a client that is sent
-    /// absolute positions instead of deltas interpolates differently and
-    /// rubber-bands on a lossy link.
+    /// starting point than one that was there from the start.
     seen: std::collections::HashMap<u64, Seen>,
 }
 
@@ -112,13 +95,9 @@ struct Seen {
     pitch: f32,
     /// Whether the body is currently in this observer's world at all.
     ///
-    /// Kept alongside the position rather than by removing the entry, because
-    /// the two mean different things. A missing entry is "this observer was
-    /// never introduced to that player", which happens in the window between
-    /// one connection registering and the other finishing its chunks, and
-    /// spawning a body into a client that has not been told the name yet is
-    /// its own fault. A present entry with this false is "we took it away
-    /// again because they walked off", and that one needs putting back.
+    /// A missing entry is "this observer was never introduced to that player",
+    /// and a present entry with this false is "we took it away again because
+    /// they walked off", which needs putting back.
     visible: bool,
 }
 
@@ -435,11 +414,7 @@ impl Broadcast {
             // The game measures x and z and ignores y, and that is the whole
             // difference between this and the obvious three-dimensional
             // version: measuring vertically as well hides two players standing
-            // three blocks apart on a hillside, which is precisely the case
-            // somebody on the ridge wants to be able to see.
-            //
-            // The range is the observer's own view distance, because it is
-            // their client that has to hold the body.
+            // three blocks apart on a hillside.
             let range = visible_range(sink.view_chunks);
             let ex = subject_pos.0 - sink.pos.0;
             let ez = subject_pos.2 - sink.pos.2;
@@ -556,10 +531,7 @@ impl Broadcast {
             // move_entity_pos_rot has exactly two angles on it, yRot and xRot,
             // and the first of those is the body's. The head turns on its own
             // and is a separate packet for that reason: a player can look
-            // sideways while walking in a straight line, and the body angle
-            // cannot say so. add_entity does carry a third angle for the head,
-            // which is why a body arrived facing the right way and then stopped
-            // turning once it started moving.
+            // sideways while walking in a straight line.
             if subject_yaw != previous.yaw {
                 let mut head = Vec::new();
                 crate::protocol::play::write_rotate_head(&mut head, subject_entity_id, subject_yaw);
@@ -740,22 +712,13 @@ id::LEVEL_EVENT => {
 /// Announces that a player has gone, when their connection ends however it ends.
 ///
 /// A guard rather than a call at the end of the connection, because the
-/// connection has a great many ways out â€” a clean return, a read error, a write
-/// that failed, an early return when the world would not answer â€” and a line of
+/// connection has a great many ways out — a clean return, a read error, a write
+/// that failed, an early return when the world would not answer — and a line of
 /// cleanup written at the bottom of a function is reached by none of the others.
-/// A value that is dropped is reached by all of them, including the ones nobody
-/// writes down.
 ///
-/// It is armed at the **login**, not at the play phase, because a player takes
-/// their place in the list of players when they log in: a push that arrives
-/// between the login and the play phase has to go somewhere, and the list of
-/// players is where it goes. A seat taken at the login and given back at the
-/// play phase is a seat nobody gives back when the client cancels while the
-/// world is loading, and the count of players only ever goes up.
-///
-/// The seat itself is not this guard's business: that is the registration's,
-/// and the registration is dropped however the connection ends and in whatever
-/// phase it was in.
+/// The seat the player held is not this guard's business: that is the
+/// registration's, and the registration is dropped however the connection ends
+/// and in whatever phase it was in.
 pub struct Departure {
     wire: std::sync::Arc<Broadcast>,
     id: u64,

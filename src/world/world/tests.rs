@@ -2,18 +2,6 @@ use super::*;
 use crate::world::chunk::MIN_BLOCK_Y;
 use crate::world::pos::LocalPos;
 
-fn test_world() -> World {
-    World::generate(1)
-}
-
-fn stone(world: &World) -> BlockId {
-    world.registry().id("stone").expect("registered")
-}
-
-fn air(world: &World) -> BlockId {
-    world.registry().id("air").expect("registered")
-}
-
 /// Builds a world with a single known block, for deterministic tests.
 fn world_with_one(radius: i32, chunk: ChunkPos, local: LocalPos) -> (World, BlockId) {
     let mut world = World::generate(radius);

@@ -1,13 +1,5 @@
 use super::*;
 
-fn test_world() -> World {
-    World::generate(1)
-}
-
-fn stone(world: &World) -> BlockId {
-    world.registry().id("stone").expect("registered")
-}
-
 #[test]
 fn a_tick_moves_the_clock_on_by_one() {
     let mut world = test_world();

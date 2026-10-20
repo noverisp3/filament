@@ -1388,6 +1388,26 @@ impl World {
     }
 }
 
+/// A generated world, for the tests of this module.
+///
+/// One copy, because three of the test files wanted one.
+#[cfg(test)]
+pub(crate) fn test_world() -> World {
+    World::generate(1)
+}
+
+/// The stone block, for the tests of this module.
+#[cfg(test)]
+pub(crate) fn stone(world: &World) -> BlockId {
+    world.registry().id("stone").expect("registered")
+}
+
+/// The air block, for the tests of this module.
+#[cfg(test)]
+pub(crate) fn air(world: &World) -> BlockId {
+    world.registry().id("air").expect("registered")
+}
+
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

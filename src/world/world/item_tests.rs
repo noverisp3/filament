@@ -10,14 +10,6 @@ use crate::world::chunk::MIN_BLOCK_Y;
 use crate::world::item_entity::LIFETIME;
 use crate::world::terrain::surface_y;
 
-fn air(world: &World) -> BlockId {
-    world.registry().id("air").expect("registered")
-}
-
-fn stone(world: &World) -> BlockId {
-    world.registry().id("stone").expect("registered")
-}
-
 /// A world with a flat floor at `floor`, and nothing else in the way.
 ///
 /// The floor is the solid block at `floor` itself, so a thing that lands on it

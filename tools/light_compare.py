@@ -30,7 +30,7 @@ def read_long_array(buf, off):
 
 def read_byte_array(buf, off):
     length, off = read_varint(buf, off)
-    return off + length
+    return length, off + length
 
 
 def read_chunk_light(buf, off):
@@ -56,7 +56,8 @@ def read_chunk_light(buf, off):
     # And the light: four masks and two lists.
     masks = []
     for _ in range(4):
-        off = read_byte_array(buf, off)
+        length, off = read_byte_array(buf, off)
+        masks.append(buf[off - length:off])
     sky = []
     count, off = read_varint(buf, off)
     for _ in range(count):
@@ -69,6 +70,21 @@ def read_chunk_light(buf, off):
         length, off = read_varint(buf, off)
         block.append(buf[off:off + length].hex())
         off += length
+
+    # The mask names the sections and the arrays follow it, one for each bit.
+    def named(mask):
+        out = []
+        for index, byte in enumerate(mask):
+            for bit in range(8):
+                if byte & (1 << bit):
+                    out.append(index * 8 + bit)
+        return out
+
+    if len(named(masks[0])) != len(sky) or len(named(masks[1])) != len(block):
+        print(f"  MISMATCH in chunk {x},{z}: the sky mask names "
+              f"{len(named(masks[0]))} and there are {len(sky)} arrays; "
+              f"the block mask names {len(named(masks[1]))} and there are "
+              f"{len(block)}")
     return (x, z), sky, block
 
 
@@ -124,9 +140,22 @@ def main():
                 for _ in range(packs):
                     length, o = read_varint(body, o)
                     o += length
-                c.send(7, varint(0))
+                # The brand. The game will not finish the configuration
+                # without one: it disconnects a client that never says who
+                # it is.
+                brand = b"minecraft:brand"
+                c.send(
+                    1,
+                    varint(len(brand))
+                    + brand
+                    + varint(len("vanilla"))
+                    + b"vanilla",
+                )
             elif pid == 3:
-                c.send(3)
+                # The serverbound "finish configuration". The game numbers
+                # the packets each way separately, so this is not the number
+                # the clientbound one has.
+                c.send(2)
                 state = "play"
             continue
         if pid == 46:

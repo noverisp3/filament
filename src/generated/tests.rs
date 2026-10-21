@@ -244,3 +244,42 @@ fn the_blocks_that_stop_a_player_breathing_are_the_games_ones() {
         );
     }
 }
+
+/// A log turned sideways is a different state and it is still a log.
+///
+/// The table used to hold only the default state of each block, so a log that
+/// was not standing up did not stop a player from breathing, and a player
+/// walled in by one suffocated very slowly or not at all.
+#[test]
+fn every_state_of_a_block_stops_a_player_the_same_way() {
+    let states_of = |name: &str| {
+        BLOCKS
+            .iter()
+            .find(|b| b.name == name)
+            .unwrap_or_else(|| panic!("{name} is missing from the registry"))
+            .states
+            .iter()
+            .map(|s| s.id as i32)
+            .collect::<Vec<_>>()
+    };
+
+    for name in ["minecraft:oak_log", "minecraft:oak_slab", "minecraft:oak_stairs"] {
+        let states = states_of(name);
+        assert!(states.len() > 1, "{name} has one state, so this proves nothing");
+        for state in states {
+            assert!(
+                causes_suffocation(state),
+                "{name} in state {state} stops a player from breathing"
+            );
+        }
+    }
+
+    for name in ["minecraft:oak_leaves", "minecraft:glass"] {
+        for state in states_of(name) {
+            assert!(
+                !causes_suffocation(state),
+                "{name} in state {state} does not stop a player from breathing"
+            );
+        }
+    }
+}

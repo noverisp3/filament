@@ -141,7 +141,7 @@ fn a_chunk_of_terrain_carries_more_than_the_empty_one() {
     }
 
     let mut w = Vec::new();
-    write_chunk_with_states(&mut w, 0, 0, &ground, &[], &[]);
+    write_chunk_with_states(&mut w, 0, 0, &ground, &[], &[], &heightmaps(&ground));
 
     let mut empty = Vec::new();
     write_chunk(&mut empty, 0, 0);
@@ -201,10 +201,128 @@ fn a_heightmap_is_thirty_seven_longs() {
     assert_eq!(HEIGHTMAP_ENTRIES.div_ceil(per_long), 37);
 
     let mut w = Vec::new();
-    write_heightmap_bits(&mut w);
+    write_heightmap_bits(&mut w, &vec![0u32; HEIGHTMAP_ENTRIES]);
     let (count, consumed) = VarInt::read(&mut &w[..]).expect("a count");
     assert_eq!(count.0, 37);
     assert_eq!(w.len(), consumed + 37 * 8);
+}
+
+/// A chunk with blocks in it, given as `(x, y, z, state)`.
+fn chunk_with(blocks: &[(i32, i32, i32, i32)]) -> Vec<Vec<i32>> {
+    let mut sections = empty_sections();
+    for (x, y, z, state) in blocks {
+        let slot = ((y - MIN_BLOCK_Y) / 16) as usize;
+        let within = (y - (MIN_BLOCK_Y + slot as i32 * 16)) as usize;
+        sections[slot][(within << 8) | ((*z as usize) << 4) | (*x as usize)] = *state;
+    }
+    sections
+}
+
+/// The height of the ground at a column, counted from the bottom of the world.
+fn height_of(y: i32) -> u32 {
+    (y + 1 - MIN_BLOCK_Y) as u32
+}
+
+#[test]
+fn the_heightmap_says_where_the_ground_is() {
+    let sections = chunk_with(&[(0, 70, 0, 1)]); // stone
+    let maps = heightmaps(&sections);
+
+    assert_eq!(maps[0][0], height_of(70), "the surface");
+    assert_eq!(maps[1][0], height_of(70), "the height a player is stopped at");
+    assert_eq!(maps[2][0], height_of(70), "and the same without leaves");
+    assert_eq!(maps[0][1], 0, "a column with nothing in it is the bottom");
+}
+
+#[test]
+fn the_leaves_are_in_one_heightmap_and_not_the_other() {
+    // Oak leaves on top of stone. The leaves are the difference between the
+    // two tables the game keeps.
+    let sections = chunk_with(&[(0, 70, 0, 1), (0, 71, 0, 294)]);
+    let maps = heightmaps(&sections);
+
+    assert_eq!(maps[0][0], height_of(71), "the surface is the top of the leaves");
+    assert_eq!(maps[1][0], height_of(71), "leaves stop a player");
+    assert_eq!(
+        maps[2][0],
+        height_of(70),
+        "but the heightmap without leaves does not count them"
+    );
+}
+
+#[test]
+fn the_water_stops_a_player_even_though_the_tag_does_not_say_so() {
+    let sections = chunk_with(&[(0, 70, 0, 89)]); // water
+    let maps = heightmaps(&sections);
+
+    assert_eq!(maps[0][0], height_of(70), "the surface is the water");
+    assert_eq!(maps[1][0], height_of(70), "water stops a player");
+    assert_eq!(maps[2][0], height_of(70), "and it does so in both tables");
+}
+
+#[test]
+fn a_chunk_of_nothing_says_the_ground_is_at_the_bottom() {
+    let maps = heightmaps(&empty_sections());
+
+    assert!(maps[0].iter().all(|h| *h == 0), "the surface");
+    assert!(maps[1].iter().all(|h| *h == 0), "the height a player is stopped at");
+    assert!(maps[2].iter().all(|h| *h == 0), "and the same without leaves");
+}
+
+#[test]
+fn a_heightmap_holds_its_values() {
+    let mut values = vec![0u32; HEIGHTMAP_ENTRIES];
+    values[0] = 135;
+    values[1] = 136;
+    values[6] = 511; // the largest a nine bit value can be
+    values[7] = 300; // the first value of the second long
+    values[8] = 1;
+
+    let mut w = Vec::new();
+    write_heightmap_bits(&mut w, &values);
+    let (count, consumed) = VarInt::read(&mut &w[..]).expect("a count");
+    assert_eq!(count.0, 37);
+
+    let (words, _) = w[consumed..].as_chunks::<8>();
+    let words: Vec<u64> = words
+        .iter()
+        .map(|c| u64::from_be_bytes(*c))
+        .collect();
+    let read = |index: usize| -> u32 {
+        let word = words[index / 7];
+        ((word >> ((index % 7) * HEIGHTMAP_BITS)) & 0x1ff) as u32
+    };
+
+    assert_eq!(read(0), 135);
+    assert_eq!(read(1), 136);
+    assert_eq!(read(6), 511);
+    assert_eq!(read(7), 300);
+    assert_eq!(read(8), 1);
+}
+
+#[test]
+fn the_chunk_tells_the_client_where_the_ground_is() {
+    let sections = chunk_with(&[(0, 70, 0, 1)]);
+    let mut w = Vec::new();
+    write_chunk_with_states(&mut w, 0, 0, &sections, &[], &[], &heightmaps(&sections));
+
+    // After the packet id and the two coordinates comes the heightmap map:
+    // a count, and then for each of the three a kind and a long array.
+    let mut at = 9;
+    let (count, used) = VarInt::read(&mut &w[at..]).expect("a count");
+    assert_eq!(count.0, 3);
+    at += used;
+
+    let (kind, used) = VarInt::read(&mut &w[at..]).expect("a kind");
+    assert_eq!(kind.0, heightmap::WORLD_SURFACE);
+    at += used;
+
+    let (longs, used) = VarInt::read(&mut &w[at..]).expect("a count of longs");
+    assert_eq!(longs.0, 37);
+    at += used;
+
+    let first = u64::from_be_bytes(w[at..at + 8].try_into().expect("a long"));
+    assert_eq!(first & 0x1ff, height_of(70) as u64);
 }
 
 #[test]

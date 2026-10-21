@@ -1008,7 +1008,16 @@ fn encode_chunk_body(
         .collect();
 
     let mut body = Vec::new();
-    crate::protocol::chunk::write_chunk_with_states(&mut body, pos.x, pos.z, &sections, &sky, &block);
+    let heightmaps = crate::protocol::chunk::heightmaps(&sections);
+    crate::protocol::chunk::write_chunk_with_states(
+        &mut body,
+        pos.x,
+        pos.z,
+        &sections,
+        &sky,
+        &block,
+        &heightmaps,
+    );
     body
 }
 

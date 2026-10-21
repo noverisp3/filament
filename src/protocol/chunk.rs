@@ -13,8 +13,9 @@
 //! * Each section is two shorts, then the block states as a paletted container,
 //!   then the biomes as another one.
 
+use crate::generated::{is_air, motion_blocking, motion_blocking_no_leaves};
 use crate::protocol::VarInt;
-use crate::world::chunk::{MIN_LIGHT_SECTION_Y, MIN_SECTION_Y};
+use crate::world::chunk::{MIN_BLOCK_Y, MIN_LIGHT_SECTION_Y, MIN_SECTION_Y};
 
 /// The bit that names a section of light in a mask.
 ///
@@ -119,7 +120,7 @@ pub fn write_chunk(out: &mut Vec<u8>, x: i32, z: i32) {
     for _ in 0..SECTIONS {
         sections.push(air.clone());
     }
-    write_chunk_with_states(out, x, z, &sections, &[], &[]);
+    write_chunk_with_states(out, x, z, &sections, &[], &[], &heightmaps(&sections));
 }
 
 /// Writes the chunk, with each section's block states supplied.
@@ -128,6 +129,13 @@ pub fn write_chunk(out: &mut Vec<u8>, x: i32, z: i32) {
 /// ids in wire order. This is the split between generating a world and putting it
 /// on the wire: the world module knows about terrain and the wire module knows
 /// about the protocol, and neither needs to know about the other.
+///
+/// `heightmaps` is the three heightmaps the client is told, in the order
+/// [`heightmap`] numbers them: the height of the first non-air block, and the
+/// height of the first block that stops a player, with and without leaves. The
+/// client uses them to decide where the ground is, and a client that is told
+/// the ground is at the bottom of the world cuts the grass in the wrong place
+/// and puts the weather underground.
 pub fn write_chunk_with_states(
     out: &mut Vec<u8>,
     x: i32,
@@ -135,12 +143,13 @@ pub fn write_chunk_with_states(
     sections: &[Vec<i32>],
     sky: &[Option<Vec<u8>>],
     block: &[Option<Vec<u8>>],
+    heightmaps: &[Vec<u32>],
 ) {
     VarInt(id::LEVEL_CHUNK_WITH_LIGHT).write(out);
     out.extend_from_slice(&x.to_be_bytes());
     out.extend_from_slice(&z.to_be_bytes());
 
-    write_heightmaps(out);
+    write_heightmaps(out, heightmaps);
     write_sections(out, sections);
     write_block_entities(out);
     write_light(out, sky, block);
@@ -157,19 +166,21 @@ pub mod id {
 /// A map is a count followed by that many entries, and each entry is the type
 /// then a long array, which is a VarInt count and then the longs.
 ///
-/// Every entry here is zero, which is the height of the bottom of the world. An
-/// empty column has no block to record, and the client only uses these to decide
-/// where clouds and lighting sit, neither of which is visible yet.
-fn write_heightmaps(out: &mut Vec<u8>) {
+/// The client copies the numbers it is given into its own heightmap and only
+/// works one out for itself when the server sent none, so a chunk sent with
+/// zeroes tells the client the ground is at the bottom of the world. The
+/// client's rain falls at the height of the ground, and a client that believes
+/// the ground is at -64 drops the rain down there.
+fn write_heightmaps(out: &mut Vec<u8>, heightmaps: &[Vec<u32>]) {
     VarInt(HEIGHTMAP_COUNT).write(out);
 
-    for kind in [
-        heightmap::WORLD_SURFACE,
-        heightmap::MOTION_BLOCKING,
-        heightmap::MOTION_BLOCKING_NO_LEAVES,
+    for (kind, values) in [
+        (heightmap::WORLD_SURFACE, &heightmaps[0]),
+        (heightmap::MOTION_BLOCKING, &heightmaps[1]),
+        (heightmap::MOTION_BLOCKING_NO_LEAVES, &heightmaps[2]),
     ] {
         VarInt(kind).write(out);
-        write_heightmap_bits(out);
+        write_heightmap_bits(out, values);
     }
 }
 
@@ -179,14 +190,82 @@ fn write_heightmaps(out: &mut Vec<u8>) {
 /// `64 / 9` whole entries, so seven of them and the top bit of every long goes
 /// unused. That is why thirty-seven longs and not thirty-six, and the count is
 /// what tells the reader where the next heightmap starts.
-fn write_heightmap_bits(out: &mut Vec<u8>) {
+fn write_heightmap_bits(out: &mut Vec<u8>, values: &[u32]) {
     let per_long = 64 / HEIGHTMAP_BITS;
     let longs = HEIGHTMAP_ENTRIES.div_ceil(per_long);
 
     VarInt(longs as i32).write(out);
-    for _ in 0..longs {
-        out.extend_from_slice(&0i64.to_be_bytes());
+    for cell in 0..longs {
+        let mut word = 0u64;
+        for slot in 0..per_long {
+            let index = cell * per_long + slot;
+            let value = values.get(index).copied().unwrap_or(0) as u64;
+            word |= value << (slot * HEIGHTMAP_BITS);
+        }
+        out.extend_from_slice(&word.to_be_bytes());
     }
+}
+
+/// The three heightmaps of a chunk, one entry per column.
+///
+/// The order is the game's: the surface, the height a player is stopped at,
+/// and the same without the leaves. A column is `z * 16 + x`, and the height
+/// is counted from the bottom of the world, which is what the client expects:
+/// it adds the bottom of the world back when it reads the number.
+///
+/// The heights are found from the top down, the way the game finds them, and a
+/// column is left alone once all three of its heights are known. Most of a
+/// chunk is air above the ground, and a section of nothing but air cannot hold
+/// the top of anything, so those are skipped whole.
+pub fn heightmaps(sections: &[Vec<i32>]) -> [Vec<u32>; 3] {
+    let mut out = [
+        vec![0u32; HEIGHTMAP_ENTRIES],
+        vec![0u32; HEIGHTMAP_ENTRIES],
+        vec![0u32; HEIGHTMAP_ENTRIES],
+    ];
+    // Which of the three are known, per column: one bit each.
+    let mut found = [0u8; HEIGHTMAP_ENTRIES];
+
+    for (slot, section) in sections.iter().enumerate().rev() {
+        if section.len() < SECTION_VOLUME {
+            continue;
+        }
+        if section.iter().all(|state| is_air(*state)) {
+            continue;
+        }
+
+        let base_y = (MIN_SECTION_Y + slot as i32) * 16;
+
+        for y in (0..16usize).rev() {
+            for z in 0..16usize {
+                for x in 0..16usize {
+                    let column = z * 16 + x;
+                    let known = found[column];
+                    if known == 0b111 {
+                        continue;
+                    }
+
+                    let state = section[(y << 8) | (z << 4) | x];
+                    let height = (base_y + y as i32 + 1 - MIN_BLOCK_Y) as u32;
+
+                    if known & 1 == 0 && !is_air(state) {
+                        out[0][column] = height;
+                        found[column] |= 1;
+                    }
+                    if known & 2 == 0 && motion_blocking(state) {
+                        out[1][column] = height;
+                        found[column] |= 2;
+                    }
+                    if known & 4 == 0 && motion_blocking_no_leaves(state) {
+                        out[2][column] = height;
+                        found[column] |= 4;
+                    }
+                }
+            }
+        }
+    }
+
+    out
 }
 
 /// The section buffer: every section back to back, no lengths between them.

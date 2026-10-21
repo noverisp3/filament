@@ -1221,7 +1221,16 @@ fn generated_terrain_survives_the_wire_format() {
     // Now the actual wire bytes, decoded by a reader written from the
     // decompiled layout rather than from the writer.
     let mut wire = Vec::new();
-    crate::protocol::chunk::write_chunk_with_states(&mut wire, 0, 0, &sections, &[], &[]);
+    let heightmaps = crate::protocol::chunk::heightmaps(&sections);
+    crate::protocol::chunk::write_chunk_with_states(
+        &mut wire,
+        0,
+        0,
+        &sections,
+        &[],
+        &[],
+        &heightmaps,
+    );
     let decoded = decode_first_section(&wire);
 
 assert_eq!(

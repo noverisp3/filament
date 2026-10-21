@@ -157,13 +157,15 @@ Grouped by what they are about, not by when they were done.
       off light (torches, lanterns, fire), the ones that change the shape of
       it (a door, a slab, a pane), and the sun moving across the sky.
 - [ ] Mobs, item drops, water, weather
-- [ ] An inventory the server can actually trust. Clicks are simulated from
-      the client's reports, and a stale count can leave the server holding the
-      wrong block. The intended design is server-authoritative *quantity* with
-      the client authoritative for *arrangement*.
+- [ ] The rest of the inventory. The authority is there: the client says which
+      slots changed and the server checks the totals against what the player
+      was issued, so a stale count cannot leave the server holding the wrong
+      block. Not done: the items themselves (there are no item drops yet), the
+      player's own chest, the off hand, and the cursor dropped outside the
+      window.
 - [ ] Authentication
 
-979 tests. A client connects, negotiates, and gets a world: either one the
+937 tests. A client connects, negotiates, and gets a world: either one the
 game saved, read out of its own folder, or one generated on the spot — grass
 on top, dirt under it, stone below, hills from two octaves of value noise. A
 second client joins the same world and sees the first one walk about, break and

@@ -168,6 +168,29 @@ pub fn filled_cell(cell: BlockPos) -> Box {
     )
 }
 
+/// Whether a block may be put in a cell, the way the game decides.
+///
+/// The game asks whether the new block's shape would be inside anybody:
+/// `BlockItem.canPlace` asks the level whether the shape is unobstructed, and
+/// a player is an entity like any other. So a block cannot be put where
+/// somebody is standing, not even where the person putting it is standing.
+///
+/// A block that is not a whole cell is let through, because its shape is not
+/// known here and a torch does not stop a player.
+pub fn cell_is_clear(
+    cell: BlockPos,
+    fills_the_cell: bool,
+    players: &[(f64, f64, f64, bool)],
+) -> bool {
+    if !fills_the_cell {
+        return true;
+    }
+    let shape = filled_cell(cell);
+    !players
+        .iter()
+        .any(|(x, y, z, crouching)| shape.intersects(&player_body((*x, *y, *z), *crouching)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,5 +276,37 @@ mod tests {
         let block = filled_cell(BlockPos::new(8, 64, 8));
 
         assert!(body.intersects(&block), "the player is standing in it");
+    }
+
+    #[test]
+    fn a_block_cannot_be_put_where_a_player_is_standing() {
+        let cell = BlockPos::new(8, 64, 8);
+        // A player standing in the cell.
+        let players = [(8.5, 64.0, 8.5, false)];
+
+        assert!(
+            !cell_is_clear(cell, true, &players),
+            "the player is in the way"
+        );
+    }
+
+    #[test]
+    fn a_block_can_be_put_where_nobody_is_standing() {
+        let cell = BlockPos::new(8, 64, 8);
+        // A player in the cell next door.
+        let players = [(9.5, 64.0, 8.5, false)];
+
+        assert!(cell_is_clear(cell, true, &players), "the cell is empty");
+    }
+
+    #[test]
+    fn a_block_that_does_not_fill_its_cell_goes_anywhere() {
+        let cell = BlockPos::new(8, 64, 8);
+        let players = [(8.5, 64.0, 8.5, false)];
+
+        assert!(
+            cell_is_clear(cell, false, &players),
+            "a torch does not stop a player"
+        );
     }
 }

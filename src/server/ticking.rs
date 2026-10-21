@@ -1108,7 +1108,7 @@ pub fn to_state_id(block: BlockId, terrain: &TerrainBlocks) -> i32 {
     state_id(to_state_name(block, terrain))
 }
 
-fn to_state_id_with_registry(
+pub fn to_state_id_with_registry(
     block: BlockId,
     terrain: &TerrainBlocks,
     registry: Option<&crate::world::block::BlockRegistry>,

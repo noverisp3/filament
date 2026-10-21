@@ -280,6 +280,16 @@ impl Broadcast {
             .collect()
     }
 
+    /// Where everybody is, for a check that has to know who is standing where.
+    ///
+    /// The position and whether they are crouching, because the size of a
+    /// player depends on it. The game refuses to put a block where a player
+    /// is, so somebody placing a block has to know where everybody is.
+    pub fn bodies(&self) -> Vec<(f64, f64, f64, bool)> {
+        let sinks = self.sinks.lock().unwrap_or_else(|e| e.into_inner());
+        sinks.iter().map(|s| (s.pos.0, s.pos.1, s.pos.2, s.crouching)).collect()
+    }
+
     /// Tells everyone who can see them whether they are crouching.
     ///
     /// Only when it changes. The client's keys arrive twenty times a second and

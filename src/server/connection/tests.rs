@@ -1883,3 +1883,64 @@ fn a_player_with_their_head_in_glass_is_not_in_it() {
         "glass does not stop a player from breathing"
     );
 }
+
+/// A block cannot be put where a player is standing.
+///
+/// The game asks whether the new block's shape would be inside anybody, and
+/// a player is an entity like any other. A player who puts a block at their
+/// own feet is putting it inside themselves, and the game refuses it.
+#[test]
+fn a_block_cannot_be_put_where_a_player_is_standing() {
+    let world = crate::server::ticking::spawn();
+    // The chunk has to be there, or the world has nothing to answer about.
+    world.chunk(crate::world::pos::ChunkPos::new(0, 0)).expect("built");
+    let wire = std::sync::Arc::new(crate::server::broadcast::Broadcast::new());
+
+    // The ground under the player, and the cell above it, which is the cell
+    // the player is standing in and the cell the block would go in.
+    let ground = crate::world::chunk::MIN_BLOCK_Y
+        + crate::world::terrain::height_at(8.0, 8.0) as i32;
+
+    // The player who is placing, standing in the cell the block would go in.
+    let standing = (8.5f64, (ground + 1) as f64, 8.5f64);
+    let _seat = wire.register("placer", [0u8; 16], 1, standing);
+
+    let mut inventory = Inventory::empty();
+    inventory.set(0, Some(ItemStack::new(state_id("minecraft:stone"), 1)));
+
+    let player = crate::protocol::play::Movement {
+        x: standing.0,
+        y: standing.1,
+        z: standing.2,
+        delta_x: 0.0,
+        delta_y: 0.0,
+        delta_z: 0.0,
+        yaw: 0.0,
+        pitch: 0.0,
+    };
+    // Clicking the block under the player's feet puts the block in the cell
+    // they are standing in.
+    let use_on = crate::protocol::item::UseItemOn {
+        hand: crate::protocol::play::MAIN_HAND,
+        pos: crate::world::pos::BlockPos::new(8, ground, 8),
+        face: 1, // up
+        click: [0.5, 0.5, 0.5],
+        inside: false,
+        world_border: false,
+        sequence: 1,
+    };
+
+    let outcome = place_block(&world, &wire, &inventory, 0, &player, use_on);
+    assert!(
+        matches!(outcome, Some(Placement::Refused { .. })),
+        "the player is in the way, so the block is refused"
+    );
+
+    // And with nobody in the cell it goes in.
+    let wire = std::sync::Arc::new(crate::server::broadcast::Broadcast::new());
+    let outcome = place_block(&world, &wire, &inventory, 0, &player, use_on);
+    assert!(
+        matches!(outcome, Some(Placement::Placed { .. })),
+        "with nobody there it is placed"
+    );
+}

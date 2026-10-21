@@ -11,6 +11,7 @@ use std::thread;
 
 use crate::protocol::frame::{FrameDecoder, FrameEncoder, FrameError};
 use crate::protocol::item::{self, slots, Inventory, ItemStack};
+use crate::protocol::play as p;
 use crate::world::pos::Direction;
 use crate::protocol::VarInt;
 
@@ -235,7 +236,6 @@ pub(super) fn play(
     session: Session,
     registration: crate::server::broadcast::Registration,
 ) -> std::io::Result<()> {
-    use crate::protocol::play as p;
 
     let player_id = registration.id;
     let log = log.phase("play");
@@ -1512,6 +1512,7 @@ pub(super) fn play(
 
                 let outcome = place_block(
                     &session.world,
+                    &session.wire,
                     &inventory,
                     held_slot,
                     &player,
@@ -1564,119 +1565,7 @@ pub(super) fn play(
                 }
             }
 
-/// What a click on the world did, once every check has had its say.
-enum Placement {
-    Placed {
-        target: crate::world::pos::BlockPos,
-        item: ItemStack,
-    },
-    Refused {
-        why: &'static str,
-    },
-}
 
-/// Answers a right-click on a block face with the block that went down.
-///
-/// Every check the game makes before placing, in its order, and for the same
-/// reasons. A refusal is a refusal rather than a silent no-op because the
-/// client has already drawn the block and needs to be told otherwise.
-fn place_block(
-    world: &ticking::WorldHandle,
-    inventory: &Inventory,
-    held_slot: u16,
-    player: &p::Movement,
-    use_on: item::UseItemOn,
-) -> Option<Placement> {
-    // The reach is the same one that governs breaking: the player's eye to the
-    // block, plus the one block of margin `isWithinBlockInteractionRange(pos,
-    // 1.0)` adds (`:1414`). Placing without it is placing anywhere, which is
-    // the same hole as breaking a block a kilometre away.
-    if reach_to(player, use_on.pos) > MAX_REACH {
-        return Some(Placement::Refused {
-            why: "too far away to reach",
-        });
-    }
-
-    // The off hand is a different window and there is nothing in it to place.
-    if use_on.hand != p::MAIN_HAND {
-        return Some(Placement::Refused {
-            why: "the off hand holds nothing this server places",
-        });
-    }
-
-    // What is in the selected slot. Nothing there means nothing placed, and no
-    // block is invented from whatever else the player happens to be carrying.
-    let Some(item) = inventory.get(held_slot as usize) else {
-        return Some(Placement::Refused {
-            why: "holding nothing",
-        });
-    };
-
-    // An item id is not a block id, and the game's names are not the registry's
-    // names -- `minecraft:grass_block` against `grass`. The join goes through
-    // the same table that turns a block into the name the wire uses, so the two
-    // cannot drift apart.
-    let Some(name) = crate::generated::item_name(item.item as u32) else {
-        return Some(Placement::Refused {
-            why: "not an item this registry has",
-        });
-    };
-    let Some(terrain) = world.terrain_blocks() else {
-        return Some(Placement::Refused {
-            why: "the world has no terrain palette",
-        });
-    };
-    let block = match world.registry() {
-        Some(registry) => ticking::block_for_name(&registry, &terrain, name),
-        None => ticking::block_for_name_terrain_only(&terrain, name),
-    };
-    let Some(block) = block else {
-        return Some(Placement::Refused {
-            why: "not a block this world has",
-        });
-    };
-
-    // A face the game does not have is not a face it placed against.
-    let Some(face) = Direction::from_3d_data_value(use_on.face) else {
-        return Some(Placement::Refused {
-            why: "a face that is not one of the six",
-        });
-    };
-
-    // Where the block goes. Clicking something solid puts the block on the
-    // face; only something that can be replaced puts it inside, and nothing in
-    // this world is clicked except a solid block, so this is the neighbour.
-    let target = use_on.pos.offset(face);
-
-    // The click is 0..1 within the block, so the location is the block plus it,
-    // and the game's check is that each axis is within one block of the centre
-    // (`:1415-1417`). A client claiming to have clicked somewhere else is
-    // refused before it can place through a wall.
-    for axis in 0..3 {
-        let from_centre = use_on.click[axis] - 0.5;
-        if !(-1.0000001..1.0000001).contains(&from_centre) {
-            return Some(Placement::Refused {
-                why: "the click is not on the block it names",
-            });
-        }
-    }
-
-    // Only into something empty. A block placed where there is already one is
-    // not a replacement, it is a second block in the same place. `state_at`
-    // answers in the game's state ids, and air is state zero.
-    if world.state_at(target).flatten() != Some(AIR_STATE) {
-        return Some(Placement::Refused {
-            why: "there is already something there",
-        });
-    }
-
-    match world.set_block(target, block) {
-        Some(true) => Some(Placement::Placed { target, item }),
-        _ => Some(Placement::Refused {
-            why: "the world would not take it",
-        }),
-    }
-}
 
             // Which keys are down: one byte of flags, after the id.
             //
@@ -2583,6 +2472,141 @@ fn place_block(
     }
 }
 
+/// What a click on the world did, once every check has had its say.
+/// Answers a right-click on a block face with the block that went down.
+///
+/// Every check the game makes before placing, in its order, and for the same
+/// reasons. A refusal is a refusal rather than a silent no-op because the
+/// client has already drawn the block and needs to be told otherwise.
+pub(super) fn place_block(
+    world: &ticking::WorldHandle,
+    wire: &std::sync::Arc<Broadcast>,
+    inventory: &Inventory,
+    held_slot: u16,
+    player: &p::Movement,
+    use_on: item::UseItemOn,
+) -> Option<Placement> {
+    // The reach is the same one that governs breaking: the player's eye to the
+    // block, plus the one block of margin `isWithinBlockInteractionRange(pos,
+    // 1.0)` adds (`:1414`). Placing without it is placing anywhere, which is
+    // the same hole as breaking a block a kilometre away.
+    if reach_to(player, use_on.pos) > MAX_REACH {
+        return Some(Placement::Refused {
+            why: "too far away to reach",
+        });
+    }
+
+    // The off hand is a different window and there is nothing in it to place.
+    if use_on.hand != p::MAIN_HAND {
+        return Some(Placement::Refused {
+            why: "the off hand holds nothing this server places",
+        });
+    }
+
+    // What is in the selected slot. Nothing there means nothing placed, and no
+    // block is invented from whatever else the player happens to be carrying.
+    let Some(item) = inventory.get(held_slot as usize) else {
+        return Some(Placement::Refused {
+            why: "holding nothing",
+        });
+    };
+
+    // An item id is not a block id, and the game's names are not the registry's
+    // names -- `minecraft:grass_block` against `grass`. The join goes through
+    // the same table that turns a block into the name the wire uses, so the two
+    // cannot drift apart.
+    let Some(name) = crate::generated::item_name(item.item as u32) else {
+        return Some(Placement::Refused {
+            why: "not an item this registry has",
+        });
+    };
+    let Some(terrain) = world.terrain_blocks() else {
+        return Some(Placement::Refused {
+            why: "the world has no terrain palette",
+        });
+    };
+    let block = match world.registry() {
+        Some(registry) => ticking::block_for_name(&registry, &terrain, name),
+        None => ticking::block_for_name_terrain_only(&terrain, name),
+    };
+    let Some(block) = block else {
+        return Some(Placement::Refused {
+            why: "not a block this world has",
+        });
+    };
+
+    // A face the game does not have is not a face it placed against.
+    let Some(face) = Direction::from_3d_data_value(use_on.face) else {
+        return Some(Placement::Refused {
+            why: "a face that is not one of the six",
+        });
+    };
+
+    // Where the block goes. Clicking something solid puts the block on the
+    // face; only something that can be replaced puts it inside, and nothing in
+    // this world is clicked except a solid block, so this is the neighbour.
+    let target = use_on.pos.offset(face);
+
+    // The click is 0..1 within the block, so the location is the block plus it,
+    // and the game's check is that each axis is within one block of the centre
+    // (`:1415-1417`). A client claiming to have clicked somewhere else is
+    // refused before it can place through a wall.
+    for axis in 0..3 {
+        let from_centre = use_on.click[axis] - 0.5;
+        if !(-1.0000001..1.0000001).contains(&from_centre) {
+            return Some(Placement::Refused {
+                why: "the click is not on the block it names",
+            });
+        }
+    }
+
+    // Only into something empty. A block placed where there is already one is
+    // not a replacement, it is a second block in the same place. `state_at`
+    // answers in the game's state ids, and air is state zero.
+    if world.state_at(target).flatten() != Some(AIR_STATE) {
+        return Some(Placement::Refused {
+            why: "there is already something there",
+        });
+    }
+
+    // And not where somebody is standing. The game asks whether the new
+    // block's shape would be inside anybody, and a player is an entity like
+    // any other, so a block cannot be put where a player is -- not even
+    // where the player putting it is standing.
+    //
+    // The player who is placing it is in the list, because the server knows
+    // where everybody is.
+    let block_state = match world.registry() {
+        Some(registry) => ticking::to_state_id_with_registry(
+            block,
+            &terrain,
+            Some(&registry),
+        ),
+        None => ticking::to_state_id(block, &terrain),
+    };
+    if !placement_is_clear(target, block_state, &wire.bodies()) {
+        return Some(Placement::Refused {
+            why: "there is a player in the way",
+        });
+    }
+
+    match world.set_block(target, block) {
+        Some(true) => Some(Placement::Placed { target, item }),
+        _ => Some(Placement::Refused {
+            why: "the world would not take it",
+        }),
+    }
+}
+
+pub(super) enum Placement {
+    Placed {
+        target: crate::world::pos::BlockPos,
+        item: ItemStack,
+    },
+    Refused {
+        why: &'static str,
+    },}
+
 /// Writes one chunk into `out`, as a framed packet.
 ///
 /// The chunk comes out of the shared world, so a block one player broke is still
@@ -3013,6 +3037,27 @@ pub(super) fn fall_damage(fall_distance: f64) -> f64 {
         return 0.0;
     }
     (fall_distance - SAFE_FALL_DISTANCE).floor()
+}
+
+/// Whether a block may be put in a cell, the way the game decides.
+///
+/// The game asks whether the new block's shape would be inside anybody:
+/// `BlockItem.canPlace` asks the level whether the shape is unobstructed, and
+/// a player is an entity like any other. So a block cannot be put where a
+/// player is standing, not even where the player putting it is standing.
+///
+/// A block that is not a whole cell is let through, because its shape is not
+/// known here and a torch does not stop a player.
+pub(super) fn placement_is_clear(
+    target: crate::world::pos::BlockPos,
+    block_state: i32,
+    players: &[(f64, f64, f64, bool)],
+) -> bool {
+    crate::world::shapes::cell_is_clear(
+        target,
+        crate::generated::is_full_cube(block_state),
+        players,
+    )
 }
 
 /// Whether a player's head is in a wall, the way the game asks.

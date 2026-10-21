@@ -30,12 +30,12 @@ fn a_break_is_seen_by_every_handle() {
     handle.chunk(ChunkPos::new(0, 0)).expect("built");
 
     let pos = BlockPos::new(8, surface(8.0, 8.0), 8);
-    let before = other.block_at(pos).expect("answered").expect("ground");
+    let before = other.state_at(pos).expect("answered").expect("ground");
     assert_ne!(before, AIR, "the top of this column is something");
 
     assert!(handle.break_block(pos).expect("answered").is_some());
     assert_ne!(
-        other.block_at(pos).expect("answered"),
+        other.state_at(pos).expect("answered"),
         Some(before),
         "what one handle broke, the other sees gone"
     );
@@ -52,7 +52,7 @@ fn breaking_nothing_reports_nothing_broke() {
         None,
         "there was no block there to break"
     );
-    assert_eq!(handle.block_at(nowhere).expect("answered"), None);
+    assert_eq!(handle.state_at(nowhere).expect("answered"), None);
 }
 
 #[test]
@@ -130,7 +130,7 @@ fn orphan_after_shutdown() -> Option<usize> {
         let mut surface = None;
         for y in (crate::world::chunk::MIN_BLOCK_Y..200).rev() {
             if handle
-                .world_block(at(y))
+                .block(at(y))
                 .flatten()
                 .is_some_and(|b| b != air)
             {
@@ -177,7 +177,7 @@ fn orphan_after_shutdown() -> Option<usize> {
         let mut surface = None;
         for y in (crate::world::chunk::MIN_BLOCK_Y..200).rev() {
             if handle
-                .world_block(at(y))
+                .block(at(y))
                 .flatten()
                 .is_some_and(|b| b != air)
             {
@@ -244,7 +244,7 @@ fn orphan_after_shutdown() -> Option<usize> {
         let mut surface = None;
         for y in (crate::world::chunk::MIN_BLOCK_Y..200).rev() {
             if handle
-                .world_block(BlockPos::new(40, y, 40))
+                .block(BlockPos::new(40, y, 40))
                 .flatten()
                 .is_some_and(|b| b != air)
             {

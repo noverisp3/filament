@@ -1487,7 +1487,7 @@ fn play(
                             let name_at = |pos: crate::world::pos::BlockPos| {
                                 session
                                     .world
-                                    .block_at(pos)
+                                    .state_at(pos)
                                     .flatten()
                                     .map(crate::server::ticking::state_id_name)
                             };
@@ -1989,7 +1989,7 @@ fn play(
                 ] {
                     let now = session
                         .world
-                        .block_at(pos)
+                        .state_at(pos)
                         .flatten()
                         .unwrap_or(AIR_STATE);
                     let mut body = Vec::new();
@@ -2122,9 +2122,9 @@ fn place_block(
     }
 
     // Only into something empty. A block placed where there is already one is
-    // not a replacement, it is a second block in the same place. `block_at`
+    // not a replacement, it is a second block in the same place. `state_at`
     // answers in the game's state ids, and air is state zero.
-    if world.block_at(target).flatten() != Some(AIR_STATE) {
+    if world.state_at(target).flatten() != Some(AIR_STATE) {
         return Some(Placement::Refused {
             why: "there is already something there",
         });
@@ -2326,7 +2326,7 @@ fn place_block(
                                     let registry = session.world.registry();
                                     let mined = session
                                         .world
-                                        .world_block(pos)
+                                        .block(pos)
                                         .flatten()
                                         .unwrap_or(terrain.air);
                                     break_time(mined, &terrain, registry.as_ref())
@@ -2356,14 +2356,14 @@ fn place_block(
                             // remembered before the world forgets it.
                             let was = session
                                 .world
-                                .block_at(pos)
+                                .state_at(pos)
                                 .flatten()
                                 .unwrap_or(AIR_STATE);
 
                             if session.world.break_block(pos).flatten().is_some() {
                                 let now = session
                                     .world
-                                    .block_at(pos)
+                                    .state_at(pos)
                                     .flatten()
                                     .unwrap_or(AIR_STATE);
 
@@ -2686,7 +2686,7 @@ fn place_block(
         for (pos, _block) in session.world.take_tick_changes() {
             let now = session
                 .world
-                .block_at(pos)
+                .state_at(pos)
                 .flatten()
                 .unwrap_or(AIR_STATE);
             // Into `edits` and not straight down the wire. `edits` is already

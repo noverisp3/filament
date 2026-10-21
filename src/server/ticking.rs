@@ -296,13 +296,16 @@ impl WorldHandle {
     }
 
     /// The state at a position, if the chunk holding it exists.
-    pub fn block_at(&self, pos: BlockPos) -> Option<Option<i32>> {
+    ///
+    /// The game's own number for the block, not the world's block id: that is
+    /// [`Self::block`].
+    pub fn state_at(&self, pos: BlockPos) -> Option<Option<i32>> {
         self.ask(|reply| Command::BlockAt { pos, reply })
     }
 
     /// The world's own block id at a position, for anything keyed by block rather
     /// than by what the game calls it.
-    pub fn world_block(&self, pos: BlockPos) -> Option<Option<BlockId>> {
+    pub fn block(&self, pos: BlockPos) -> Option<Option<BlockId>> {
         self.ask(|reply| Command::WorldBlock { pos, reply })
     }
 

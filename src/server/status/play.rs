@@ -1,167 +1,24 @@
-//! The TCP listener and the handshake and status phases.
+//! The play phase: the client is in the world and the server keeps it there.
 //!
-//! One thread per connection. That is the simple choice and it is the right one
-//! here: these phases do almost no work, so a thread spends nearly all its life
-//! blocked on a read. The parallelism that matters for this server is chunk
-//! generation and lighting, which is CPU-bound and gets its own pool.
+//! The chunks, the other players, the light, the mining and the damage are all
+//! handled here, so this file is the biggest of the phases.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::sync::Arc;
 use std::thread;
 
 use crate::protocol::frame::{FrameDecoder, FrameEncoder, FrameError};
-use crate::protocol::handshake::{ClientIntent, ClientIntention};
-use crate::protocol::status::{status_response_body, ServerStatus};
 use crate::protocol::item::{self, slots, Inventory, ItemStack};
 use crate::world::pos::Direction;
 use crate::protocol::VarInt;
 
-use super::log::{next_connection_id, packet_name, ConnLog};
-use super::log;
-use super::broadcast::{Broadcast, Session};
-use super::ticking::WorldHandle;
+use crate::server::broadcast::{Broadcast, Session};
+use super::log::{packet_name, ConnLog};
 use super::ticking;
+use super::{io_err, packet_id_of};
 
-/// The protocol version this server speaks, from the data generator.
-pub const PROTOCOL_VERSION: i32 = 777;
-
-/// A running server.
-pub struct StatusServer {
-    listener: TcpListener,
-    status: ServerStatus,
-    /// A way to ask the world for things, not the world itself. It lives on a
-    /// thread of its own; see `server::ticking`.
-    world: WorldHandle,
-    /// Who is connected, and the means to tell them something.
-    wire: Arc<Broadcast>,
-}
-
-impl StatusServer {
-    /// Binds `addr` and prepares to answer handshakes.
-    pub fn bind(addr: &str, status: ServerStatus) -> std::io::Result<Self> {
-        let listener = TcpListener::bind(addr)?;
-        Ok(StatusServer {
-            listener,
-            status,
-            world: ticking::spawn(),
-            wire: Arc::new(Broadcast::new()),
-        })
-    }
-
-    /// The address actually bound, which is useful when port 0 was asked for.
-    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
-        self.listener.local_addr()
-    }
-
-    /// Accepts connections until the process is asked to stop, each on its own
-    /// thread.
-    ///
-    /// Non-blocking rather than a plain `incoming()` loop, so a Ctrl+C is seen
-    /// within a poll instead of at the end of the process. The cost is a wakeup
-    /// every `POLL` to find out nothing happened, which is a twentieth of a
-    /// second of work doing nothing.
-    pub fn serve_forever(self) {
-        self.listener
-            .set_nonblocking(true)
-            .expect("a listener can be set non-blocking");
-
-        let mut live: Vec<thread::JoinHandle<()>> = Vec::new();
-
-        loop {
-            match self.listener.accept() {
-                Ok((stream, peer)) => {
-                    // On Windows an accepted socket inherits the listener's
-                    // non-blocking flag. Left alone, every read on the
-                    // connection returns "would block" immediately and a client
-                    // that says anything at all is dropped with error 10035.
-                    if let Err(e) = stream.set_nonblocking(false) {
-                        log::error(format!("accept failed: {e}"));
-                        continue;
-                    }
-
-                    let id = next_connection_id();
-                    // The status is built per connection, not once at startup,
-                    // because the two numbers a browser shows -- how many and
-                    // who -- are both things that change while the server runs.
-                    let mut status = self.status.clone();
-                    status.online = self.wire.player_count() as u32;
-                    status.sample = self
-                        .wire
-                        .snapshot()
-                        .into_iter()
-                        .map(|p| (p.name, uuid_undashed(&p.uuid)))
-                        .collect();
-                    let session = Session {
-                        world: Arc::new(self.world.clone()),
-                        wire: self.wire.clone(),
-                    };
-
-                    log::note(format!("[conn {id}] accepted from {peer}"));
-
-                    // Detached on purpose: a server's whole job is to handle
-                    // many people at once, so joining these would serialise the
-                    // entire server on whichever connection finished first.
-                    let handle = thread::spawn(move || {
-                        if let Err(e) = handle_connection(stream, status, session) {
-                            if client_went_away(&e) {
-                                log::note(format!("[conn {id}] client went away: {e}"));
-                            } else {
-                                log::error(format!("[conn {id}] ended with an error: {e}"));
-                            }
-                        }
-                    });
-                    live.push(handle);
-                    live.retain(|h| !h.is_finished());
-                }
-                // Nothing waiting. The normal case, and the reason this loop is
-                // a poll rather than a block.
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    if super::shutdown::requested() {
-                        break;
-                    }
-                    thread::sleep(POLL);
-                }
-                Err(e) => {
-                    log::error(format!("accept failed: {e}"));
-                    thread::sleep(POLL);
-                }
-            }
-        }
-
-        // Waiting here, behind the connections being cut, is what makes the save
-        // real rather than raced: shutdown is a command whose body is the write,
-        // answered only once the files are closed.
-        let ticks = self.world.shutdown();
-        if std::env::var_os("FILAMENT_WORLD").is_some() {
-            log::note(format!("the world saved, {} ticks run", ticks));
-        } else {
-            log::note(format!(
-                "nothing saved -- no world folder was opened (FILAMENT_WORLD); {} ticks run",
-                ticks
-            ));
-        }
-
-        // The connections are not waited for. There is no way yet to tell one to
-        // finish, so joining here would hang for as long as anybody stayed
-        // connected, which is a worse Ctrl+C than the one being fixed.
-        if live.is_empty() {
-            log::note("stopped");
-        } else {
-            log::note(format!(
-                "stopped, cutting off {} connection(s) still open",
-                live.len()
-            ));
-        }
-    }
-}
-
-/// How long the accept loop waits between looks for a connection.
-///
-/// Short enough that a Ctrl+C feels immediate and long enough that an idle
-/// server is not spinning.
-const POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// The light of some sections of a chunk, as the wire carries it.
 type ChunkLight = Vec<(i32, Vec<u8>)>;
@@ -227,7 +84,7 @@ type LightByChunk = (BTreeMap<(i32, i32), ChunkLight>, BTreeMap<(i32, i32), Chun
 /// an array the client did not expect, and everything after it is read from
 /// the wrong place -- which is a client holding light that is half of one
 /// section and half of another, and a world that looks lit in patches.
-fn group_light(light: ticking::LightChanges) -> LightByChunk {
+pub(super) fn group_light(light: ticking::LightChanges) -> LightByChunk {
     let mut sky: BTreeMap<(i32, i32), BTreeMap<i32, Vec<u8>>> = BTreeMap::new();
     let mut block: BTreeMap<(i32, i32), BTreeMap<i32, Vec<u8>>> = BTreeMap::new();
     for (chunk_x, chunk_z, index, sky_bytes, block_bytes) in light {
@@ -247,449 +104,6 @@ fn group_light(light: ticking::LightChanges) -> LightByChunk {
     (flatten(sky), flatten(block))
 }
 
-/// Answers one connection's handshake and status exchange.
-///
-/// Deliberately does not implement login: the point here is to be visible in
-/// the multiplayer browser, which the client reaches only after status.
-/// Whether an error means the client went away, rather than the server failing.
-///
-/// A player closing the game is not a fault, and it is reported by whatever
-/// the socket happened to be doing at the time. On Windows a window closed
-/// mid-transfer leaves an overlapped read outstanding, and the next one on that
-/// socket reports ERROR_IO_PENDING, which is os error 997. A connection reset
-/// is 10054, an abort is 10053, and a timed out connection is 10060; the
-/// portable kinds cover the same ground elsewhere.
-///
-/// It matters that this is answered before the connection is reported as
-/// broken. The cleanup has already run by the time the error reaches here, so
-/// an ERROR line for a player who closed their own game is a false alarm, and a
-/// false alarm costs the time of whoever reads the log next.
-fn client_went_away(e: &std::io::Error) -> bool {
-    use std::io::ErrorKind;
-
-    if matches!(
-        e.kind(),
-        ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted | ErrorKind::BrokenPipe
-    ) {
-        return true;
-    }
-
-    // Windows reports these by number. ERROR_IO_PENDING is the surprising one:
-    // it is not a failure at all, it is the leftover of a read that was
-    // cancelled by its timeout, and it only becomes an error because the
-    // connection was already going down.
-    matches!(e.raw_os_error(), Some(53 | 54 | 60 | 997))
-}
-
-fn handle_connection(
-    mut stream: TcpStream,
-    status: ServerStatus,
-    session: Session,
-) -> std::io::Result<()> {
-    let log = ConnLog::new(
-        next_connection_id(),
-        stream.peer_addr().map(|a| a.to_string()).unwrap_or_default(),
-        "handshake",
-    );
-    let mut dec = FrameDecoder::new();
-    let enc = FrameEncoder::new();
-    let mut scratch = [0u8; 8192];
-
-    // The handshake is the first thing on the connection, and nothing is
-    // compressed before login, so the decoder needs no threshold here.
-    //
-    // The decoder is handed to whichever phase comes next rather than replaced.
-    // A client sends its handshake and its login hello back to back, so both are
-    // usually in one segment, and the read above tends to bring both in at once.
-    // A fresh decoder in the next phase drops the second one on the floor, and
-    // the server then waits for a hello that has already arrived and been thrown
-    // away: the client times out and hangs up, and the log says it closed before
-    // the hello arrived, which is exactly what it says.
-    let intention = loop {
-        let n = stream.read(&mut scratch)?;
-        if n == 0 {
-            // The client hung up before saying anything.
-            return Ok(());
-        }
-        dec.queue(&scratch[..n]);
-
-        match dec.next_frame() {
-Ok(Some(frame)) => {
-            log.in_packet(
-                &packet_name("handshake", packet_id_of(&frame)),
-                "handshake",
-                frame.len(),
-            );
-            break match ClientIntention::read(&frame) {
-                Ok(p) => p,
-                Err(e) => {
-                    log.error(format!("bad handshake: {e}"));
-                    return Ok(());
-                }
-            }
-        }
-        Ok(None) => continue,
-        Err(e) => {
-            log.error(format!("framing error during handshake: {e}"));
-            return Ok(());
-        }
-    }
-    };
-
-    log.note(format!(
-        "protocol {}, host {:?}, port {}, intent {:?}",
-        intention.protocol_version.0,
-        intention.host,
-        intention.port,
-        intention.intent
-    ));
-
-    match intention.intent {
-        ClientIntent::Status => serve_status(&mut stream, dec, enc, status, log),
-        ClientIntent::Login => login(&mut stream, log, dec, session),
-        ClientIntent::Transfer => {
-            log.note("transfer is not implemented");
-            Ok(())
-        }
-    }
-}
-
-/// The login phase, in the order `finishLoginAndWaitForClient` uses upstream.
-///
-/// 1. `login_compression`, which announces the threshold
-/// 2. compression turns on, from this point on
-/// 3. `login_finished`, carrying the profile
-/// 4. wait for `login_acknowledged`
-///
-/// The order of 1 and 2 is the part that is easy to get wrong: the client
-/// applies the threshold to whatever arrives *after* the compression packet, so
-/// sending that packet already compressed means the client reads its own
-/// threshold as garbage and disconnects.
-fn login(
-    stream: &mut TcpStream,
-    log: ConnLog,
-    mut dec: FrameDecoder,
-    session: Session,
-) -> std::io::Result<()> {
-    use crate::protocol::frame::DEFAULT_COMPRESSION_THRESHOLD;
-    use crate::protocol::login::{write_login_compression, write_login_finished, Uuid};
-
-    let log = log.phase("login");
-    let mut enc = FrameEncoder::new();
-    let mut scratch = [0u8; 8192];
-
-    // The client names itself. The loop is the value: `break name` leaves it with
-    // the name, and that is what the block evaluates to.
-    let name: String = {
-        loop {
-            // Drain what is already buffered before reading. The hello is often
-            // in the same segment as the handshake, so it is usually already
-            // here on the first pass, and reading the socket first would wait
-            // on a client that is waiting for us.
-            if let Some(frame) = dec.next_frame().map_err(io_err)? {
-                let id = packet_id_of(&frame);
-                log.in_packet(&packet_name("login-s2c", id), "login", frame.len());
-
-                match crate::protocol::login::read_hello(&frame) {
-                    Ok((name, _)) => break name,
-                    Err(e) => {
-                        log.error(format!("bad login hello: {e}"));
-                        return Ok(());
-                    }
-                }
-            }
-
-            let n = stream.read(&mut scratch)?;
-            if n == 0 {
-                log.note("closed before the login hello arrived");
-                return Ok(());
-            }
-            dec.queue(&scratch[..n]);
-        }
-    };
-
-    log.note(format!(
-        "player {name:?} from {}, sending the profile",
-        stream.peer_addr().map(|a| a.to_string()).unwrap_or_default()
-    ));
-
-    let profile_id = Uuid::offline_for(&name);
-    let session_id = Uuid::offline_for("filament-session");
-
-    // From here the player is somebody to tell things to. Registered before the
-    // profile goes out so that a push arriving in the same moment as the
-    // profile is queued rather than lost, and taken back down when the
-    // connection ends however it ends.
-    //
-    // The entity id is taken here rather than inside play() because it is part
-    // of what a registration is: the tab list, the body and every later movement
-    // are all addressed by it, so a player who is registered without one cannot
-    // be described to anybody else.
-    let entity_id = crate::server::next_entity_id();
-    let registration = session.wire.register(
-        &name,
-        profile_id.bytes(),
-        entity_id,
-        crate::world::terrain::spawn_point(),
-    );
-    let player_id = registration.id;
-    log.note(format!(
-        "player {name:?} is player {player_id}, {} in total",
-        session.wire.player_count()
-    ));
-
-    // The seat this player holds is the registration's, and the registration is
-    // dropped however the connection ends: a client that cancels while the
-    // world is loading never reaches the play phase, and the count of players
-    // has to come back down all the same.
-
-    // 1. Announce compression, still uncompressed.
-    let mut out = Vec::new();
-    let mut compression_packet = Vec::new();
-    write_login_compression(&mut compression_packet, DEFAULT_COMPRESSION_THRESHOLD);
-    enc.encode(&compression_packet, &mut out).map_err(io_err)?;
-    stream.write_all(&out)?;
-    log.out_packet("login_compression", "login", compression_packet.len());
-
-    // 2. From here on, both directions are compressed.
-    enc.set_compression(DEFAULT_COMPRESSION_THRESHOLD);
-    dec.set_compression(DEFAULT_COMPRESSION_THRESHOLD);
-    log.note(format!("compression on at {DEFAULT_COMPRESSION_THRESHOLD}"));
-
-    // 3. The profile.
-    let mut body = Vec::new();
-    write_login_finished(&mut body, profile_id, &name, session_id);
-    let mut out = Vec::new();
-    enc.encode(&body, &mut out).map_err(io_err)?;
-    stream.write_all(&out)?;
-    stream.flush()?;
-    log.out_packet("login_finished", "login", body.len());
-    log.note(format!("profile {name} as {profile_id}"));
-
-    // 4. The acknowledgement is the last packet of the *login* phase. It has to be
-    // read and logged as such: the client sends it and only then switches to
-    // the configuration protocol, so labelling it configuration makes the log
-    // claim the client sent something it never sent, and every real
-    // configuration packet gets logged as a login one.
-    //
-    // Drain first: the client's acknowledgement usually arrives in the same
-    // segment as its hello, so it is often already buffered.
-    loop {
-        if let Some(frame) = dec.next_frame().map_err(io_err)? {
-            let id = packet_id_of(&frame);
-            log.in_packet(
-                &packet_name("login-s2c", id),
-                "login",
-                frame.len(),
-            );
-
-            if id == crate::protocol::login::id::SERVERBOUND_LOGIN_ACKNOWLEDGED {
-                log.note("acknowledged; moving to the configuration phase");
-                // The decoder is handed over rather than replaced. It already
-                // has compression enabled, which is what the next phase needs,
-                // and more importantly it still holds any bytes that arrived
-                // behind the acknowledgement. Starting a fresh decoder dropped
-                // them, and the first configuration packets went missing.
-                return configure(stream, log, dec, session, registration);
-            }
-        }
-
-        let n = stream.read(&mut scratch)?;
-        if n == 0 {
-            log.note("closed before acknowledging");
-            return Ok(());
-        }
-        dec.queue(&scratch[..n]);
-    }
-}
-
-/// The configuration phase, in the order `startConfiguration` uses upstream.
-///
-/// 1. enabled feature flags
-/// 2. registry data, one packet per registry
-/// 3. tags
-/// 4. finish configuration
-/// 5. wait for the client's own finish
-///
-/// Steps 2 and 3 are both required even though neither looks like it. The
-/// client falls back to the registries built into its jar when no registry_data
-/// arrives, but that set is not the one the tags name, and tags carry registry
-/// indices, so one packet without the other fails either way.
-///
-/// `dec` comes from the login phase and arrives with compression already on and
-/// whatever bytes followed the acknowledgement still buffered.
-fn configure(
-    stream: &mut TcpStream,
-    log: ConnLog,
-    mut dec: FrameDecoder,
-    session: Session,
-    registration: super::broadcast::Registration,
-) -> std::io::Result<()> {
-    use crate::protocol::configuration::{
-        registry_data_count, registry_data_frames, update_tags_summary,
-        write_finish_configuration, write_update_enabled_features, write_update_tags,
-    };
-    use crate::protocol::frame::DEFAULT_COMPRESSION_THRESHOLD;
-
-    let log = log.phase("configuration");
-
-    // Compression is already on in the decoder that arrived from login and
-    // stays on for the rest of the connection, so only the encoder is set up
-    // here.
-    let enc = FrameEncoder::compressed(DEFAULT_COMPRESSION_THRESHOLD);
-    let mut scratch = [0u8; 8192];
-
-    let mut out = Vec::new();
-
-    // 0. The brand, which the game sends first thing in this phase
-    //    (`startConfiguration` opens with it). The client keeps it and shows
-    //    it in the debug screen as the server's name, so a server that says
-    //    nothing is a null server there.
-    let mut body = Vec::new();
-    crate::protocol::configuration::write_brand(&mut body, "filament");
-    enc.encode(&body, &mut out).map_err(io_err)?;
-    log.out_packet("custom_payload", "configuration", body.len());
-
-    // 1. The feature flags this world runs with.
-    //
-    //    `FeatureFlags.java:31-42` builds the game's own set, and
-    //    `createVanilla` is `Identifier.withDefaultNamespace(name)`, so the one
-    //    that ships is `minecraft:vanilla`.
-    //
-    //    An empty list is not "no requirement", it is "nothing is enabled",
-    //    and every item whose prototype asks for a flag then reads as disabled.
-    let mut body = Vec::new();
-    write_update_enabled_features(&mut body, &["minecraft:vanilla"]);
-    enc.encode(&body, &mut out).map_err(io_err)?;
-    log.out_packet("update_enabled_features", "configuration", body.len());
-
-    // 2. Registry data. These look optional and are not: with none of them the
-    //    client falls back to the registries built into its jar, and that set is
-    //    not the one the tags refer to.
-    //
-    //    Sending them also fixes the other direction: tag contents are registry
-    //    indices, so without the registries there is no order to read them
-    //    against.
-    let mut registries = 0;
-    let mut registry_bytes = 0;
-    let mut frames = registry_data_frames();
-    for frame in &mut frames {
-        // The walk reports a malformed capture as a decode error and
-        // `io_err` is the same adapter the encoder uses, so wrap rather than
-        // keeping a second conversion here.
-        let frame = frame.map_err(|e| io_err(FrameError::Decode(e)))?;
-        enc.encode(frame, &mut out).map_err(io_err)?;
-        registries += 1;
-        registry_bytes += frame.len();
-    }
-    if let Some(e) = frames.failure() {
-        log.error(format!("the embedded capture stopped early: {e}"));
-    }
-    if registries != registry_data_count() {
-        log.error(format!(
-            "the capture holds {registries} frames but {} were expected",
-            registry_data_count()
-        ));
-    }
-    log.note(format!("registries: {registries} frames, {registry_bytes} bytes"));
-    log.out_packet("registry_data", "configuration", registry_bytes);
-
-    // 3. Tags, which are not optional either. The client builds its tag list
-    //    from this and from nothing else, and the first tag it looks for is
-    //    damage_type/is_fire. Without it the client throws
-    //    "Missing tag TagKey[minecraft:damage_type / minecraft:is_fire]" while
-    //    assembling its components and hangs up before the world.
-    let mut body = Vec::new();
-    write_update_tags(&mut body);
-    log.note(format!("tags: {}", update_tags_summary()));
-    enc.encode(&body, &mut out).map_err(io_err)?;
-    log.out_packet("update_tags", "configuration", body.len());
-
-    // 4. Finish.
-    let mut body = Vec::new();
-    write_finish_configuration(&mut body);
-    enc.encode(&body, &mut out).map_err(io_err)?;
-    log.out_packet("finish_configuration", "configuration", body.len());
-
-    stream.write_all(&out)?;
-    stream.flush()?;
-    log.note("configuration sent, waiting for the client to finish");
-
-    // 4. Wait. The client sends its own finish, and after that the connection
-    //    is in the play state.
-    //
-    //    Draining before reading matters here too: the client sends its
-    //    information and its brand together with its finish, and reading the
-    //    socket first would wait on a client that is waiting for us to finish.
-    //
-    //    How much world to build is the client's answer, so the radius is not
-    //    decided until its settings arrive here. The default is for a client
-    //    that sends them after the finish, which would otherwise have no
-    //    radius at all.
-    let mut view_distance = crate::protocol::chunk::RADIUS;
-    loop {
-        while let Some(frame) = dec.next_frame().map_err(io_err)? {
-            let id = packet_id_of(&frame);
-            // The names are looked up in the serverbound table: these are
-            // packets the client sent, and the ids overlap with the
-            // clientbound ones in the same phase.
-            log.in_packet(
-                &packet_name("configuration-s2c", id),
-                "configuration",
-                frame.len(),
-            );
-
-            match id {
-                crate::protocol::configuration::id::SERVERBOUND_FINISH_CONFIGURATION => {
-                    log.note("client finished configuration");
-                    return play(
-                        stream,
-                        dec,
-                        enc,
-                        log,
-                        view_distance,
-                        session,
-                        registration,
-                    );
-                }
-                crate::protocol::configuration::id::SERVERBOUND_CLIENT_INFORMATION => {
-                    match crate::protocol::configuration::ClientInformation::read(&frame) {
-                        Ok(info) => {
-                            // The client asked for this much world, so that is
-                            // how much to generate. Sending less leaves the far
-                            // ring of the view as the void it started as.
-                            view_distance = i32::from(info.view_distance);
-                            // How far away other players stay in *this*
-                            // player's world. Set here because this is where
-                            // the client finally says how much world it wants;
-                            // before that the registration's default stands.
-                            session
-                                .wire
-                                .set_view_distance(registration.id, view_distance);
-                            log.note(format!(
-                                "client settings: {} view distance {}, main hand {}",
-                                info.language, info.view_distance, info.main_hand
-                            ));
-                        }
-                        Err(e) => log.error(format!("bad client information: {e}")),
-                    }
-                }
-                crate::protocol::configuration::id::SERVERBOUND_CUSTOM_PAYLOAD => {
-                    // The brand packet the client sends with its settings.
-                    log.note("client payload (brand), ignored");
-                }
-                _ => {}
-            }
-        }
-
-        let n = stream.read(&mut scratch)?;
-        if n == 0 {
-            log.note("client closed during configuration");
-            return Ok(());
-        }
-        dec.queue(&scratch[..n]);
-    }
-}
 
 /// The play phase, and the first one that shows anything.
 ///
@@ -713,7 +127,7 @@ fn configure(
 ///
 /// Emptying is the whole of the discipline. Everything else about when to write
 /// is the caller's, and this says nothing about the contents.
-fn flush_buffer<S: Write>(stream: &mut S, out: &mut Vec<u8>) -> std::io::Result<()> {
+pub(super) fn flush_buffer<S: Write>(stream: &mut S, out: &mut Vec<u8>) -> std::io::Result<()> {
     stream.write_all(out)?;
     stream.flush()?;
     out.clear();
@@ -748,7 +162,7 @@ type ChunkSquare = std::collections::HashSet<ChunkCoord>;
 /// The coordinate is the tiebreak rather than the other way round: two chunks
 /// at the same distance are common at a corner, and the bytes a walk produces
 /// should still come out in the same order every time.
-fn chunk_edges(
+pub(super) fn chunk_edges(
     player_chunk: (i32, i32),
     radius: i32,
     sent: &ChunkSquare,
@@ -788,14 +202,14 @@ fn chunk_edges(
 /// The sequence the capture recorded is login, difficulty, abilities, held
 /// slot, recipes, position, spawn, border, time, and finally the game event
 /// that says to start waiting for chunks.
-fn play(
+pub(super) fn play(
     stream: &mut TcpStream,
     mut dec: FrameDecoder,
     enc: FrameEncoder,
     log: ConnLog,
     radius: i32,
     session: Session,
-    registration: super::broadcast::Registration,
+    registration: crate::server::broadcast::Registration,
 ) -> std::io::Result<()> {
     use crate::protocol::play as p;
 
@@ -808,7 +222,7 @@ fn play(
     // The seat the player held is the registration's, and the registration is
     // dropped when this function returns as well -- after this guard, so the
     // announcement goes to the players who are still there.
-    let mut departure = super::broadcast::Departure::arm(session.wire.clone(), &registration);
+    let mut departure = crate::server::broadcast::Departure::arm(session.wire.clone(), &registration);
 
     // Compression carries over from the configuration phase; both sides keep
     // it for the rest of the connection.
@@ -1023,7 +437,7 @@ fn play(
             enc.encode(&body, &mut out).map_err(io_err)?;
             sent_count += 1;
             sent.insert((dx, dz));
-            if super::log::verbose() {
+            if crate::server::log::verbose() {
                 log.out_packet("level_chunk_with_light", "play", body.len());
             }
         }
@@ -1356,7 +770,7 @@ fn play(
     loop {
         while let Some(frame) = dec.next_frame().map_err(io_err)? {
             let id = packet_id_of(&frame);
-            if super::log::verbose() {
+            if crate::server::log::verbose() {
                 log.in_packet(&packet_name("play-s2c", id), "play", frame.len());
             }
 
@@ -2307,7 +1721,7 @@ fn place_block(
                 let too_far = reach > MAX_REACH;
 
                 if too_far {
-                    if super::log::verbose() {
+                    if crate::server::log::verbose() {
                         log.note(format!(
                             "refused a break at {bx} {by} {bz}, {reach:.1} blocks away"
                         ));
@@ -2484,7 +1898,7 @@ fn place_block(
                                 );
                                 effects.push(effect);
 
-                                if super::log::verbose() {
+                                if crate::server::log::verbose() {
                                     log.note(format!("broke the block at {bx} {by} {bz}"));
                                 }
                             }
@@ -2700,7 +2114,7 @@ fn place_block(
             let mut body = Vec::new();
             p::write_block_update(&mut body, pos.x, pos.y, pos.z, now);
             edits.push(body);
-            if super::log::verbose() {
+            if crate::server::log::verbose() {
                 log.note(format!(
                     "the world changed {} {} {} to {}",
                     pos.x,
@@ -2715,7 +2129,7 @@ fn place_block(
         // the chunk, so a hole dug in a lit room is still lit on its screen
         // until it is told otherwise, and it is told here.
         let light = session.world.light_changes();
-        if super::log::verbose() {
+        if crate::server::log::verbose() {
             log.note(format!("{} sections of light moved", light.len()));
         }
         if !light.is_empty() {
@@ -2780,7 +2194,7 @@ fn place_block(
             // guess. A block drawn gone and still solid is what a missing or
             // out-of-order line here looks like, so it is written down.
             for body in outgoing.iter().chain(acks.iter()) {
-                if let Some(what) = super::broadcast::describe_block_packet(body) {
+                if let Some(what) = crate::server::broadcast::describe_block_packet(body) {
                     log.note(format!("to the breaker: {what}"));
                 }
             }
@@ -2925,7 +2339,7 @@ fn place_block(
                 for (pos, body) in &ready {
                     enc.encode(body, &mut out).map_err(io_err)?;
                     sent.insert((pos.x, pos.z));
-                    if super::log::verbose() {
+                    if crate::server::log::verbose() {
                         log.out_packet("level_chunk_with_light", "play", body.len());
                     }
                 }
@@ -2991,7 +2405,7 @@ fn place_block(
             stream.flush()?;
             last_clock = std::time::Instant::now();
 
-            if super::log::verbose() {
+            if crate::server::log::verbose() {
                 log.out_packet("set_time", "play", body.len());
             }
         }
@@ -3007,7 +2421,7 @@ fn place_block(
                 stream.flush()?;
                 last_keep_alive = std::time::Instant::now();
 
-                if super::log::verbose() {
+                if crate::server::log::verbose() {
                     log.out_packet("keep_alive", "play", body.len());
                 }
                 continue;
@@ -3080,7 +2494,7 @@ fn wanted_positions(radius: i32) -> Vec<(i32, i32)> {
 /// is corrected rather than argued with -- the client keeps the last word on
 /// what it draws, the server keeps it on what is true.
 /// A stack in words, for the log.
-fn describe(stack: Option<ItemStack>) -> String {
+pub(super) fn describe(stack: Option<ItemStack>) -> String {
     stack
         .map(|s| {
             format!(
@@ -3099,7 +2513,7 @@ fn describe(stack: Option<ItemStack>) -> String {
 /// one is what let the tail wait collect chunks the first loop had already
 /// collected, so the same ground went out twice and the batch counted more
 /// chunks than it was ever asked for.
-fn still_wanted(
+pub(super) fn still_wanted(
     pos: crate::world::pos::ChunkPos,
     sent: &std::collections::HashSet<(i32, i32)>,
     taken: &std::collections::HashSet<crate::world::pos::ChunkPos>,
@@ -3118,7 +2532,7 @@ fn still_wanted(
 ///
 /// Two rules follow, and they are the same rule. Say nothing unless something
 /// happened, and say how many actually went rather than how many were wanted.
-fn chunk_report(wanted: usize, sent_now: usize, dropped: usize) -> Option<String> {
+pub(super) fn chunk_report(wanted: usize, sent_now: usize, dropped: usize) -> Option<String> {
     if sent_now == 0 && dropped == 0 {
         return None;
     }
@@ -3135,7 +2549,7 @@ fn chunk_report(wanted: usize, sent_now: usize, dropped: usize) -> Option<String
 ///
 /// Fifteen seconds against a thirty second client timeout, so one can be lost
 /// without the connection going.
-const KEEP_ALIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+pub(super) const KEEP_ALIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// How often the clock is sent again. Once on arrival, the client runs its own
 /// count from there on, and the beat here is the game's own beat: every twenty
@@ -3154,7 +2568,7 @@ const CLOCK_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 /// entity id, a name and a place in the player list until the operating system's
 /// own keepalive gives up, which on Windows is measured in hours.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KeepAliveTick {
+pub(super) enum KeepAliveTick {
     /// Nothing due yet.
     Silent,
     /// Ask, with this id.
@@ -3185,7 +2599,7 @@ pub enum KeepAliveTick {
 /// without sleeping, and a fifteen second rule tested by waiting fifteen seconds
 /// is a test nobody runs.
 #[derive(Debug, Default)]
-pub struct KeepAlive {
+pub(super) struct KeepAlive {
     /// The id outstanding, if one is.
     challenge: Option<i64>,
     next_id: i64,
@@ -3265,7 +2679,7 @@ impl KeepAlive {
 /// The read returns as soon as there is anything to read, so this is only how
 /// long an idle connection sleeps. It bounds how quickly a player walking into
 /// new terrain is noticed, which is what it is for.
-const LOOP_INTERVAL: std::time::Duration = ticking::TICK;
+pub(super) const LOOP_INTERVAL: std::time::Duration = ticking::TICK;
 
 /// How long a connection will wait for the last chunk of an edge to finish being
 /// built, rather than sending what it has and waiting for the next pass.
@@ -3275,14 +2689,14 @@ const LOOP_INTERVAL: std::time::Duration = ticking::TICK;
 /// replace it. It runs on the connection's own thread, which also has to answer
 /// keep alives and drain movement, so a chunk that genuinely needs work to build
 /// gets the next pass, which is what it got before.
-const CHUNK_TAIL_BUDGET: std::time::Duration =
+pub(super) const CHUNK_TAIL_BUDGET: std::time::Duration =
     std::time::Duration::from_millis(LOOP_INTERVAL.as_millis() as u64 / 4);
 
 /// How long between looks at the pool while that budget is being spent.
 ///
 /// A tenth of the budget, so a budget is spent in about ten looks rather than a
 /// number of them that has to be kept in step with it by hand.
-const CHUNK_TAIL_STEP: std::time::Duration =
+pub(super) const CHUNK_TAIL_STEP: std::time::Duration =
     std::time::Duration::from_millis(CHUNK_TAIL_BUDGET.as_millis() as u64 / 8);
 
 /// Seconds of bare-handed breaking per point of hardness.
@@ -3313,7 +2727,7 @@ const SECONDS_PER_HARDNESS: f64 = 1.5;
 /// tool in. With a tool the client finishes before the crack does, and the crack
 /// is still cut short. That is the remaining half of this, and it waits on the
 /// inventory.
-fn break_time(
+pub(super) fn break_time(
     block: crate::world::block::BlockId,
     terrain: &crate::world::terrain::TerrainBlocks,
     registry: Option<&crate::world::block::BlockRegistry>,
@@ -3404,7 +2818,7 @@ impl Mining {
 /// Clamped at nine: the client has ten cracks and no picture for a higher one.
 /// The block itself is removed by the client's stop packet, which is what
 /// actually ends the break.
-fn stage_at(elapsed: std::time::Duration, duration: std::time::Duration) -> i8 {
+pub(super) fn stage_at(elapsed: std::time::Duration, duration: std::time::Duration) -> i8 {
     let total = duration.as_nanos();
     if total == 0 {
         return 0;
@@ -3469,7 +2883,7 @@ fn clear_crack(
 /// `LivingEntity.calculateFallPower` is the fall less the safe distance, and
 /// the damage is that number floored. Three blocks are free, which is what
 /// `Attributes.SAFE_FALL_DISTANCE` says.
-fn fall_damage(fall_distance: f64) -> f64 {
+pub(super) fn fall_damage(fall_distance: f64) -> f64 {
     if fall_distance <= SAFE_FALL_DISTANCE {
         return 0.0;
     }
@@ -3595,7 +3009,7 @@ fn hurt(
 /// somewhere else. So the answer is a thing to do and not only a line to
 /// say.
 #[derive(Debug, PartialEq)]
-enum Command {
+pub(super) enum Command {
     /// Say this to the player who asked.
     Reply(String),
     /// Say this to everybody.
@@ -3614,7 +3028,7 @@ enum Command {
     },
 }
 
-fn run_command(text: &str, wire: &Arc<Broadcast>, player_name: &str) -> Command {
+pub(super) fn run_command(text: &str, wire: &Arc<Broadcast>, player_name: &str) -> Command {
     // The game's own rule: a leading slash is optional.
     let command = text.strip_prefix('/').unwrap_or(text);
     let (name, rest) = match command.split_once(' ') {
@@ -3747,20 +3161,20 @@ fn run_command(text: &str, wire: &Arc<Broadcast>, player_name: &str) -> Command 
 /// tick-end packet. Counting per clock instead would call a burst of packets
 /// a flood when the client is only catching up after being put somewhere.
 #[derive(Debug, Default)]
-struct PositionCounter {
+pub(super) struct PositionCounter {
     seen: bool,
 }
 
 impl PositionCounter {
     /// Whether a position packet may be taken, and notes that one was.
-    fn take(&mut self) -> bool {
+    pub(super) fn take(&mut self) -> bool {
         let allowed = !self.seen;
         self.seen = true;
         allowed
     }
 
     /// The client has finished its tick.
-    fn end_tick(&mut self) {
+    pub(super) fn end_tick(&mut self) {
         self.seen = false;
     }
 }
@@ -3773,16 +3187,7 @@ fn dist_squared(ax: f64, ay: f64, az: f64, bx: f64, by: f64, bz: f64) -> f64 {
     dx * dx + dy * dy + dz * dz
 }
 
-/// A UUID as the status sample spells it: thirty-two hex digits, no dashes.
-fn uuid_undashed(bytes: &[u8; 16]) -> String {
-    let mut out = String::with_capacity(32);
-    for b in bytes {
-        out.push_str(&format!("{b:02x}"));
-    }
-    out
-}
-
-fn reach_to(player: &crate::protocol::play::Movement, block: crate::world::pos::BlockPos) -> f64 {
+pub(super) fn reach_to(player: &crate::protocol::play::Movement, block: crate::world::pos::BlockPos) -> f64 {
     // The eye sits above the feet. The client adds its own eye height to the
     // position it was sent, and this server sends the feet, so the height has
     // to be put back on here to measure what the client measured.
@@ -3814,102 +3219,10 @@ fn reach_to(player: &crate::protocol::play::Movement, block: crate::world::pos::
 
 /// The reach the game allows: `block_interaction_range` of 4.5 plus the one block
 /// of slack the client adds, so 5.5.
-const MAX_REACH: f64 = 5.5;
+pub(super) const MAX_REACH: f64 = 5.5;
 
 /// The game state id for air, used when a block cannot be read.
 ///
 /// A hole in the world, or a chunk the server has not built: either way the
 /// honest answer for "what is there" is nothing.
 const AIR_STATE: i32 = 0;
-
-/// The leading VarInt of a frame body, which is its packet id.
-fn packet_id_of(frame: &[u8]) -> i32 {
-    let mut r = frame;
-    VarInt::read(&mut r).map(|(v, _)| v.0).unwrap_or(-1)
-}
-
-/// Bridges a framing error into the `io::Error` the socket code returns.
-///
-/// `FrameError` is not an `io::Error` and these functions deal in sockets, so
-/// the conversion happens here rather than by making every framing error an
-/// `io::Error` and losing what kind of failure it was.
-fn io_err(e: crate::protocol::FrameError) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-}
-
-/// The status exchange: a request, a response, then an optional ping.
-fn serve_status(
-    stream: &mut TcpStream,
-    mut dec: FrameDecoder,
-    enc: FrameEncoder,
-    status: ServerStatus,
-    log: ConnLog,
-) -> std::io::Result<()> {
-    let log = log.phase("status");
-    let mut scratch = [0u8; 8192];
-
-    // Drain before reading. The client sends its handshake and its status
-    // request together, so the request is usually already sitting in the
-    // decoder when this starts. Reading the socket first waits for bytes that
-    // are not coming, because the client is waiting for the response: the
-    // symptom is the server entry stuck on "Pinging..." until the client gives
-    // up and opens a second connection to log in directly.
-    loop {
-        while let Some(body) = dec.next_frame().map_err(io_err)? {
-            let mut r = &body[..];
-            let (VarInt(id), _) = match VarInt::read(&mut r) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-
-            // These are packets the client sent, so the serverbound table, where the
-            // same ids mean the other half of the exchange.
-            log.in_packet(&packet_name("status-s2c", id), "status", body.len());
-
-            match id {
-                // Status request: answer with the JSON.
-                0 => {
-                    let out = status_response_body(&status);
-                    let mut wire = Vec::new();
-                    enc.encode(&out, &mut wire).map_err(io_err)?;
-                    stream.write_all(&wire)?;
-                    stream.flush()?;
-                    log.out_packet("status_response", "status", out.len());
-                }
-                // Ping: echo it back so the client can measure latency.
-                //
-                // The payload is a fixed eight-byte long in both directions
-                // (`ServerboundPingRequestPacket` reads a long, the pong writes
-                // one), not a VarLong: reading it as one leaves seven bytes
-                // behind in the frame, the pong answers with the wrong number,
-                // and the client sits on "Pinging..." forever because the
-                // round trip never matches.
-                1 => {
-                    let mut time = [0u8; 8];
-                    if r.len() < 8 {
-                        continue;
-                    }
-                    time.copy_from_slice(&r[..8]);
-                    let mut body = Vec::new();
-                    VarInt(1).write(&mut body);
-                    body.extend_from_slice(&time);
-
-                    let mut wire = Vec::new();
-                    enc.encode(&body, &mut wire).map_err(io_err)?;
-                    stream.write_all(&wire)?;
-                    stream.flush()?;
-                    log.out_packet("pong_response", "status", body.len());
-                }
-                _ => {}
-            }
-        }
-
-        let n = stream.read(&mut scratch)?;
-        if n == 0 {
-            return Ok(());
-        }
-        dec.queue(&scratch[..n]);
-    }
-}
-#[cfg(test)]
-mod tests;

@@ -156,18 +156,18 @@ Grouped by what they are about, not by when they were done.
       is told the sections that moved. Every block that gives off light lights,
       because a block read out of a world file is registered with the light the
       game gives it. Not done: the shape of a block (every one of them is
-      drawn as a full cube, so a torch is a lantern-sized brick) and the sun
-      moving across the sky.
-- [ ] Mobs, item drops, water, weather
+      drawn as a full cube, so a torch is a lantern-sized brick).
+- [ ] Mobs, water, weather
+- [ ] Drowning and suffocation. The other ways the game hurts a player are
+      done: fall damage, lava and cactus. Not done: being under water, and
+      being inside a solid block.
 - [ ] The rest of the inventory. The authority is there: the client says which
       slots changed and the server checks the totals against what the player
       was issued, so a stale count cannot leave the server holding the wrong
-      block. Not done: the items themselves (there are no item drops yet), the
-      player's own chest, the off hand, and the cursor dropped outside the
-      window.
+      block. Not done: the player's own chest, and the off hand.
 - [ ] Authentication
 
-921 tests. A client connects, negotiates, and gets a world: either one the
+937 tests. A client connects, negotiates, and gets a world: either one the
 game saved, read out of its own folder, or one generated on the spot — grass
 on top, dirt under it, stone below, hills from two octaves of value noise. A
 second client joins the same world and sees the first one walk about, break and

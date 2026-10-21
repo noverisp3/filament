@@ -23,7 +23,7 @@ pub mod chunk;
 pub mod chunk_nbt;
 pub mod item_entity;
 pub mod light;
-pub mod lighting;
+pub mod light_engine;
 pub mod nbt;
 pub mod palette;
 pub mod pos;

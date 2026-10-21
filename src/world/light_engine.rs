@@ -1,4 +1,4 @@
-//! World-level light: the driver that lights every loaded chunk at once.
+//! The light engine: the driver that lights every loaded chunk at once.
 //!
 //! `world::light` knows the *rules* for one section; this knows the *order*.
 //! Light crosses section and chunk boundaries, so lighting each section on its

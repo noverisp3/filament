@@ -90,8 +90,7 @@ impl SectionMesh {
         self.indices.is_empty()
     }
 
-    /// Used by tests and upcoming render statistics.
-    #[allow(dead_code)]
+    /// The number of quads the mesh ended up with.
     pub fn quad_count(&self) -> usize {
         self.indices.len() / 6
     }

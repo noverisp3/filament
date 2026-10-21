@@ -1,4 +1,5 @@
 use super::*;
+use crate::world::pos::Direction;
 
 #[test]
 fn a_tick_moves_the_clock_on_by_one() {

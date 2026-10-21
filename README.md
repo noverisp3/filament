@@ -167,7 +167,7 @@ Grouped by what they are about, not by when they were done.
       window.
 - [ ] Authentication
 
-937 tests. A client connects, negotiates, and gets a world: either one the
+921 tests. A client connects, negotiates, and gets a world: either one the
 game saved, read out of its own folder, or one generated on the spot — grass
 on top, dirt under it, stone below, hills from two octaves of value noise. A
 second client joins the same world and sees the first one walk about, break and

@@ -740,9 +740,7 @@ fn the_light_a_client_is_told_is_continuous_across_a_chunk_border_the_region_sta
     // out in starts one block into the chunk before it. A chunk that hangs
     // over the edge of the region covers only part of itself inside it, and
     // the light of that part has to land in the right columns: get it wrong
-    // and the light is cut in two at the border of the two chunks, and the
-    // client draws a strip of darkness one block wide where the light should
-    // be continuous.
+    // and the client draws a strip of darkness one block wide at the border.
     the_light_a_client_is_told_is_continuous_across_a_chunk_border_at(17);
 }
 

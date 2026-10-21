@@ -560,10 +560,8 @@ fn an_entity_is_exactly_the_fields_the_game_reads() {
     // This exists because the read-back test passed with four angles.
     //
     // A round trip proves the writer and the reader agree. It cannot prove
-    // they agree with the *game*, because a wrong reading written down
-    // twice is still self-consistent: both halves believed there were four
-    // angles and neither of them was wrong on its own terms. Counting the
-    // reads in the constructor is the only check that consults the game.
+    // they agree with the *game*, because a wrong reading written down twice
+    // is still self-consistent.
     //
     // Upstream, in order:
     //
@@ -1116,16 +1114,11 @@ fn the_play_ids_are_the_ones_the_game_uses() {
     ///
     /// The list above pins some numbers by hand, which is how the swing packet
     /// came to be written with the right shape and the wrong number: two is
-    /// `animate`, a packet with an entity and a byte, and one hundred and
-    /// twenty-three is `swing_animation`. Reading the shape from
-    /// `ClientboundSwingAnimationPacket` and the number from the packet called
-    /// `animate` produces something that decodes as the other one and leaves
-    /// the client two bytes short of the end.
+    /// `animate` and one hundred and twenty-three is `swing_animation`.
     ///
     /// So the expected values here are not written by hand at all. They come
     /// out of the data generator's report, the same file that produced every
-    /// other number in this module, and a constant that is renamed or given the
-    /// wrong number fails rather than costing somebody a crash report.
+    /// other number in this module.
     #[test]
     fn an_acknowledged_change_is_the_update_followed_by_the_ack() {
         // The order is the whole of it. The client draws the change straight

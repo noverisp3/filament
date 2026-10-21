@@ -460,12 +460,10 @@ fn ids_do_not_repeat_when_someone_comes_back() {
 #[test]
 fn a_push_carries_the_packet_id_and_the_body_together() {
     // A pushed body is handed to the receiver's own encoder, which adds a
-    // length and nothing else. So the id has to be inside it. Sending the
+    // length and nothing else. So the id has to be inside it: sending the
     // body without the id makes the packet arrive with the first byte of
-    // whatever field follows as its id, which for a block update is a byte
-    // of the position: id 8, which is bundle_delimiter, a packet with no
-    // body at all, and the client reports the position as eight bytes it
-    // did not expect.
+    // whatever field follows as its id, and for a block update that is a byte
+    // of the position.
     let wire = std::sync::Arc::new(Broadcast::new());
     let mine = join(&wire, "digger");
     let theirs = join(&wire, "watcher");

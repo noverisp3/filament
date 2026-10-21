@@ -30,6 +30,7 @@ pub mod pos;
 pub mod raycast;
 pub mod region;
 pub mod section;
+pub mod shapes;
 pub mod ticks;
 pub mod terrain;
 // The game calls the live world a `Level` (`net.minecraft.world.level.Level`),

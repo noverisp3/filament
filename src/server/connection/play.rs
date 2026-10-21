@@ -77,6 +77,12 @@ const CACTUS_EVERY: u32 = 10;
 /// is fifteen seconds underwater and then a heart and a half a second, which is
 /// how a player who walks into the sea does not come back.
 pub(super) const MAX_AIR_SUPPLY: u32 = 300;
+
+/// How far below empty the air has to be before the game drowns a player.
+///
+/// LivingEntity.shouldTakeDrowningDamage is the air at most minus twenty, so
+/// a player can hold their breath for three hundred and twenty ticks.
+const DROWN_AIR_BELOW: i32 = -20;
 const DROWN_DAMAGE: f64 = 2.0;
 
 /// What being walled in takes, and how often.
@@ -698,7 +704,7 @@ pub(super) fn play(
     //
     // The air is counted in ticks and the player is told about it through the
     // damage they take, so nothing else needs to carry the number.
-    let mut air_supply: u32 = MAX_AIR_SUPPLY;
+    let mut air_supply: i32 = MAX_AIR_SUPPLY as i32;
     // How long the player has had their head in a solid block.
     let mut suffocate_ticks: u32 = 0;
     // Where the player comes back to. The world's own spawn, asked for again
@@ -931,33 +937,34 @@ pub(super) fn play(
                             let eye_y = (player.y + 1.62).floor() as i32;
                             let eye_z = player.z.floor() as i32;
                             let eyes = crate::world::pos::BlockPos::new(eye_x, eye_y, eye_z);
-                            // The box the game looks in, which is around the
-                            // eyes and is most of a block wide: a player whose
-                            // head is half in a wall is in a wall.
+                            // The box the game asks about a wall with: a flat
+                            // box around the eyes, most of a block wide.
                             //
-                            // The four cells around the eyes are the ones a
-                            // box that wide can reach, because the eyes are
-                            // never exactly on a cell's edge.
-                            let around_eyes = [
-                                eyes,
-                                crate::world::pos::BlockPos::new(eye_x + 1, eye_y, eye_z),
-                                crate::world::pos::BlockPos::new(eye_x - 1, eye_y, eye_z),
-                                crate::world::pos::BlockPos::new(eye_x, eye_y, eye_z + 1),
-                                crate::world::pos::BlockPos::new(eye_x, eye_y, eye_z - 1),
-                            ];
+                            // It reaches into the cell next door only when the
+                            // player is close enough to its edge, and that is
+                            // the whole difference between being in a wall and
+                            // standing beside one. The four cells around the
+                            // eyes are the ones a box that wide can reach, and
+                            // it reaches fewer of them most of the time.
+                            let eye_box = crate::world::shapes::eye_box((
+                                player.x,
+                                player.y,
+                                player.z,
+                            ));
+                            let wall_cells = eye_box.cells();
                             // All of them at once, because asking is a round
                             // trip to the world's own thread and asking five
                             // times a tick is five round trips a tick.
-                            let mut positions = vec![feet, head];
-                            positions.extend(around_eyes);
+                            let mut positions = vec![feet, head, eyes];
+                            positions.extend(wall_cells.iter().copied());
                             let around = session.world.states_at(positions).unwrap_or_default();
                             let state_at = |i: usize| around.get(i).copied().flatten();
                             let name_at = |i: usize| {
                                 state_at(i).map(crate::server::ticking::state_id_name)
                             };
-                            // The states around the eyes, which are the last
-                            // five of them.
-                            let eye_states = &around[2..];
+                            // The state of the cell the eyes are in, which is
+                            // where the water is looked for.
+                            let eye_state = state_at(2);
 
                             lava_ticks += 1;
                             cactus_ticks += 1;
@@ -1013,14 +1020,9 @@ pub(super) fn play(
                             // cell the head is in. It is the one cell, not
                             // the box: a player beside water is not under
                             // it.
-                            let in_water = eye_states
-                                .first()
-                                .is_some_and(|state| {
-                                    state.is_some_and(|state| {
-                                        crate::server::ticking::state_id_name(state)
-                                            == "minecraft:water"
-                                    })
-                                });
+                            let in_water = eye_state.is_some_and(|state| {
+                                crate::server::ticking::state_id_name(state) == "minecraft:water"
+                            });
                             let (air, drowning) = breathe(air_supply, in_water);
                             air_supply = air;
                             if drowning {
@@ -1041,18 +1043,11 @@ pub(super) fn play(
 
                             // And suffocation: the head inside a block that
                             // stops it.
-                            //
-                            // The game asks whether the block is in the
-                            // `causes_suffocation` tag, which is the blocks
-                            // that stop a player: wool and planks and stone,
-                            // and not glass and not water and not leaves.
-                            //
-                            // It is checked over a box around the eyes and
-                            // not at a single point, because a player whose
-                            // head is half in a wall is in a wall.
-                            let in_wall = eye_states.iter().any(|state| {
-                                state.is_some_and(crate::generated::causes_suffocation)
-                            });
+                            let in_wall = is_in_wall(
+                                &eye_box,
+                                &wall_cells,
+                                &around[3..],
+                            );
                             if in_wall {
                                 suffocate_ticks += 1;
                                 if suffocate_ticks >= SUFFOCATION_EVERY {
@@ -3020,20 +3015,55 @@ pub(super) fn fall_damage(fall_distance: f64) -> f64 {
     (fall_distance - SAFE_FALL_DISTANCE).floor()
 }
 
+/// Whether a player's head is in a wall, the way the game asks.
+///
+/// The game asks whether a flat box around the eyes overlaps the shape of a
+/// block that stops a player from breathing. The box is most of a block wide,
+/// so it reaches into the cell next door only when the player is close enough
+/// to its edge: a player standing beside a wall is not in it, and a player
+/// with their head in the wall is.
+///
+/// The blocks that stop a player are the ones in the `causes_suffocation`
+/// tag -- wool and planks and stone, and not glass and not water and not
+/// leaves -- and only the ones that fill the whole cell, because the shape
+/// of a slab is not the whole cell and this server does not know it.
+pub(super) fn is_in_wall(
+    eye_box: &crate::world::shapes::Box,
+    cells: &[crate::world::pos::BlockPos],
+    states: &[Option<i32>],
+) -> bool {
+    cells.iter().enumerate().any(|(index, cell)| {
+        let Some(state) = states.get(index).copied().flatten() else {
+            return false;
+        };
+        crate::generated::causes_suffocation(state)
+            && crate::generated::is_full_cube(state)
+            && eye_box.reaches_cell(*cell)
+    })
+}
+
 /// What a player's air does in one tick, and whether it drowns.
 ///
 /// The air is a number that goes down while the player is under water and up
-/// while they are not, and the game takes damage from them once it reaches
-/// zero. `Entity.getMaxAirSupply` is three hundred ticks, and
-/// `LivingEntity` takes two half-hearts a tick once the air is gone.
-pub(super) fn breathe(air_supply: u32, underwater: bool) -> (u32, bool) {
+/// while they are not, and the game takes damage from them once it has gone
+/// twenty below empty. `Entity.getMaxAirSupply` is three hundred ticks, and
+/// `LivingEntity.shouldTakeDrowningDamage` is the air at most minus twenty,
+/// so a player can hold their breath for three hundred and twenty ticks and
+/// then drowns a heart a tick until they come up.
+///
+/// When the game drowns a player it puts the air back to nothing, so the
+/// heart comes every twenty ticks after that and not every tick.
+pub(super) fn breathe(air_supply: i32, underwater: bool) -> (i32, bool) {
     if underwater {
-        let left = air_supply.saturating_sub(1);
-        return (left, left == 0);
+        let left = air_supply - 1;
+        if left <= DROWN_AIR_BELOW {
+            return (0, true);
+        }
+        return (left, false);
     }
     // Out of the water, and the air comes back four ticks a tick, which is
-    // `Attributes.OXYGEN_BONUS` at its default.
-    ((air_supply + 4).min(MAX_AIR_SUPPLY), false)
+    // `LivingEntity.increaseAirSupply`.
+    ((air_supply + 4).min(MAX_AIR_SUPPLY as i32), false)
 }
 
 /// Takes health off a player and tells them about it.

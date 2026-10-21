@@ -139,40 +139,49 @@ fn three_blocks_of_falling_are_free_and_the_rest_is_not() {
 #[test]
 fn the_air_runs_out_under_water_and_comes_back_out_of_it() {
     // The game's own numbers: three hundred ticks of air, which is fifteen
-    // seconds, and the damage starts when it is gone.
-    let mut air = MAX_AIR_SUPPLY;
+    // seconds, and the damage starts twenty ticks after that.
+    let mut air = MAX_AIR_SUPPLY as i32;
 
     // Out of the water, the air is full and stays full.
     let (left, drowning) = breathe(air, false);
-    assert_eq!(left, MAX_AIR_SUPPLY, "a player in the air has all of it");
+    assert_eq!(left, MAX_AIR_SUPPLY as i32, "a player in the air has all of it");
     assert!(!drowning, "and is not drowning");
     air = left;
 
     // Under it, the air goes down a tick at a time.
-    for _ in 0..MAX_AIR_SUPPLY - 1 {
+    for _ in 0..MAX_AIR_SUPPLY as i32 - 1 {
         let (left, drowning) = breathe(air, true);
         air = left;
         assert!(!drowning, "there is air left while there is air left");
     }
     assert_eq!(air, 1, "one tick of air is left");
 
-    // And the last one is the one that drowns.
+    // The air goes below empty before the game drowns a player: the damage
+    // starts twenty ticks under water with nothing left.
+    for _ in 0..20 {
+        let (left, drowning) = breathe(air, true);
+        air = left;
+        assert!(!drowning, "the air is gone but the player is not drowned");
+    }
+    assert_eq!(air, -19, "nineteen below empty");
+
+    // And the twentieth one drowns, and the game puts the air back to
+    // nothing, so the heart comes every twenty ticks and not every tick.
     let (left, drowning) = breathe(air, true);
-    assert_eq!(left, 0, "the air is gone");
     assert!(drowning, "and the player drowns");
+    assert_eq!(left, 0, "and the air is put back to nothing");
 }
 
 #[test]
-fn coming_up_for_air_gives_the_air_back_quickly() {
-    // The game fills the air four ticks a tick, which is
-    // `Attributes.OXYGEN_BONUS` at its default.
+fn coming_up_for_air_gives_the_air_back_quickly() {    // The game fills the air four ticks a tick, which is
+    // `LivingEntity.increaseAirSupply`.
     let (left, drowning) = breathe(0, false);
     assert_eq!(left, 4, "four ticks of air a tick");
     assert!(!drowning);
 
     // And it does not fill past the top.
-    let (left, _) = breathe(MAX_AIR_SUPPLY - 2, false);
-    assert_eq!(left, MAX_AIR_SUPPLY, "the air does not go past full");
+    let (left, _) = breathe(MAX_AIR_SUPPLY as i32 - 2, false);
+    assert_eq!(left, MAX_AIR_SUPPLY as i32, "the air does not go past full");
 }
 
 #[test]
@@ -1779,5 +1788,98 @@ fn the_body_helper_refuses_a_frame_that_is_something_else() {
         )
         .is_ok(),
         "and is itself"
+    );
+}
+
+/// A player standing beside a wall is not in it.
+///
+/// The game asks whether a flat box around the eyes overlaps a block that
+/// stops a player from breathing, and that box is most of a block wide, so
+/// it reaches into the cell next door only when the player is close enough
+/// to its edge. Asking about the cells around the eyes instead -- which is
+/// what this did -- puts every player who is anywhere near a wall in it, and
+/// a player who walks past a wall loses a heart.
+#[test]
+fn a_player_beside_a_wall_is_not_in_it() {
+    let stone = state_id("minecraft:stone");
+
+    // The player is in the middle of a cell at 8.5, with a wall in the cell
+    // to the east. The eyes are half a block from it.
+    let eyes = crate::world::shapes::eye_box((8.5, 64.0, 8.5));
+    // The cells the server asks about: the one the eyes are in and the four
+    // around it. The wall is one of them, and the answer is still no.
+    let cells = [
+        crate::world::pos::BlockPos::new(8, 65, 8),
+        crate::world::pos::BlockPos::new(9, 65, 8),
+        crate::world::pos::BlockPos::new(7, 65, 8),
+        crate::world::pos::BlockPos::new(8, 65, 9),
+        crate::world::pos::BlockPos::new(8, 65, 7),
+    ];
+    let states: Vec<Option<i32>> = cells
+        .iter()
+        .map(|cell| {
+            if cell.x == 9 {
+                Some(stone)
+            } else {
+                Some(0)
+            }
+        })
+        .collect();
+
+    assert!(
+        !is_in_wall(&eyes, &cells, &states),
+        "half a block from the wall is not in it"
+    );
+}
+
+/// A player with their head in the wall is in it.
+#[test]
+fn a_player_with_their_head_in_a_wall_is_in_it() {
+    let stone = state_id("minecraft:stone");
+
+    // The same player, now with their face against the wall.
+    let eyes = crate::world::shapes::eye_box((8.9, 64.0, 8.5));
+    let cells = eyes.cells();
+    let states: Vec<Option<i32>> = cells
+        .iter()
+        .map(|cell| {
+            if cell.x == 9 {
+                Some(stone)
+            } else {
+                Some(0)
+            }
+        })
+        .collect();
+
+    assert!(
+        is_in_wall(&eyes, &cells, &states),
+        "a tenth of a block from the wall is in it"
+    );
+}
+
+/// A player with their head in glass is not in it.
+///
+/// Glass does not stop a player from breathing, so it does not suffocate
+/// them however close they are to it.
+#[test]
+fn a_player_with_their_head_in_glass_is_not_in_it() {
+    let glass = state_id("minecraft:glass");
+
+    let eyes = crate::world::shapes::eye_box((8.9, 64.0, 8.5));
+    let cells = eyes.cells();
+    let states: Vec<Option<i32>> = cells
+        .iter()
+        .map(|cell| {
+            if cell.x == 9 {
+                Some(glass)
+            } else {
+                Some(0)
+            }
+        })
+        .collect();
+
+    assert!(
+        !is_in_wall(&eyes, &cells, &states),
+        "glass does not stop a player from breathing"
     );
 }

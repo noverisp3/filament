@@ -158,14 +158,18 @@ Grouped by what they are about, not by when they were done.
       game gives it. Not done: the shape of a block (every one of them is
       drawn as a full cube, so a torch is a lantern-sized brick).
 - [ ] Mobs, water, weather
-- [ ] Drowning and suffocation. The other ways the game hurts a player are
-      done: fall damage, lava and cactus. Not done: being under water, and
-      being inside a solid block.
 - [ ] The rest of the inventory. The authority is there: the client says which
       slots changed and the server checks the totals against what the player
       was issued, so a stale count cannot leave the server holding the wrong
       block. Not done: the player's own chest, and the off hand.
 - [ ] Authentication
+
+The ways the world hurts a player are all here: a fall from too high, lava, a
+cactus, the water, and being walled in. The numbers are the game's own, read
+out of the game: three blocks of fall are free, lava takes four half-hearts a
+second, a cactus takes one and then waits, the water gives you three hundred
+ticks of air and then takes two half-hearts a tick, and a wall takes a heart
+every half second.
 
 937 tests. A client connects, negotiates, and gets a world: either one the
 game saved, read out of its own folder, or one generated on the spot — grass

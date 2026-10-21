@@ -3,8 +3,8 @@
 //! The game drops what a broken block was into the world as an entity, and the
 //! player picks it up by walking over it. The item is not in anybody's hands
 //! until then, which is the whole of the difference: a block that vanishes
-//! when it is broken and appears in the pocket straight away skips the half of
-//! the game where a thing on the ground can be lost, dropped, or fought over.
+//! when it is broken skips the half of the game where a thing on the ground can
+//! be lost, dropped, or fought over.
 
 use super::pos::BlockPos;
 

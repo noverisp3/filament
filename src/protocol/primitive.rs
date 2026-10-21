@@ -2,9 +2,8 @@
 //!
 //! Every field in every packet is one of these four things, so they are defined
 //! once here and tested against the encodings in the decompiled 26.3 server
-//! rather than against round-trips. A round trip passes when encode and decode
-//! share the same mistake, which is exactly how a wrong VarInt length survives
-//! until a real client hangs on it.
+//! rather than against round-trips: a round trip passes when encode and decode
+//! share the same mistake.
 
 use std::fmt;
 
@@ -21,15 +20,11 @@ impl VarInt {
 
 /// Number of bytes this value occupies once encoded.
 ///
-/// Number of bytes this value occupies once encoded.
-    ///
-    /// Computed the way `write` computes it: the value is treated as an
-    /// unsigned 32-bit integer and shifted seven bits at a time until nothing
-    /// is left. `unsigned_abs` is wrong for negative values, because the
-    /// encoding of -70000 is based on its bit pattern rather than on its
-    /// magnitude, so it takes five bytes rather than the two 70000 would need
-    /// unsigned.
-    pub const fn written_size(self) -> usize {
+/// Computed the way `write` computes it: the value is treated as an unsigned
+/// 32-bit integer and shifted seven bits at a time until nothing is left.
+/// `unsigned_abs` is wrong for negative values, because the encoding of -70000
+/// is based on its bit pattern rather than on its magnitude.
+pub const fn written_size(self) -> usize {
         // `leading_zeros` on the unsigned reinterpretation, which is zero for
         // every negative value and therefore correctly yields the full 32 bits.
         let bits = 32 - (self.0 as u32).leading_zeros() as usize;

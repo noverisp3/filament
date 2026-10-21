@@ -2,15 +2,12 @@
 //!
 //! The handshake is one packet, and it decides everything that follows: a
 //! client asking to be listed in the server browser wants status, and a client
-//! that wants to join is in the same connection one packet later. Both are
-//! answered here, which is the smallest thing a server can be that a real
-//! client will still talk to.
+//! that wants to join is in the same connection one packet later.
 //!
-//! Field layouts come from `ClientIntentionPacket` and `ClientboundStatusResponsePacket`
-//! in the decompiled 26.3 server. The one that catches people is the port: it is
-//! a `writeShort`, which Netty writes big-endian, while VarInts are little
-//! endian seven-bit groups. Getting that backwards does not corrupt anything
-//! obvious, it just makes the server appear on the wrong port.
+//! Field layouts come from `ClientIntentionPacket` and
+//! `ClientboundStatusResponsePacket` in the decompiled 26.3 server. The one
+//! that catches people is the port: it is a `writeShort`, which Netty writes
+//! big-endian, while VarInts are little-endian seven-bit groups.
 
 use std::borrow::Cow;
 
@@ -71,9 +68,8 @@ impl ClientIntention {
     pub fn read(mut r: &[u8]) -> Result<Self, DecodeError> {
         // The frame body begins with the packet id, which for this packet is
         // always 0. It has to be consumed here: skipping it is not optional,
-        // because reading the protocol version from the id silently succeeds and
-        // then reads the real version as the host length. The symptom is a
-        // "string announced 777 bytes" error, because 777 is the version.
+        // because reading the protocol version from the id silently succeeds
+        // and then reads the real version as the host length.
         let (VarInt(id), _) = VarInt::read(&mut r)?;
         if id != HANDSHAKE_INTENTION_ID {
             return Err(DecodeError::TooLong);
@@ -156,10 +152,9 @@ impl ServerStatus {
     ///
     /// Written by hand rather than through a JSON library because the shape is
     /// fixed and the escaping rules are narrow: only the description and the
-    /// version name are free text. Every character that needs escaping in a JSON
-    /// string is replaced, so a server description containing a quote or a
-    /// newline cannot produce invalid JSON, which the client treats as a broken
-    /// server rather than as a broken description.
+    /// version name are free text. Every character that needs escaping in a
+    /// JSON string is replaced, so a description containing a quote cannot
+    /// produce invalid JSON, which the client treats as a broken server.
     pub fn to_json(&self) -> String {
         // The player list, if there is anyone to name. Written as a fragment
         // so the shape without one stays exactly what it was.

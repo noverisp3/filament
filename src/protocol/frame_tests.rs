@@ -290,8 +290,7 @@ fn frames_already_buffered_are_available_without_reading_the_socket() {
     // The client sends its handshake and its status request in one write, so by
     // the time the first frame has been taken, the second is already sitting in
     // the decoder. A reader that calls read() before draining blocks on a socket
-    // that has nothing coming, because the client is waiting for the reply. That
-    // is what left the server looking stuck on "Pinging...".
+    // that has nothing coming.
     let mut dec = FrameDecoder::new();
     let mut wire = raw_frame(b"first");
     wire.extend(raw_frame(b"second"));

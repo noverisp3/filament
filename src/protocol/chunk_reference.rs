@@ -2,15 +2,12 @@
 //!
 //! The packet was written from the decompiled source, and eight of the fields in
 //! the play phase turned out to be wrong when a real client read them: an int
-//! where the game sends a VarInt, a bit set encoded as words instead of bytes,
-//! four bits where the minimum was two. Every one of them decoded cleanly at
-//! this end and failed at the other.
+//! where the game sends a VarInt, a bit set encoded as words instead of bytes.
+//! Every one of them decoded cleanly at this end and failed at the other.
 //!
 //! So the shapes here are taken from bytes, not from the source. The reference
 //! is `captured/play/chunk_reference.bin`, one whole
-//! `ClientboundLevelChunkWithLightPacket` recorded from a stock server on
-//! 2026-10-17, and it walks to exactly its own length with nothing left over.
-//! A layout that disagrees with it disagrees with the game.
+//! `ClientboundLevelChunkWithLightPacket` recorded from a stock server.
 
 use super::chunk::{
     id, write_sections, BLOCK_BITS, BLOCK_ENTRIES, DEFAULT_BIOME_ID, HEIGHTMAP_BITS,
@@ -156,8 +153,7 @@ fn the_captured_server_numbers_its_light_sections_from_one_below_the_world() {
     // The capture says the same, and it can be checked against the terrain
     // rather than taken on trust: the chunk is a flat world whose ground is
     // in its lowest section, so the section with the ground is the one the
-    // sky mask names, and the sky in it is lit everywhere above the ground
-    // and dark in it.
+    // sky mask names.
     let mut i = 0;
 
     let (_, next) = varint_at(REFERENCE, i);

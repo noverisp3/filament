@@ -3,13 +3,10 @@
 //! Ctrl+C on a blocking accept is abrupt: the process is gone mid-write and the
 //! last few lines are whatever the buffer held. That matters more here than it
 //! would in a program with nothing to lose, because the log is the only record
-//! of what the server was doing, and it is what gets read when something breaks.
+//! of what the server was doing.
 //!
 //! So the ask is recorded rather than acted on. A handler sets a flag; the accept
 //! loop notices the flag at its next poll, says what it was doing, and returns.
-//! The alternative, calling `exit` from the handler, would mean printing from a
-//! context where printing may not be safe, and on a platform where the handler
-//! runs on its own thread it would also mean the flag was never needed.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -32,12 +29,8 @@ pub fn request() {
 /// Ctrl+C and Ctrl+Break on Windows, SIGINT and SIGTERM elsewhere.
 ///
 /// The Windows half is a declaration of a C function rather than a dependency.
-/// It is three lines of `extern` and one function pointer, and taking a crate
-/// for it would put a build dependency into a project whose whole argument is
-/// that its storage layer needs none. It also has to be this: the standard
-/// library has no signal handling at all, so a portable version needs either a
-/// dependency or a non-blocking accept, and the non-blocking accept is wanted
-/// anyway for the poll loop.
+/// The standard library has no signal handling at all, so a portable version
+/// needs either a dependency or a non-blocking accept.
 pub fn install() {
     // SAFETY: `SetConsoleCtrlHandler` takes a plain function pointer and a
     // boolean. The handler it is given is `on_console_signal`, which only ever
@@ -56,14 +49,9 @@ pub fn install() {
         unsafe extern "system" fn on_console_signal(_kind: u32) -> i32 {
             request();
             // One, which means handled: the console stops there and the process
-            // keeps running until the accept loop notices the flag.
-            //
-            // Zero would mean not handled, which sends the signal on to the next
-            // handler in the list and then to the default action, which is to
-            // terminate the process. That is the opposite of what this function
-            // is for, and returning zero from it was how the first version of
-            // this let Ctrl+C kill the server outright while appearing to
-            // install a handler.
+            // keeps running until the accept loop notices the flag. Zero would
+            // mean not handled, which sends the signal on to the default action,
+            // which is to terminate the process.
             1
         }
 

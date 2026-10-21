@@ -108,12 +108,9 @@ pub fn out_packet(&self, packet: &str, state: &str, len: usize) {
 /// Goes to stdout rather than a logging framework: there is one stream, it is
 /// ordered, and a dependency here would be for formatting that is two lines.
 ///
-/// The timestamp is how long the server has been up, not the wall clock. Epoch
-/// milliseconds is thirteen digits of which a reader wants none: to answer "how
-/// long between the chunk batch and the disconnect" the useful number is the
-/// difference between two lines, and making that a subtraction of two large
-/// numbers is work the log should have done. It also lines up by eye with the
-/// gaps between lines, which is what a log is scanned with.
+/// The timestamp is how long the server has been up, not the wall clock: the
+/// useful number is the difference between two lines, and making that a
+/// subtraction of two large numbers is work the log should have done.
 ///
 /// Width is fixed at eight characters so the messages stay in a column, which
 /// matters more than it sounds once there are two thousand of them.
@@ -278,10 +275,8 @@ pub fn packet_name(state: &str, id: i32) -> String {
         ("play", 142) => "clear_dialog".to_string(),
 
         // Serverbound in play. Only the ones a connection actually sends
-        // before any chunk arrives. The names come from packets.json, which the
-        // data generator produced from the same jar, and tools/check_names.py
-        // keeps them honest: being wrong about a name sends whoever reads the
-        // log looking for the wrong packet, which is worse than "play:22".
+        // before any chunk arrives. The names come from packets.json, and
+        // tools/check_names.py keeps them honest.
         ("play-s2c", 0) => "accept_teleportation".to_string(),
         ("play-s2c", 6) => "chat_ack".to_string(),
         ("play-s2c", 13) => "client_tick_end".to_string(),

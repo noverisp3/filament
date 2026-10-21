@@ -77,9 +77,7 @@ impl Uuid {
     ///
     /// A `u128` here because that is what the login phase's string form is
     /// parsed from and compared against, and keeping one representation avoids a
-    /// conversion at every call site. The play phase wants raw bytes, and a
-    /// conversion that exists only to be forgotten at one of its call sites is
-    /// a conversion worth naming once.
+    /// conversion at every call site.
     pub fn bytes(&self) -> [u8; 16] {
         self.0.to_be_bytes()
     }

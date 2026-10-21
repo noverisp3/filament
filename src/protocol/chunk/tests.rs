@@ -265,8 +265,7 @@ fn the_worlds_bottom_section_is_bit_one() {
     // The capture of a stock server agrees, and it can be checked against the
     // terrain rather than taken on trust: the chunk is a flat world whose
     // ground is in its lowest section, so the section with the ground is the
-    // one the sky mask names, and the sky in it is lit everywhere above the
-    // ground and dark in it.
+    // one the sky mask names.
     let lit = vec![0xFFu8; 2048];
     let sky = vec![Some(lit)];
 
@@ -373,8 +372,7 @@ fn a_light_update_names_each_section_once_and_carries_one_array_for_it() {
     // The mask names the sections that have light and the arrays follow it,
     // one for each bit. A section named twice in the list is an array the
     // client did not expect, and everything after it is read from the wrong
-    // place -- which is a client holding half of one section's light and half
-    // of another's, and a world that looks lit in patches.
+    // place.
     //
     // The caller is the one that keeps the list free of repeats: see
     // `group_light`, which is where a section that is reported twice -- by a

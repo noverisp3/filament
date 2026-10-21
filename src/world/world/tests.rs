@@ -1,6 +1,7 @@
 use super::*;
 use crate::world::chunk::MIN_BLOCK_Y;
-use crate::world::pos::LocalPos;
+use crate::world::pos::{LocalPos, SECTION_DIM};
+use crate::world::raycast::RayHit;
 
 /// Builds a world with a single known block, for deterministic tests.
 fn world_with_one(radius: i32, chunk: ChunkPos, local: LocalPos) -> (World, BlockId) {

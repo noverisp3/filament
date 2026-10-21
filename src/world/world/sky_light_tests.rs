@@ -2,6 +2,7 @@ use super::*;
 use crate::render::mesh::build_section_mesh;
 use crate::world::chunk::{MIN_BLOCK_Y, SECTIONS_PER_CHUNK};
 use crate::world::light::MAX_LIGHT;
+use crate::world::pos::SECTION_DIM;
 use crate::world::terrain::surface_y;
 use std::time::Instant;
 

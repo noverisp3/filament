@@ -245,7 +245,7 @@ fn the_blocks_that_stop_a_player_breathing_are_the_games_ones() {
     }
 }
 
-/// A log turned sideways is a different state and it is still a log.
+/// Every state of a block stops a player the same way.
 ///
 /// The table used to hold only the default state of each block, so a log that
 /// was not standing up did not stop a player from breathing, and a player
@@ -282,4 +282,101 @@ fn every_state_of_a_block_stops_a_player_the_same_way() {
             );
         }
     }
+}
+
+/// The light a block takes away, the way the game takes it away.
+///
+/// The rules are the game's own: a full cube that hides what is behind it
+/// takes all fifteen, a full cube that does not hide takes one, a block that
+/// is not a full cube but holds a fluid takes one, and a block that is not a
+/// full cube at all takes none, because the light goes down through it.
+#[test]
+fn the_light_a_block_takes_away_is_the_games_own() {
+    let state_of = |name: &str| {
+        BLOCKS
+            .iter()
+            .find(|b| b.name == name)
+            .unwrap_or_else(|| panic!("{name} is missing from the registry"))
+            .default_state as i32
+    };
+
+    for (name, takes) in [
+        ("minecraft:stone", 15),
+        ("minecraft:dirt", 15),
+        ("minecraft:grass_block", 15),
+        ("minecraft:oak_log", 15),
+        ("minecraft:white_wool", 15),
+        ("minecraft:glass", 1),
+        ("minecraft:oak_leaves", 1),
+        ("minecraft:water", 1),
+        ("minecraft:lava", 1),
+        ("minecraft:oak_slab", 0),
+        ("minecraft:torch", 0),
+        ("minecraft:short_grass", 0),
+        ("minecraft:air", 0),
+    ] {
+        assert_eq!(
+            light_dampening(state_of(name)),
+            takes,
+            "{name} takes {takes} of the light"
+        );
+    }
+}
+
+/// The blocks that hide what is behind them, and the ones that do not.
+///
+/// Glass and leaves let the light through and take one level doing it, and
+/// a plant lets it through and takes nothing.
+#[test]
+fn the_blocks_that_hide_are_the_games_ones() {
+    let state_of = |name: &str| {
+        BLOCKS
+            .iter()
+            .find(|b| b.name == name)
+            .unwrap_or_else(|| panic!("{name} is missing from the registry"))
+            .default_state as i32
+    };
+
+    for hides in [
+        "minecraft:stone",
+        "minecraft:dirt",
+        "minecraft:oak_leaves",
+        "minecraft:glass",
+    ] {
+        let state = state_of(hides);
+        if hides == "minecraft:oak_leaves" || hides == "minecraft:glass" {
+            assert!(!occludes(state), "{hides} does not hide what is behind it");
+        } else {
+            assert!(occludes(state), "{hides} hides what is behind it");
+        }
+    }
+
+    for full in [
+        "minecraft:stone",
+        "minecraft:glass",
+        "minecraft:oak_leaves",
+        "minecraft:oak_log",
+    ] {
+        assert!(
+            is_full_cube(state_of(full)),
+            "{full} is a whole cell of a block"
+        );
+    }
+
+    for not_full in [
+        "minecraft:oak_slab",
+        "minecraft:torch",
+        "minecraft:short_grass",
+        "minecraft:water",
+    ] {
+        assert!(
+            !is_full_cube(state_of(not_full)),
+            "{not_full} is not a whole cell of a block"
+        );
+    }
+
+    for fluid in ["minecraft:water", "minecraft:lava"] {
+        assert!(has_fluid(state_of(fluid)), "{fluid} holds a fluid");
+    }
+    assert!(!has_fluid(state_of("minecraft:stone")));
 }

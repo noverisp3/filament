@@ -35,6 +35,7 @@ mod heightmaps;
 mod items;
 mod light;
 mod registries;
+mod shapes;
 mod suffocation;
 mod tags;
 
@@ -49,6 +50,7 @@ pub use heightmaps::{
 pub use items::{ITEMS, item_id, item_name};
 pub use light::LIGHT;
 pub use registries::{REGISTRY_DATA_COUNT, REGISTRY_DATA_FRAMES};
+pub use shapes::{has_fluid, is_full_cube, light_dampening, occludes};
 pub use suffocation::{causes_suffocation, CAUSES_SUFFOCATION};
 pub use tags::{TAG_COUNTS, TAG_TOTAL, UPDATE_TAGS_BODY};
 

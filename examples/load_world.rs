@@ -13,7 +13,7 @@ use std::path::Path;
 
 use filament::world::pos::{BlockPos, ChunkPos};
 use filament::world::storage::WorldStore;
-use filament::world::world::World;
+use filament::world::World;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

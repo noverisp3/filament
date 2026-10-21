@@ -8,7 +8,7 @@
 use std::time::{Duration, Instant};
 
 fn main() {
-    let mut world = filament::world::world::World::generate(1);
+    let mut world = filament::world::World::generate(1);
     let terrain = *world.terrain_blocks();
     let pos = filament::world::pos::BlockPos::new(8, 64, 8);
 

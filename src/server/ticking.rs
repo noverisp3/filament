@@ -29,7 +29,7 @@ use crate::world::pos::{BlockPos, ChunkPos};
 use crate::world::section;
 use crate::world::storage::WorldStore;
 use crate::world::terrain::TerrainBlocks;
-use crate::world::world::World;
+use crate::world::World;
 
 /// Twenty a second, which is what a client is told to expect and what its
 /// interpolation assumes.

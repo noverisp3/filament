@@ -657,7 +657,7 @@ fn the_light_update_names_the_section_the_light_is_in() {
     // belongs, and a lamp would light the floor under it.
     use crate::world::pos::BlockPos;
 
-    let mut world = crate::world::world::World::generate(1);
+    let mut world = crate::world::World::generate(1);
     let glowstone = world
         .registry()
         .id("glowstone")
@@ -758,7 +758,7 @@ fn the_light_a_client_is_told_is_continuous_across_a_chunk_border_at(lamp_x: i32
     use crate::world::pos::BlockPos;
     use crate::protocol::VarInt;
 
-    let mut world = crate::world::world::World::generate(2);
+    let mut world = crate::world::World::generate(2);
     let glowstone = world
         .registry()
         .id("glowstone")

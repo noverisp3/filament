@@ -32,8 +32,11 @@ pub mod region;
 pub mod section;
 pub mod ticks;
 pub mod terrain;
-// `world::world` reads oddly next to the other `world::*` modules, but every
-// alternative name is worse.
-#[allow(clippy::module_inception)]
-pub mod world;
+// The game calls the live world a `Level` (`net.minecraft.world.level.Level`),
+// and the name says what the module holds: the world as it is right now, with
+// its chunks, its edits and its light, rather than the formats they are stored
+// in.
+pub mod level;
 pub mod storage;
+
+pub use level::{BlockEdit, World};

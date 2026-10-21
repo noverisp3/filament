@@ -10,7 +10,7 @@ pub mod world;
 
 use std::net::{IpAddr, SocketAddr};
 
-use server::StatusServer;
+use server::Server;
 use server::log;
 
 /// Where to listen unless told otherwise.
@@ -67,7 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         20,
     );
 
-    let server = StatusServer::bind(&addr.to_string(), status)?;
+    let server = Server::bind(&addr.to_string(), status)?;
 
     print_build();
     log::note(format!("listening on {addr}"));

@@ -15,7 +15,7 @@
 
 use filament::world::pos::BlockPos;
 use filament::world::storage::WorldStore;
-use filament::world::world::World;
+use filament::world::World;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);

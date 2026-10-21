@@ -14,7 +14,7 @@ use super::chunk::{MIN_BLOCK_Y, SECTIONS_PER_CHUNK, WORLD_HEIGHT};
 use super::light::MAX_LIGHT;
 use super::pos::{BlockPos, ChunkPos};
 use super::pos::{LocalPos, SECTION_DIM, SectionPos};
-use super::world::World;
+use super::level::World;
 
 /// Lowest section Y, which is `MIN_BLOCK_Y` rounded down to a section.
 const MIN_SECTION: i32 = MIN_BLOCK_Y / SECTION_DIM;

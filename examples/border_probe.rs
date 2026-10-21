@@ -7,7 +7,7 @@
 //! what the client draws.
 
 use filament::world::pos::BlockPos;
-use filament::world::world::World;
+use filament::world::World;
 
 fn main() {
     let mut world = World::generate(2);

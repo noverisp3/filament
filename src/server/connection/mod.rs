@@ -23,7 +23,7 @@ use super::ticking::{self, WorldHandle};
 mod configuration;
 mod login;
 mod play;
-mod server_list;
+mod status;
 
 #[cfg(test)]
 mod tests;
@@ -32,7 +32,7 @@ mod tests;
 pub const PROTOCOL_VERSION: i32 = 777;
 
 /// A running server.
-pub struct StatusServer {
+pub struct Server {
     listener: TcpListener,
     status: ServerStatus,
     /// A way to ask the world for things, not the world itself. It lives on a
@@ -42,11 +42,11 @@ pub struct StatusServer {
     wire: Arc<Broadcast>,
 }
 
-impl StatusServer {
+impl Server {
     /// Binds `addr` and prepares to answer handshakes.
     pub fn bind(addr: &str, status: ServerStatus) -> std::io::Result<Self> {
         let listener = TcpListener::bind(addr)?;
-        Ok(StatusServer {
+        Ok(Server {
             listener,
             status,
             world: ticking::spawn(),
@@ -262,7 +262,7 @@ fn handle_connection(
     ));
 
     match intention.intent {
-        ClientIntent::Status => server_list::serve_status(&mut stream, dec, enc, status, log),
+        ClientIntent::Status => status::serve_status(&mut stream, dec, enc, status, log),
         ClientIntent::Login => login::login(&mut stream, log, dec, session),
         ClientIntent::Transfer => {
             log.note("transfer is not implemented");

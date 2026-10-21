@@ -195,7 +195,7 @@ fn grass_spreads_onto_dirt_beside_it_when_the_game_rolls_for_it() {
         "the place is bright enough: {}",
         world.sky_light(beside.offset(Direction::Up))
     );
-    let mut edit = crate::world::world::BlockEdit {
+    let mut edit = crate::world::BlockEdit {
         chunks: Vec::new(),
         sections: Vec::new(),
     };
@@ -228,7 +228,7 @@ fn a_tick_says_what_it_changed_so_somebody_can_be_told() {
     );
 
     // The roll is what changes something, and it says so.
-    let mut edit = crate::world::world::BlockEdit {
+    let mut edit = crate::world::BlockEdit {
         chunks: Vec::new(),
         sections: Vec::new(),
     };

@@ -5,12 +5,12 @@
 //! tick anything, because there is nothing to tick yet.
 
 pub mod broadcast;
+pub mod connection;
 pub mod log;
 pub mod shutdown;
-pub mod status;
 pub mod ticking;
 
-pub use status::{StatusServer, PROTOCOL_VERSION};
+pub use connection::{Server, PROTOCOL_VERSION};
 
 use std::sync::atomic::{AtomicI32, Ordering};
 

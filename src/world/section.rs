@@ -70,6 +70,11 @@ impl Section {
         &self.blocks
     }
 
+    /// The one block every cell holds, if they all hold the same.
+    pub fn uniform_block(&self) -> Option<BlockId> {
+        self.blocks.uniform_value()
+    }
+
     /// Drops block ids no longer present and tightens entry width.
     pub fn compact(&mut self) {
         self.blocks.compact();

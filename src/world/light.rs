@@ -89,6 +89,23 @@ impl SectionLight {
         self.block.set(pos.index(), light);
     }
 
+    /// The sky and block light every cell holds, if they all hold the same.
+    ///
+    /// A section is lit or dark as a whole most of the time, so this is the
+    /// common case, and asking once is the difference between a section
+    /// costing a moment and a section costing sixteen thousand.
+    pub fn uniform_light(&self) -> Option<(u8, u8)> {
+        Some((self.sky.uniform_value()?, self.block.uniform_value()?))
+    }
+
+    /// The block light every cell holds, if they all hold the same.
+    ///
+    /// The sky layer is asked for separately because the two can differ: a
+    /// section lit by the sun is often all sky and all dark in blocks.
+    pub fn uniform_block_light(&self) -> Option<u8> {
+        self.block.uniform_value()
+    }
+
     /// Brightest of the two layers at a cell.
     ///
     /// A glowstone in a sunlit cave must not read as darker than the daylight

@@ -126,6 +126,159 @@ fn the_light_the_client_is_told_after_a_placement_is_the_whole_pool() {
 }
 
 #[test]
+fn reading_a_section_of_one_block_gives_the_same_light_as_reading_it_cell_by_cell() {
+    // The light engine reads a section of one block in one go, and a section of
+    // several cell by cell. The two must give the same light, or a world that
+    // happens to be made of uniform sections is lit differently from one that
+    // is not.
+    //
+    // The world is built twice and lit twice: once each way. What is compared
+    // is the light of every cell, in both layers.
+    let sample = |world: &World| -> Vec<u8> {
+        let mut out = Vec::new();
+        for x in -2..=2 {
+            for z in -2..=2 {
+                let Some(chunk) = world.chunk(ChunkPos::new(x, z)) else {
+                    continue;
+                };
+                for slot in 0..SECTIONS_PER_CHUNK {
+                    let section = SectionPos::new(x, -4 + slot as i32, z);
+                    let Some(light) = chunk.section_light(section) else {
+                        continue;
+                    };
+                    out.push(light.sky_bytes().len() as u8);
+                    out.extend(light.sky_bytes());
+                    out.extend(light.block_bytes());
+                }
+            }
+        }
+        out
+    };
+
+    let build = || {
+        let mut world = World::generate(2);
+        let glowstone = world
+            .registry()
+            .id("glowstone")
+            .expect("the world knows a glowstone");
+        // Lamps in a few places, so that the light is not all one thing.
+        for (x, z) in [(0i32, 0i32), (17, 3), (-20, 12)] {
+            let at = BlockPos::new(x, surface_y(x, z) + 1, z);
+            world.set_block(at, glowstone).expect("inside the world");
+        }
+        world.compute_light();
+        world
+    };
+
+    crate::world::light_engine::set_fast_path(true);
+    let fast = sample(&build());
+    let fast_cells = crate::world::light_engine::fast_path_cells();
+
+    crate::world::light_engine::set_fast_path(false);
+    let slow = sample(&build());
+    let slow_cells = crate::world::light_engine::fast_path_cells();
+
+    crate::world::light_engine::set_fast_path(true);
+
+    assert!(
+        fast_cells > 0,
+        "the fast path must have been used, or the comparison proves nothing"
+    );
+    assert_eq!(
+        slow_cells, 0,
+        "the slow path must not have been used, or the comparison proves nothing"
+    );
+    assert_eq!(
+        fast.len(),
+        slow.len(),
+        "the two ways must look at the same cells"
+    );
+    assert!(
+        fast == slow,
+        "reading a section of one block in one go must give the same light as reading it cell by cell"
+    );
+}
+
+#[test]
+fn a_section_with_a_lamp_in_it_is_never_read_in_one_go() {
+    // The fast path reads a section of one block in one go, and it takes the
+    // light of that section with it. A section with a lamp in it has a light
+    // that varies from cell to cell, so the fast path must not be taken for it:
+    // taking it would lose the shape of the pool.
+    let mut world = World::generate(1);
+    let glowstone = world
+        .registry()
+        .id("glowstone")
+        .expect("the world knows a glowstone");
+    let at = BlockPos::new(8, surface_y(8, 8) + 1, 8);
+    world.set_block(at, glowstone).expect("inside the world");
+    world.compute_light();
+
+    // The section holding the lamp has more than one block in it.
+    let section = at.section_pos();
+    let chunk = world
+        .chunk(section.chunk_pos())
+        .expect("the chunk is there");
+    assert!(
+        chunk.sections()[(section.y - MIN_SECTION_Y) as usize]
+            .uniform_block()
+            .is_none(),
+        "a section with a lamp in it holds more than one block"
+    );
+
+    // And the light of that section is not the same everywhere, so reading it
+    // in one go would lose the pool.
+    let light = chunk
+        .section_light(section)
+        .expect("the section is there");
+    assert!(
+        light.uniform_block_light().is_none(),
+        "the light of a section with a lamp in it varies from cell to cell"
+    );
+}
+
+#[test]
+fn a_section_of_one_block_with_a_uniform_light_says_what_the_light_is() {
+    // The fast path takes the light of a section of one block with it, so the
+    // light it takes has to be the light of every cell.
+    //
+    // A section of stone lit evenly by a lamp far enough away is one of those,
+    // and the light it holds is the same in every cell.
+    let mut world = World::generate(1);
+    let glowstone = world
+        .registry()
+        .id("glowstone")
+        .expect("the world knows a glowstone");
+    let at = BlockPos::new(8, surface_y(8, 8) + 1, 8);
+    world.set_block(at, glowstone).expect("inside the world");
+    world.compute_light();
+
+    // A section of open air above the ground, far enough from the lamp that
+    // the light has run out by the time it gets there.
+    let high = BlockPos::new(8, surface_y(8, 8) + 40, 8);
+    let section = high.section_pos();
+    let chunk = world
+        .chunk(section.chunk_pos())
+        .expect("the chunk is there");
+    let light = chunk
+        .section_light(section)
+        .expect("the section is there");
+
+    // The air is one block, and its light is one value.
+    assert!(
+        chunk.sections()[(section.y - MIN_SECTION_Y) as usize]
+            .uniform_block()
+            .is_some(),
+        "the section of open air is one block"
+    );
+    assert_eq!(
+        light.uniform_block_light(),
+        Some(0),
+        "the light of a section too far from the lamp is nowhere"
+    );
+}
+
+#[test]
 fn a_lamp_lights_across_a_chunk_boundary() {
     // The bug this catches: a chunk that hangs over the edge of the region the
     // light is worked out in was refused whole, so the cells it covers inside

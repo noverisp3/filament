@@ -7,6 +7,59 @@ use crate::world::terrain::surface_y;
 use std::time::Instant;
 
 #[test]
+fn a_uniform_section_says_so_and_a_mixed_one_does_not() {
+    let mut world = World::generate(1);
+    let chunk = world.chunk_mut(ChunkPos::new(0, 0)).expect("the chunk is there");
+
+    // The sections below the surface hold stone and the ones above hold air,
+    // so each is one block.
+    assert!(
+        chunk.sections()[4].uniform_block().is_some(),
+        "a section of solid stone is one block"
+    );
+    assert!(
+        chunk.sections()[20].uniform_block().is_some(),
+        "a section of open air is one block"
+    );
+
+    // The section through the surface holds both, and has to be read a cell
+    // at a time.
+    assert!(
+        chunk.sections()[3].uniform_block().is_none(),
+        "a section through the surface holds more than one block"
+    );
+}
+
+#[test]
+fn a_lamp_in_a_uniform_section_makes_it_a_mixed_one() {
+    let mut world = World::generate(1);
+    let chunk = world.chunk_mut(ChunkPos::new(0, 0)).expect("the chunk is there");
+    assert!(
+        chunk.sections()[4].uniform_block().is_some(),
+        "the section starts as one block"
+    );
+
+    // A lamp in it makes the section hold two, and the light engine has to
+    // read it a cell at a time from then on.
+    //
+    // Section four is the first one above the ground, so a lamp put in it is
+    // in open air.
+    let glowstone = world
+        .registry()
+        .id("glowstone")
+        .expect("the world knows a glowstone");
+    world
+        .set_block(BlockPos::new(8, 0, 8), glowstone)
+        .expect("inside the world");
+
+    let chunk = world.chunk_mut(ChunkPos::new(0, 0)).expect("the chunk is there");
+    assert!(
+        chunk.sections()[4].uniform_block().is_none(),
+        "a section with a lamp in it holds more than one block"
+    );
+}
+
+#[test]
 fn open_sky_above_the_terrain_is_fully_lit() {
     let mut world = World::generate(1);
     world.compute_light();

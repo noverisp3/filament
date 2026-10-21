@@ -19,6 +19,44 @@ use super::level::World;
 /// Lowest section Y, which is `MIN_BLOCK_Y` rounded down to a section.
 const MIN_SECTION: i32 = MIN_BLOCK_Y / SECTION_DIM;
 
+#[cfg(test)]
+thread_local! {
+    /// Whether a section of one block is read in one go rather than cell by
+    /// cell.
+    ///
+    /// Off by a test, so the two ways can be compared on the same world. It is
+    /// per thread, because the tests run side by side and one of them turning
+    /// the fast path off must not turn it off for the others.
+    static FAST_PATH: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    /// How many sections have been read the fast way.
+    static FAST_PATH_CELLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether the fast path is in use.
+#[inline]
+fn fast_path() -> bool {
+    #[cfg(test)]
+    {
+        FAST_PATH.with(|on| on.get())
+    }
+    #[cfg(not(test))]
+    {
+        true
+    }
+}
+
+/// Turns the fast path off, for a test that compares the two.
+#[cfg(test)]
+pub(crate) fn set_fast_path(on: bool) {
+    FAST_PATH.with(|flag| flag.set(on));
+}
+
+/// How many sections the fast path has read since the counter was last read.
+#[cfg(test)]
+pub(crate) fn fast_path_cells() -> usize {
+    FAST_PATH_CELLS.with(|count| count.replace(0))
+}
+
 impl World {
     /// Recomputes the light of every loaded chunk.
     ///
@@ -595,8 +633,14 @@ impl Region {
     /// Reads opacity and the current light for every cell of the region,
     /// straight out of the chunk data rather than through the world queries,
     /// which would be a hash lookup per cell.
+    ///
+    /// The sky is not read: the pass that works the sun's column out writes
+    /// every cell of the region anyway, so a sky read here would be thrown away
+    /// a moment later.
     fn fill_from_world(&mut self, world: &World) {
         let registry = world.registry();
+        let last_x = self.width - 1;
+        let last_z = self.depth - 1;
 
         for (chunk_x, chunk_z) in self.chunks_covered() {
             let Some(chunk) = world.chunk(ChunkPos::new(chunk_x, chunk_z)) else {
@@ -621,26 +665,65 @@ impl Region {
                 }
                 let light = chunk.section_light(SectionPos::new(chunk_x, section_y, chunk_z));
 
+                // The common case: one block and one light value for the whole
+                // section, so the answers are looked up once for the section
+                // rather than once for each of its sixteen thousand cells.
+                let uniform = if !fast_path() {
+                    None
+                } else {
+                    match (section.uniform_block(), light) {
+                        (Some(block), Some(light)) => light
+                            .uniform_block_light()
+                            .map(|block_light| {
+                                (
+                                    u8::from(registry.is_opaque(block)),
+                                    registry.light_emission(block),
+                                    block_light,
+                                )
+                            }),
+                        (Some(block), None) => Some((
+                            u8::from(registry.is_opaque(block)),
+                            registry.light_emission(block),
+                            0,
+                        )),
+                        _ => None,
+                    }
+                };
+
+                #[cfg(test)]
+                if uniform.is_some() {
+                    FAST_PATH_CELLS.with(|count| count.set(count.get() + 1));
+                }
+
                 for gy in base_y..(base_y + SECTION_DIM as usize).min(self.height) {
                     let local_y = (gy - base_y) as u8;
                     for gz in z0..z1 {
                         let row = self.index(x0, gy, gz);
                         for gx in x0..x1 {
-                            let local = LocalPos::from_array([
-                                (gx as i32 - chunk_x0) as u8,
-                                local_y,
-                                (gz as i32 - chunk_z0) as u8,
-                            ]);
                             let cell = row + (gx - x0);
-                            self.opacity[cell] = u8::from(registry.is_opaque(section.get(local)));
-                            self.emission[cell] = registry.light_emission(section.get(local));
-                            self.sky[cell] = light.map_or(0, |light| light.sky(local));
-                            self.block[cell] = light.map_or(0, |light| light.block(local));
+                            match uniform {
+                                Some((opacity, emission, block_light)) => {
+                                    self.opacity[cell] = opacity;
+                                    self.emission[cell] = emission;
+                                    self.block[cell] = block_light;
+                                }
+                                None => {
+                                    let local = LocalPos::from_array([
+                                        (gx as i32 - chunk_x0) as u8,
+                                        local_y,
+                                        (gz as i32 - chunk_z0) as u8,
+                                    ]);
+                                    let block = section.get(local);
+                                    self.opacity[cell] = u8::from(registry.is_opaque(block));
+                                    self.emission[cell] = registry.light_emission(block);
+                                    self.block[cell] =
+                                        light.map_or(0, |light| light.block(local));
+                                }
+                            }
 
                             // The margin ring keeps whatever it already had, so
                             // it only ever acts as a source for light coming in.
-                            self.fixed[cell] =
-                                gx == 0 || gz == 0 || gx == self.width - 1 || gz == self.depth - 1;
+                            self.fixed[cell] = gx == 0 || gz == 0 || gx == last_x || gz == last_z;
                         }
                     }
                 }

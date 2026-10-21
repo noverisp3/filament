@@ -91,6 +91,19 @@ impl<T: Copy + PartialEq> Paletted<T> {
         }
     }
 
+    /// The one value every entry holds, if they all hold the same.
+    ///
+    /// `None` when the array holds more than one value, and the caller that
+    /// wants the value then has to ask for each entry. An array that is uniform
+    /// costs no dense bytes at all, so this is the common case rather than the
+    /// rare one.
+    pub fn uniform_value(&self) -> Option<T> {
+        match &self.storage {
+            Storage::Zero => Some(self.palette[0]),
+            Storage::Packed(_) => None,
+        }
+    }
+
     /// Writes `value`, growing the palette and widening the index array if the
     /// value has not been seen before.
     pub fn set(&mut self, index: usize, value: T) {

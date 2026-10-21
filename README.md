@@ -153,9 +153,11 @@ Grouped by what they are about, not by when they were done.
       saved.
 - [ ] Lighting. The sun and the lamps are done: a chunk works its light out
       when it arrives, an edit relights everything it reaches, and the client
-      is told the sections that moved. Not done: the other blocks that give
-      off light (torches, lanterns, fire), the ones that change the shape of
-      it (a door, a slab, a pane), and the sun moving across the sky.
+      is told the sections that moved. Every block that gives off light lights,
+      because a block read out of a world file is registered with the light the
+      game gives it. Not done: the shape of a block (every one of them is
+      drawn as a full cube, so a torch is a lantern-sized brick) and the sun
+      moving across the sky.
 - [ ] Mobs, item drops, water, weather
 - [ ] The rest of the inventory. The authority is there: the client says which
       slots changed and the server checks the totals against what the player

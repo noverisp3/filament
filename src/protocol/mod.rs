@@ -17,6 +17,7 @@ pub mod container;
 pub mod login;
 pub mod play;
 pub mod primitive;
+pub mod status;
 
 #[cfg(test)]
 mod frame_tests;

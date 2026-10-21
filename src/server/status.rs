@@ -12,7 +12,8 @@ use std::sync::Arc;
 use std::thread;
 
 use crate::protocol::frame::{FrameDecoder, FrameEncoder, FrameError};
-use crate::protocol::handshake::{ClientIntent, ClientIntention, ServerStatus, status_response_body};
+use crate::protocol::handshake::{ClientIntent, ClientIntention};
+use crate::protocol::status::{status_response_body, ServerStatus};
 use crate::protocol::item::{self, slots, Inventory, ItemStack};
 use crate::world::pos::Direction;
 use crate::protocol::VarInt;

@@ -59,7 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::set_verbose(verbose);
     server::shutdown::install();
 
-    let status = protocol::handshake::status(
+    let status = protocol::status::status(
         DEFAULT_DESCRIPTION,
         format!("filament {}", server::PROTOCOL_VERSION),
         server::PROTOCOL_VERSION,

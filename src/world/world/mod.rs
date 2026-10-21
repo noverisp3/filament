@@ -13,45 +13,12 @@ use super::raycast::{RayHit, raycast};
 use super::section::{Section, SectionNeighbors};
 use super::terrain::{TerrainBlocks, generate_chunk, register_terrain};
 
-/// What changed after an edit, and therefore what has to be rebuilt.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BlockEdit {
-    /// Every chunk holding a section that has to be rebuilt.
-    ///
-    /// More than one is normal: breaking a block on a chunk border reveals the
-    /// neighbouring block's face, and that face belongs to the *other* chunk.
-    /// Re-meshing only the edited chunk left a hole in the world there.
-    pub chunks: Vec<ChunkPos>,
-    /// Sections whose visible surface or shading may differ. Always includes the
-    /// section holding the block, a neighbour when the block sits on a boundary,
-    /// and every section whose light changed.
-    pub sections: Vec<SectionPos>,
-}
+mod edits;
+mod items;
+mod light;
 
-/// Puts a chunk's remembered edits back onto it.
-///
-/// The journal outlives the chunk on purpose: a chunk that was thrown away
-/// when the last player walked away comes back from the folder without the
-/// changes, and this is what puts them back.
-fn replay_edits(chunk: &mut Chunk, edits: Option<&Vec<(BlockPos, BlockId)>>) {
-    let Some(edits) = edits else {
-        return;
-    };
-    for (at, block) in edits {
-        chunk.set_block(*at, *block);
-    }
-}
-
-impl BlockEdit {
-    pub fn touches(&self, section: SectionPos) -> bool {
-        self.sections.contains(&section)
-    }
-
-    /// Chunks containing `section`, whether or not they need rebuilding.
-    pub fn owns(&self, section: SectionPos) -> bool {
-        self.chunks.contains(&section.chunk_pos())
-    }
-}
+pub use edits::BlockEdit;
+use edits::replay_edits;
 
 pub struct World {
     registry: BlockRegistry,
@@ -153,27 +120,6 @@ pub struct World {
     /// the ground it generated is the only answer there is: a spawn in the air
     /// is a player who falls the whole way down and dies on arrival.
     spawn_from_file: bool,
-}
-
-impl BlockEdit {
-    /// Folds another edit in, without reporting the same chunk twice.
-    ///
-    /// A tick that changes several neighbouring blocks produces several edits,
-    /// and each one names the chunk it is in. Sending a chunk twice is not wrong
-    /// -- the client takes the second -- but it is bytes for nothing, and the
-    /// list of chunks is what a caller walks to decide what to re-send.
-    pub fn merge(&mut self, other: BlockEdit) {
-        for pos in other.chunks {
-            if !self.chunks.contains(&pos) {
-                self.chunks.push(pos);
-            }
-        }
-        for pos in other.sections {
-            if !self.sections.contains(&pos) {
-                self.sections.push(pos);
-            }
-        }
-    }
 }
 
 impl Clone for World {
@@ -489,30 +435,6 @@ impl World {
     /// sending to nobody is worse than sending late.
     pub fn take_tick_changes(&mut self) -> Vec<(BlockPos, BlockId)> {
         std::mem::take(&mut self.tick_changes)
-    }
-
-    /// The sections whose light moved since anyone last looked.
-    pub fn take_light_changes(&mut self) -> Vec<SectionPos> {
-        std::mem::take(&mut self.light_changes)
-    }
-
-    /// The light of one section, packed the way the game packs it.
-    ///
-    /// `None` when the section is not here: a chunk that was thrown away has
-    /// no light to give, and the client is told nothing rather than told
-    /// something that is not there.
-    pub fn section_sky_bytes(&self, section: SectionPos) -> Option<Vec<u8>> {
-        let chunk = self.chunk(section.chunk_pos())?;
-        let light = chunk.section_light(section)?;
-        Some(light.sky_bytes())
-    }
-
-    /// The light the blocks themselves give off in one section, packed the way
-    /// the game packs it.
-    pub fn section_block_bytes(&self, section: SectionPos) -> Option<Vec<u8>> {
-        let chunk = self.chunk(section.chunk_pos())?;
-        let light = chunk.section_light(section)?;
-        Some(light.block_bytes())
     }
 
     /// What the world changed by itself since anyone last looked.
@@ -935,87 +857,6 @@ impl World {
         }
     }
 
-    /// The items lying on the ground.
-    pub fn items(&self) -> &[super::item_entity::ItemEntity] {
-        &self.items
-    }
-
-    /// Drops an item into the world, and says where it is.
-    ///
-    /// The item starts in the middle of the block and falls, the way the
-    /// game's does: a thing on the ground is not in mid-air, it is on the
-    /// ground, and it gets there by falling.
-    pub fn drop_item(&mut self, id: i32, uuid: [u8; 16], pos: BlockPos, item: u32, count: i32) {
-        let entity = super::item_entity::ItemEntity::new(id, uuid, pos, item, count);
-        self.items.push(entity.clone());
-        self.item_changes.push(entity);
-    }
-
-    /// The items that are near a point, and can therefore be picked up.
-    pub fn items_near(&self, x: f64, y: f64, z: f64) -> Vec<super::item_entity::ItemEntity> {
-        self.items
-            .iter()
-            .filter(|item| item.within_reach(x, y, z))
-            .cloned()
-            .collect()
-    }
-
-    /// The items within a radius of a point, which are the ones a player there
-    /// can see.
-    pub fn items_within(
-        &self,
-        x: f64,
-        y: f64,
-        z: f64,
-        radius: f64,
-    ) -> Vec<super::item_entity::ItemEntity> {
-        let square = radius * radius;
-        self.items
-            .iter()
-            .filter(|item| {
-                let dx = item.x - x;
-                let dy = item.y - y;
-                let dz = item.z - z;
-                dx * dx + dy * dy + dz * dz <= square
-            })
-            .cloned()
-            .collect()
-    }
-
-    /// Takes an item off the ground, and says it is gone.
-    pub fn take_item(&mut self, id: i32) -> Option<super::item_entity::ItemEntity> {
-        let index = self.items.iter().position(|item| item.id == id)?;
-        Some(self.items.remove(index))
-    }
-
-    /// The items that moved, waiting to be told about.
-    pub fn take_item_changes(&mut self) -> Vec<super::item_entity::ItemEntity> {
-        std::mem::take(&mut self.item_changes)
-    }
-
-    /// What has been changed in each chunk, and how much.
-    ///
-    /// This is the whole of what a server needs to keep to have a world that
-    /// survives its players walking away from it. It is exposed because it is
-    /// the part that would be written to disk, and because a test needs to see
-    /// that an edit was remembered rather than only that it was applied.
-    pub fn edits(&self) -> impl Iterator<Item = (ChunkPos, usize)> + '_ {
-        self.edits
-            .iter()
-            .map(|(pos, edits)| (*pos, edits.len()))
-            .filter(|(_, n)| *n > 0)
-    }
-
-    /// How many edits are remembered, over every chunk.
-    pub fn edit_count(&self) -> usize {
-        self.edits.values().map(|e| e.len()).sum()
-    }
-
-    /// How many cells the light has been worked out for, since the world began.
-    pub fn light_work(&self) -> usize {
-        self.light_work
-    }
-
     /// Drops a chunk and its edits.
     ///
     /// Called when the player walks out of range of it. The terrain comes back
@@ -1344,11 +1185,6 @@ impl World {
             return false;
         };
         chunk.set_block(pos, block)
-    }
-
-    /// Recomputes sky light around `center`, for use after [`Self::set_block_quiet`].
-    pub fn relight(&mut self, center: BlockPos) {
-        self.relight_around(center);
     }
 
     /// Breaks a block, turning it to air.

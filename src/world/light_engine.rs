@@ -517,6 +517,57 @@ impl Grid {
     }
 }
 
+
+/// The neighbour of a cell in the positive X direction.
+const EAST: u8 = 1;
+/// The neighbour of a cell in the negative X direction.
+const WEST: u8 = 2;
+/// The neighbour of a cell above it.
+const UP: u8 = 4;
+/// The neighbour of a cell below it.
+const DOWN: u8 = 8;
+/// The neighbour of a cell in the positive Z direction.
+const SOUTH: u8 = 16;
+/// The neighbour of a cell in the negative Z direction.
+const NORTH: u8 = 32;
+
+/// Which neighbours each cell of a region has, one bit per direction.
+///
+/// The region's border is where the light stops, so a cell on it has no
+/// neighbour in that direction. Working this out once and keeping it is worth
+/// it: the flood asks the question for every cell of a region that is a million
+/// cells, and the answer is three divisions each time.
+fn edge_masks(width: usize, depth: usize, height: usize) -> Vec<u8> {
+    let mut edges = vec![0u8; width * depth * height];
+    for y in 0..height {
+        for z in 0..depth {
+            for x in 0..width {
+                let mut e = 0u8;
+                if x + 1 < width {
+                    e |= EAST;
+                }
+                if x > 0 {
+                    e |= WEST;
+                }
+                if y + 1 < height {
+                    e |= UP;
+                }
+                if y > 0 {
+                    e |= DOWN;
+                }
+                if z + 1 < depth {
+                    e |= SOUTH;
+                }
+                if z > 0 {
+                    e |= NORTH;
+                }
+                edges[(y * depth + z) * width + x] = e;
+            }
+        }
+    }
+    edges
+}
+
 /// How far sky light can travel, in blocks.
 ///
 /// Light loses one level per step and tops out at [`MAX_LIGHT`], so no change
@@ -546,6 +597,8 @@ struct Region {
     block: Vec<u8>,
     /// Cells in the margin ring, which are not written back.
     fixed: Vec<bool>,
+    /// Which neighbours of each cell exist, one bit per direction.
+    edges: Vec<u8>,
 }
 
 impl Region {
@@ -582,6 +635,7 @@ impl Region {
             sky: vec![0; width * depth * height],
             block: vec![0; width * depth * height],
             fixed: vec![false; width * depth * height],
+            edges: edge_masks(width, depth, height),
         };
 
         region.fill_from_world(world);
@@ -601,32 +655,27 @@ impl Region {
         self.width * self.depth * self.height
     }
 
-    #[inline]
-    fn x_of(&self, cell: usize) -> usize {
-        cell % self.width
-    }
-
-    #[inline]
-    fn z_of(&self, cell: usize) -> usize {
-        (cell / self.width) % self.depth
-    }
-
-    #[inline]
-    fn y_of(&self, cell: usize) -> usize {
-        cell / self.plane
-    }
-
+    /// The six neighbours of a cell, with `None` where the region ends.
+    ///
+    /// The region's border is opaque, so a `None` never has to be treated
+    /// specially during the flood: the neighbour simply is not there.
+    ///
+    /// Which neighbours exist is worked out from the cell's own place in the
+    /// region, and that is three divisions. The flood asks this question for
+    /// every cell of a region that is a million cells, so the answer is kept
+    /// instead of worked out: one bit per direction, in a byte per cell.
+    ///
+    /// The bit order is the order of the array below, so the two cannot
+    /// disagree.
     fn neighbors(&self, cell: usize) -> [Option<usize>; 6] {
-        let x = self.x_of(cell);
-        let z = self.z_of(cell);
-        let y = self.y_of(cell);
+        let e = self.edges[cell];
         [
-            (x + 1 < self.width).then(|| cell + 1),
-            (x > 0).then(|| cell - 1),
-            (y + 1 < self.height).then(|| cell + self.plane),
-            (y > 0).then(|| cell - self.plane),
-            (z + 1 < self.depth).then(|| cell + self.width),
-            (z > 0).then(|| cell - self.width),
+            (e & EAST != 0).then(|| cell + 1),
+            (e & WEST != 0).then(|| cell - 1),
+            (e & UP != 0).then(|| cell + self.plane),
+            (e & DOWN != 0).then(|| cell - self.plane),
+            (e & SOUTH != 0).then(|| cell + self.width),
+            (e & NORTH != 0).then(|| cell - self.width),
         ]
     }
 
@@ -969,5 +1018,72 @@ impl Region {
         }
 
         dirty
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A cell in the middle of the region has a neighbour on every side.
+    #[test]
+    fn a_cell_in_the_middle_has_all_six_neighbours() {
+        let edges = edge_masks(3, 3, 3);
+        let middle = edges[13];
+        assert_eq!(middle, EAST | WEST | UP | DOWN | SOUTH | NORTH);
+
+    }
+
+    /// A cell on an edge has no neighbour on that side.
+    ///
+    /// The region is where the light stops, so a cell on the border must not
+    /// be given a neighbour that is not there: the light would walk off the
+    /// edge of the world.
+    #[test]
+    fn a_cell_on_the_border_has_no_neighbour_off_it() {
+        let (w, d, h) = (3usize, 3usize, 3usize);
+        let edges = edge_masks(w, d, h);
+
+        // The corner: no neighbour in any direction but the one into the
+        // region.
+        let corner = edges[0];
+        assert_eq!(corner & WEST, 0, "no neighbour off the low x edge");
+        assert_eq!(corner & NORTH, 0, "no neighbour off the low z edge");
+        assert_eq!(corner & DOWN, 0, "no neighbour off the low y edge");
+        assert_ne!(corner & EAST, 0, "a neighbour along x");
+        assert_ne!(corner & SOUTH, 0, "a neighbour along z");
+        assert_ne!(corner & UP, 0, "a neighbour along y");
+
+        // The far corner: the mirror of it.
+        let far = edges[(h - 1) * d * w + (d - 1) * w + (w - 1)];
+        assert_eq!(far & EAST, 0);
+        assert_eq!(far & SOUTH, 0);
+        assert_eq!(far & UP, 0);
+        assert_ne!(far & WEST, 0);
+        assert_ne!(far & NORTH, 0);
+        assert_ne!(far & DOWN, 0);
+    }
+
+    /// The masks say the same thing as asking the region where a cell is.
+    ///
+    /// The masks are a way of not working out a cell's place three times over,
+    /// so they have to agree with the place the cell is in.
+    #[test]
+    fn the_masks_agree_with_where_the_cell_is() {
+        let (w, d, h) = (5usize, 4usize, 3usize);
+        let edges = edge_masks(w, d, h);
+        for y in 0..h {
+            for z in 0..d {
+                for x in 0..w {
+                    let cell = (y * d + z) * w + x;
+                    let e = edges[cell];
+                    assert_eq!(e & EAST != 0, x + 1 < w, "east at {x},{y},{z}");
+                    assert_eq!(e & WEST != 0, x > 0, "west at {x},{y},{z}");
+                    assert_eq!(e & UP != 0, y + 1 < h, "up at {x},{y},{z}");
+                    assert_eq!(e & DOWN != 0, y > 0, "down at {x},{y},{z}");
+                    assert_eq!(e & SOUTH != 0, z + 1 < d, "south at {x},{y},{z}");
+                    assert_eq!(e & NORTH != 0, z > 0, "north at {x},{y},{z}");
+                }
+            }
+        }
     }
 }

@@ -200,3 +200,47 @@ fn the_registry_contains_the_blocks_the_server_needs() {
         );
     }
 }
+
+/// The blocks that stop a player from breathing are the ones the game says.
+///
+/// The game asks whether a block is in the `causes_suffocation` tag, which is
+/// the blocks a player's head cannot be inside: stone and wood and wool, and
+/// not glass and not water and not leaves. A table that had water in it would
+/// drown a player who is swimming, and a table that had leaves in it would
+/// suffocate a player under a tree.
+#[test]
+fn the_blocks_that_stop_a_player_breathing_are_the_games_ones() {
+    let state_of = |name: &str| {
+        BLOCKS
+            .iter()
+            .find(|b| b.name == name)
+            .unwrap_or_else(|| panic!("{name} is missing from the registry"))
+            .default_state as i32
+    };
+
+    for stops in [
+        "minecraft:stone",
+        "minecraft:dirt",
+        "minecraft:oak_planks",
+        "minecraft:white_wool",
+        "minecraft:farmland",
+    ] {
+        assert!(
+            causes_suffocation(state_of(stops)),
+            "{stops} stops a player from breathing"
+        );
+    }
+
+    for does_not_stop in [
+        "minecraft:air",
+        "minecraft:water",
+        "minecraft:glass",
+        "minecraft:torch",
+        "minecraft:oak_leaves",
+    ] {
+        assert!(
+            !causes_suffocation(state_of(does_not_stop)),
+            "{does_not_stop} does not stop a player from breathing"
+        );
+    }
+}

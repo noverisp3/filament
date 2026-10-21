@@ -93,6 +93,15 @@ pub enum Command {
     },
     /// The state at a position, if the chunk holding it has been built.
     BlockAt { pos: BlockPos, reply: Sender<Option<i32>> },
+    /// The states at several positions, if the chunks holding them are built.
+    ///
+    /// One question asked of several places at once, because asking is a
+    /// round trip to the world's own thread and a player standing in lava
+    /// needs three of them answered together.
+    BlocksAt {
+        positions: Vec<BlockPos>,
+        reply: Sender<Vec<Option<i32>>>,
+    },
     /// The world's own block id at a position.
     ///
     /// Not the game's state id. Hardness is keyed by what the world calls a
@@ -301,6 +310,15 @@ impl WorldHandle {
     /// [`Self::block`].
     pub fn state_at(&self, pos: BlockPos) -> Option<Option<i32>> {
         self.ask(|reply| Command::BlockAt { pos, reply })
+    }
+
+    /// The states at several positions, if the chunks holding them exist.
+    ///
+    /// The same question asked of several places at once, because asking is a
+    /// round trip to the world's own thread and a player standing in lava
+    /// needs three of them answered together.
+    pub fn states_at(&self, positions: Vec<BlockPos>) -> Option<Vec<Option<i32>>> {
+        self.ask(|reply| Command::BlocksAt { positions, reply })
     }
 
     /// The world's own block id at a position, for anything keyed by block rather
@@ -758,6 +776,14 @@ Command::Chunk { pos, reply } => {
 
         Command::BlockAt { pos, reply } => {
             let _ = reply.send(state_at(world, pos));
+        }
+
+        Command::BlocksAt { positions, reply } => {
+            let states = positions
+                .iter()
+                .map(|pos| state_at(world, *pos))
+                .collect();
+            let _ = reply.send(states);
         }
 
         Command::WorldBlock { pos, reply } => {

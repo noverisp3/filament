@@ -18,6 +18,8 @@ pub mod damage {
     pub const IN_FIRE: i32 = 21;
     /// Being under water with no air left.
     pub const DROWN: i32 = 6;
+    /// Being inside a block with the head in it.
+    pub const IN_WALL: i32 = 22;
     /// Damage with no other name.
     pub const GENERIC: i32 = 18;
 }

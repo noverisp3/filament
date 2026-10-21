@@ -137,6 +137,45 @@ fn three_blocks_of_falling_are_free_and_the_rest_is_not() {
 }
 
 #[test]
+fn the_air_runs_out_under_water_and_comes_back_out_of_it() {
+    // The game's own numbers: three hundred ticks of air, which is fifteen
+    // seconds, and the damage starts when it is gone.
+    let mut air = MAX_AIR_SUPPLY;
+
+    // Out of the water, the air is full and stays full.
+    let (left, drowning) = breathe(air, false);
+    assert_eq!(left, MAX_AIR_SUPPLY, "a player in the air has all of it");
+    assert!(!drowning, "and is not drowning");
+    air = left;
+
+    // Under it, the air goes down a tick at a time.
+    for _ in 0..MAX_AIR_SUPPLY - 1 {
+        let (left, drowning) = breathe(air, true);
+        air = left;
+        assert!(!drowning, "there is air left while there is air left");
+    }
+    assert_eq!(air, 1, "one tick of air is left");
+
+    // And the last one is the one that drowns.
+    let (left, drowning) = breathe(air, true);
+    assert_eq!(left, 0, "the air is gone");
+    assert!(drowning, "and the player drowns");
+}
+
+#[test]
+fn coming_up_for_air_gives_the_air_back_quickly() {
+    // The game fills the air four ticks a tick, which is
+    // `Attributes.OXYGEN_BONUS` at its default.
+    let (left, drowning) = breathe(0, false);
+    assert_eq!(left, 4, "four ticks of air a tick");
+    assert!(!drowning);
+
+    // And it does not fill past the top.
+    let (left, _) = breathe(MAX_AIR_SUPPLY - 2, false);
+    assert_eq!(left, MAX_AIR_SUPPLY, "the air does not go past full");
+}
+
+#[test]
 fn a_flushed_buffer_does_not_send_its_contents_twice() {
     // `write_all` sends the bytes and leaves them where they were. A buffer
     // written twice therefore sends everything it held, twice, and the second

@@ -12,6 +12,8 @@ pub mod registry_data_s2c;
 pub mod update_enabled_features_s2c;
 pub mod update_tags_s2c;
 
+use crate::protocol::{DecodeError, VarInt};
+
 pub use client_information_c2s::ClientInformation;
 pub use custom_payload_s2c::write_brand;
 pub use finish_configuration_s2c::write_finish_configuration;
@@ -54,7 +56,10 @@ pub mod id {
 }
 
 /// Reads a serverbound configuration packet id and leaves the rest alone.
-pub fn read_packet_id(body: &[u8]) -> Result<i32, crate::protocol::DecodeError> {
+pub fn read_packet_id(body: &[u8]) -> Result<i32, DecodeError> {
     let mut r = body;
-    Ok(crate::protocol::VarInt::read(&mut r)?.0.0)
+    Ok(VarInt::read(&mut r)?.0.0)
 }
+
+#[cfg(test)]
+mod tests;

@@ -22,6 +22,8 @@ pub use login_compression_s2c::write_login_compression;
 pub use login_finished_s2c::write_login_finished;
 pub use uuid::Uuid;
 
+use crate::protocol::VarInt;
+
 /// Packet ids in the login state, read from `packets.json`.
 pub mod id {
     pub const LOGIN_DISCONNECT: i32 = 0;
@@ -44,3 +46,6 @@ pub mod id {
 /// replies with a key packet and waits for an encryption response, so sending
 /// it and then going quiet looks like the server hanging.
 pub const HELLO_WITH_PUBLIC_KEY: i32 = 1;
+
+#[cfg(test)]
+mod tests;

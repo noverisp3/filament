@@ -22,8 +22,6 @@ pub use login_compression_s2c::write_login_compression;
 pub use login_finished_s2c::write_login_finished;
 pub use uuid::Uuid;
 
-use crate::protocol::VarInt;
-
 /// Packet ids in the login state, read from `packets.json`.
 pub mod id {
     pub const LOGIN_DISCONNECT: i32 = 0;

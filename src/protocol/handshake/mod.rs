@@ -12,7 +12,5 @@ pub mod intention_c2s;
 
 pub use intention_c2s::{ClientIntent, ClientIntention, HANDSHAKE_INTENTION_ID, MAX_HOST_LENGTH};
 
-use crate::protocol::VarInt;
-
 #[cfg(test)]
 mod tests;

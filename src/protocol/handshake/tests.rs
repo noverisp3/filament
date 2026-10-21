@@ -1,4 +1,5 @@
 use super::*;
+use crate::protocol::VarInt;
 
 #[test]
 fn an_intention_packet_round_trips() {

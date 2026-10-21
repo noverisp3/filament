@@ -9,7 +9,7 @@ use crate::protocol::VarInt;
 /// whole difficulty of this packet: the enum has exactly eight members, so the
 /// mask that selects them is **one byte**, and getting an ordinal wrong does
 /// not fail here, it fails on the client.
-pub(crate) mod action {
+pub mod action {
     /// A name and the properties of its profile.
     pub const ADD_PLAYER: u8 = 0;
     /// A game mode index.

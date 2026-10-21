@@ -1,4 +1,5 @@
 use super::*;
+use crate::protocol::VarInt;
 
 #[test]
 fn an_offline_uuid_is_stable_for_a_name() {

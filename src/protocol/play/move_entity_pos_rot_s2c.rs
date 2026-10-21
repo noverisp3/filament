@@ -9,7 +9,7 @@ use crate::protocol::VarInt;
 /// From the game's own codec, which rounds on the way out and divides on the
 /// way back in. That is finer than a block, so a slow walk is a delta of a few
 /// hundred rather than of zero.
-pub(crate) const DELTA_SCALE: f64 = 4096.0;
+pub const DELTA_SCALE: f64 = 4096.0;
 
 /// The largest movement a delta can express, in blocks.
 ///

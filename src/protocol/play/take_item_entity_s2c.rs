@@ -3,7 +3,6 @@
 use super::id;
 use crate::protocol::VarInt;
 
-/// The packet id of `take_item_entity`.
 pub const TAKE_ITEM_ENTITY: i32 = id::TAKE_ITEM_ENTITY;
 
 /// Writes a `take_item_entity`: the item went to the player.

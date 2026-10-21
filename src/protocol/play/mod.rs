@@ -14,7 +14,7 @@
 //! at all, while the wire bytes show a dimension key, a seed and a game type:
 //! the position arrives afterwards, in `ClientboundPlayerPositionPacket`.
 
-use crate::protocol::{DecodeError, VarInt, VarLong};
+use crate::protocol::{DecodeError, VarInt};
 
 pub mod add_entity_s2c;
 pub mod block_changed_ack_s2c;
@@ -80,13 +80,12 @@ pub use keep_alive_s2c::write_keep_alive;
 pub use level_event_s2c::{write_level_event, BLOCK_DESTROYED, BLOCK_DESTROYED_QUIET};
 pub use login_s2c::{write_login, Login};
 pub use move_entity_pos_rot_s2c::write_move_entity_pos_rot;
-pub(crate) use move_entity_pos_rot_s2c::{DELTA_SCALE, MAX_DELTA_BLOCKS};
 pub use movement_c2s::{ClientMovement, Movement};
 pub use player_abilities_s2c::write_player_abilities;
 pub use player_action_c2s::{PlayerAction, PlayerActionPacket};
 pub use player_combat_kill_s2c::write_player_combat_kill;
 pub use player_info_add_s2c::write_player_info_add;
-pub(crate) use player_info_add_s2c::action;
+pub use player_info_add_s2c::action;
 pub use player_info_remove_s2c::write_player_info_remove;
 pub use player_position_s2c::write_player_position;
 pub use pong_response_s2c::write_pong_response;
@@ -103,8 +102,6 @@ pub use spawn_info::SpawnInfo;
 pub use swing_animation_s2c::{write_swing_animation, MAIN_HAND, OFF_HAND, SWING_DURATION, SWING_WHACK};
 pub use system_chat_s2c::write_system_chat;
 pub use take_item_entity_s2c::write_take_item_entity;
-pub(crate) use initialize_border_s2c::MAX_BORDER;
-pub(crate) use take_item_entity_s2c::TAKE_ITEM_ENTITY;
 
 /// The damage types the game has, by the id the client was told.
 pub use damage_event_s2c::damage;

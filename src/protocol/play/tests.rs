@@ -1,5 +1,10 @@
 use super::*;
 use crate::protocol::item::ItemStack;
+use crate::protocol::VarInt;
+use crate::protocol::play::action;
+use crate::protocol::play::initialize_border_s2c::MAX_BORDER;
+use crate::protocol::play::move_entity_pos_rot_s2c::{DELTA_SCALE, MAX_DELTA_BLOCKS};
+use crate::protocol::play::take_item_entity_s2c::TAKE_ITEM_ENTITY;
 
 /// Reads a VarInt out of a body, for tests that care what a packet says.
 fn take_varint(b: &mut &[u8]) -> i32 {

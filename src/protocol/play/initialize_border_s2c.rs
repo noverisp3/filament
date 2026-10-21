@@ -7,7 +7,7 @@ use crate::protocol::{VarInt, VarLong};
 ///
 /// 59_999_968 is the value a stock server sends. Any centre works when the size
 /// is zero, but matching the capture keeps the packet byte-identical.
-pub(crate) const MAX_BORDER: f64 = 59_999_968.0;
+pub const MAX_BORDER: f64 = 59_999_968.0;
 
 /// Writes `ClientboundInitializeBorderPacket`.
 ///
